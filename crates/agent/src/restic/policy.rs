@@ -38,6 +38,13 @@ pub(super) async fn snapshots(
     .restic(&["snapshots", "--json"], SHORT_TIMEOUT, false, ctx)
     .await?;
   if out.code == Some(NO_REPO) {
+    let stderr = out.stderr.to_ascii_lowercase();
+    if stderr.contains("401") || stderr.contains("unauthorized") {
+      return Err(ApiError::new(
+        ErrorCode::AgentFailed,
+        "备份服务器 HTTP 认证失败（401）",
+      ));
+    }
     return Ok(Vec::new());
   }
   if out.code == Some(WRONG_PASSWORD) {

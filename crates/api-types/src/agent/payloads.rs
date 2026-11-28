@@ -183,6 +183,23 @@ impl std::fmt::Debug for OneTimeSecret {
   }
 }
 
+#[derive(
+  Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncKind {
+  #[default]
+  ServiceData,
+  BackupRepo,
+  CoreBackupRepo,
+}
+
+impl SyncKind {
+  pub fn is_service_data(&self) -> bool {
+    *self == Self::ServiceData
+  }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncServe {
   pub service: String,
@@ -193,6 +210,13 @@ pub struct SyncServe {
   pub password: OneTimeSecret,
   #[serde(default)]
   pub preserve_existing: bool,
+  #[serde(
+    default,
+    skip_serializing_if = "SyncKind::is_service_data"
+  )]
+  pub kind: SyncKind,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub require_empty: bool,
 }
 
 #[derive(
@@ -213,6 +237,11 @@ pub struct SyncPush {
   pub password: OneTimeSecret,
   #[serde(default)]
   pub pass: SyncPass,
+  #[serde(
+    default,
+    skip_serializing_if = "SyncKind::is_service_data"
+  )]
+  pub kind: SyncKind,
 }
 
 /// restic 操作，在 restic 容器里执行。结果见 [ResticAction] 各项说明。
@@ -267,6 +296,7 @@ pub enum ResticRepo {
   },
   /// 本机上 rest-server 的数据目录 `/srv/wharf-backup/<service>`，用来清理旧快照。
   Local,
+  LocalCore,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -284,6 +314,8 @@ pub enum ResticAction {
   },
   /// 列出快照，结果是 `Vec<Snapshot>`。
   Snapshots,
+  /// 检查本机仓库目录是否有数据，无需知道目标仓库的口令。
+  RepoNonempty,
   /// 恢复快照到 `/srv/<service>/`，原来的目录改名保留。结果是保留目录的路径。
   Restore {
     snapshot: String,

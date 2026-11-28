@@ -95,6 +95,25 @@ fn walk(
     if command == "service env sync" {
       entry["import_perms"] = json!(["admin"]);
     }
+    match command.as_str() {
+      "backup core" => {
+        entry["returns_by_flag"] = json!({
+          "--verify-password":"core_backup_verify", "--export":"core_backup_export"
+        });
+        entry["perms_by_flag"] = json!({
+          "--verify-password":["admin"], "--export":["admin"], "--to":["admin"],
+          "--unlock":["admin"], "--run":["apply"]
+        });
+      }
+      "backup move" => {
+        entry["returns_by_flag"] = json!({
+          "--dry-run":"backup_move_preview", "--abort":"backup_move_abort", "--no-wait":"apply_response"
+        });
+        entry["perms_by_flag"] =
+          json!({"--core":["admin"], "--confirm":["confirm"]});
+      }
+      _ => {}
+    }
     out.push(entry);
   }
   for s in subs {
@@ -322,6 +341,7 @@ fn returns(command: &str) -> Option<&'static str> {
     "alert list" => "alerts",
     "task ls" | "task show" => "task",
     "task logs" => "task_run",
+    "backup move" => "run",
     "exec" => "host_exec",
     "service exec" => "service_exec",
     "service render" => "service_render",
@@ -429,6 +449,17 @@ pub fn commands(prefix: &[String]) -> Value {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn backup_move_declares_wait_and_no_wait_results() {
+    let v = super::commands(&["backup".into(), "move".into()]);
+    let command = &v["commands"][0];
+    assert_eq!(command["returns"], "run");
+    assert_eq!(
+      command["returns_by_flag"]["--no-wait"],
+      "apply_response"
+    );
+  }
+
   #[test]
   fn usable_keeps_ping_task_edits_with_apply_permission() {
     use serde_json::json;

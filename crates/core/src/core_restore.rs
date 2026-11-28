@@ -1,5 +1,6 @@
 use std::{
   fs::{self, File},
+  io::{self, IsTerminal, Read},
   os::unix::fs::{DirBuilderExt, PermissionsExt},
   path::{Path, PathBuf},
   process::Stdio,
@@ -12,7 +13,11 @@ use wharf_api_types::{
   agent::{CORE_BACKUP_DIR, CORE_REST_SERVER_PORT},
 };
 
-use crate::{backup, db, db_snapshot};
+use crate::{
+  backup,
+  core_export::{decrypt_to_staging, open_regular},
+  db, db_snapshot,
+};
 
 const REQUIRED: [&str; 3] =
   ["wharf.db", "core.key", db::CREDENTIALS_KEY_FILE];
@@ -20,15 +25,22 @@ const OPTIONAL: [&str; 2] = ["core.key.prev", "admin.token"];
 
 #[derive(clap::Args)]
 pub struct Args {
-  #[arg(long)]
-  from: String,
   #[arg(
     long,
-    required_unless_present = "recovery_key",
+    required_unless_present = "file",
+    conflicts_with = "file"
+  )]
+  from: Option<String>,
+  #[arg(long, conflicts_with_all = ["user", "recovery_key", "snapshot", "restic_bin"])]
+  file: Option<PathBuf>,
+  #[arg(
+    long,
+    requires = "from",
+    required_unless_present_any = ["recovery_key", "file"],
     conflicts_with = "recovery_key"
   )]
   user: Option<String>,
-  #[arg(long)]
+  #[arg(long, requires = "from")]
   recovery_key: Option<PathBuf>,
   #[arg(long, default_value = "latest")]
   snapshot: String,
@@ -128,7 +140,6 @@ fn parse_recovery_env(text: &str) -> Result<[String; 3], ApiError> {
 }
 
 fn verify(stage: &Path) -> Result<Vec<String>, ApiError> {
-  let mut files = Vec::new();
   for entry in fs::read_dir(stage).map_err(io_error)? {
     let entry = entry.map_err(io_error)?;
     let name = entry.file_name();
@@ -150,51 +161,9 @@ fn verify(stage: &Path) -> Result<Vec<String>, ApiError> {
         .set_permissions(fs::Permissions::from_mode(0o600))
         .map_err(io_error)?;
       file.sync_all().map_err(io_error)?;
-      files.push(name.to_owned());
     }
   }
-  if !REQUIRED.iter().all(|name| files.iter().any(|f| f == name)) {
-    return Err(ApiError::invalid("快照缺少数据库或密钥"));
-  }
-  for name in ["core.key", "core.key.prev"] {
-    if !files.iter().any(|f| f == name) {
-      continue;
-    }
-    let key =
-      fs::read_to_string(stage.join(name)).map_err(io_error)?;
-    if key.trim().len() != 64
-      || !key.trim().bytes().all(|b| b.is_ascii_hexdigit())
-    {
-      return Err(ApiError::invalid("控制面签名密钥格式错误"));
-    }
-  }
-  if fs::metadata(stage.join(db::CREDENTIALS_KEY_FILE))
-    .map_err(io_error)?
-    .len()
-    != 32
-  {
-    return Err(ApiError::invalid("控制面主密钥格式错误"));
-  }
-  let c = Connection::open_with_flags(
-    stage.join("wharf.db"),
-    OpenFlags::SQLITE_OPEN_READ_ONLY,
-  )
-  .map_err(|_| ApiError::invalid("快照数据库无法读取"))?;
-  let bad_db = |_| ApiError::invalid("快照数据库完整性校验失败");
-  let check: String = c
-    .query_row("PRAGMA integrity_check(1)", [], |r| r.get(0))
-    .map_err(bad_db)?;
-  let version: usize = c
-    .query_row("PRAGMA user_version", [], |r| r.get(0))
-    .map_err(bad_db)?;
-  if check != "ok" || version > db::SCHEMA_VERSION {
-    return Err(ApiError::invalid("快照数据库损坏或版本过高"));
-  }
-  db::verify_snapshot_decryptable(
-    &c,
-    &stage.join(db::CREDENTIALS_KEY_FILE),
-  )?;
-  Ok(files)
+  validate_staging(stage)
 }
 
 fn install(
@@ -279,8 +248,142 @@ fn confirm_restore() -> ApiError {
   )
 }
 
+fn restore_from_file(
+  data_dir: &Path,
+  file: &Path,
+  yes: bool,
+) -> Result<(), ApiError> {
+  restore(data_dir, file, yes, || {
+    let password = if io::stdin().is_terminal() {
+      rpassword::prompt_password(
+        "解密密码（导出时的控制面登录密码）：",
+      )
+      .map_err(io_error)?
+    } else {
+      let mut line = String::new();
+      io::stdin().read_line(&mut line).map_err(io_error)?;
+      line.trim_end_matches(['\r', '\n']).to_owned()
+    };
+    if password.is_empty() {
+      return Err(ApiError::invalid("没有读到解密密码"));
+    }
+    Ok(password)
+  })
+}
+
+pub(crate) fn restore(
+  data_dir: &Path,
+  file: &Path,
+  yes: bool,
+  password: impl FnOnce() -> Result<String, ApiError>,
+) -> Result<(), ApiError> {
+  fs::create_dir_all(data_dir).map_err(io_error)?;
+  let _process = db_snapshot::process_lock(data_dir, true)?;
+  let _sqlite = db_snapshot::lock_sqlite(&data_dir.join("wharf.db"))?;
+  let mut existing = false;
+  for name in REQUIRED.into_iter().chain(OPTIONAL).chain([
+    "wharf.db-wal",
+    "wharf.db-shm",
+    "wharf.db-journal",
+  ]) {
+    match fs::symlink_metadata(data_dir.join(name)) {
+      Ok(m) if m.is_file() => existing = true,
+      Ok(_) => {
+        return Err(ApiError::invalid(
+          "数据目录中的控制面文件必须是普通文件",
+        ));
+      }
+      Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+      Err(e) => return Err(io_error(e)),
+    }
+  }
+  if existing && !yes {
+    return Err(
+      ApiError::new(
+        ErrorCode::ConfirmRequired,
+        "恢复会先归档现有控制面文件",
+      )
+      .with_hint("确认后添加 --yes"),
+    );
+  }
+  let password = password()?;
+  let stage = Stage(private_dir(data_dir, ".wharf-core-restore-")?);
+  decrypt_to_staging(file, &password, &stage.0)?;
+  let files = validate_staging(&stage.0)?;
+  install(data_dir, &stage.0, &files, yes)?;
+  println!(
+    "已恢复控制面灾备包。请以 WHARF_SAFE_MODE=1 启动，核对状态后执行 wharf core resume。"
+  );
+  Ok(())
+}
+
+pub(crate) fn validate_staging(
+  stage: &Path,
+) -> Result<Vec<String>, ApiError> {
+  let mut files = Vec::new();
+  for name in REQUIRED.into_iter().chain(OPTIONAL) {
+    match open_regular(&stage.join(name)) {
+      Ok(file) => {
+        if name == "secrets.key"
+          && file.metadata().map_err(io_error)?.len() != 32
+        {
+          return Err(ApiError::invalid("凭据主密钥格式无效"));
+        }
+        files.push(name.to_owned());
+      }
+      Err(e)
+        if e.kind() == io::ErrorKind::NotFound
+          && OPTIONAL.contains(&name) => {}
+      Err(_) => {
+        return Err(ApiError::invalid(format!(
+          "灾备包缺少有效的 {name}"
+        )));
+      }
+    }
+  }
+  for name in files.iter().filter(|name| name.starts_with("core.key"))
+  {
+    let mut key = String::new();
+    let mut file =
+      open_regular(&stage.join(name)).map_err(io_error)?;
+    if file.metadata().map_err(io_error)?.len() > 65 {
+      return Err(ApiError::invalid("控制面签名密钥格式无效"));
+    }
+    file.read_to_string(&mut key).map_err(io_error)?;
+    let key = key.trim();
+    if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+      return Err(ApiError::invalid("控制面签名密钥格式无效"));
+    }
+  }
+  let c = Connection::open_with_flags(
+    stage.join("wharf.db"),
+    OpenFlags::SQLITE_OPEN_READ_ONLY,
+  )
+  .map_err(|_| ApiError::invalid("灾备包数据库无法打开"))?;
+  let check: String = c
+    .query_row("PRAGMA integrity_check(1)", [], |r| r.get(0))
+    .map_err(|_| ApiError::invalid("数据库完整性校验失败"))?;
+  if check != "ok"
+    || db_snapshot::schema_version(&c)? > db::SCHEMA_VERSION
+  {
+    return Err(ApiError::invalid(
+      "灾备包数据库损坏或 schema 版本过新",
+    ));
+  }
+  db::verify_snapshot_decryptable(&c, &stage.join("secrets.key"))?;
+  Ok(files)
+}
+
 pub async fn run(data: &Path, args: &Args) -> Result<(), ApiError> {
-  let repo = repo(&args.from)?;
+  if let Some(file) = &args.file {
+    return restore_from_file(data, file, args.yes);
+  }
+  let from = args
+    .from
+    .as_deref()
+    .ok_or_else(|| ApiError::invalid("请提供 --from 或 --file"))?;
+  let repo = repo(from)?;
   wharf_api_types::backup::validate_snapshot_id(&args.snapshot)?;
   fs::create_dir_all(data).map_err(io_error)?;
   let _process = db_snapshot::process_lock(data, true)?;

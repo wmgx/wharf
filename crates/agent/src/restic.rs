@@ -15,10 +15,10 @@ use serde_json::Value;
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
-    BACKUP_ROOT, BackupSummary, CORE_BACKUP_DIR, EscapedMount,
-    RESTIC_IMAGE, ResticAction, ResticJob, ResticKeyInfo,
-    ResticPreflight, ResticPreflightMode, ResticPreflightResult,
-    ResticRepo, Snapshot,
+    BACKUP_ROOT, BackupSummary, CORE_BACKUP_DIR, CORE_BACKUP_ROOT,
+    EscapedMount, RESTIC_IMAGE, ResticAction, ResticJob,
+    ResticKeyInfo, ResticPreflight, ResticPreflightMode,
+    ResticPreflightResult, ResticRepo, Snapshot,
   },
   backup::{
     KEEP_TAG, NOTE_TAG_PREFIX, RESTIC_DUMP_TIMEOUT,
@@ -305,21 +305,39 @@ pub async fn run(
       port,
       user,
       password,
-    } => (
-      rest_url(host, *port, &job.service)?,
-      vec![],
-      Some((user.as_str(), password.0.as_str())),
-    ),
-    ResticRepo::Local => {
-      let dir = Path::new(BACKUP_ROOT).join(&job.service);
-      match DirFd::open_service_root(
-        Path::new(BACKUP_ROOT),
-        &job.service,
-      ) {
+    } => {
+      if matches!(job.action, ResticAction::RepoNonempty) {
+        return Err(ApiError::invalid("只可检查本机仓库目录"));
+      }
+      (
+        rest_url(host, *port, &job.service)?,
+        vec![],
+        Some((user.as_str(), password.0.as_str())),
+      )
+    }
+    ResticRepo::Local | ResticRepo::LocalCore => {
+      let base = if matches!(job.repo, ResticRepo::LocalCore) {
+        if job.service != "wharf-core"
+          || !matches!(
+            job.action,
+            ResticAction::Snapshots
+              | ResticAction::ListKeys
+              | ResticAction::RepoNonempty
+          )
+        {
+          return Err(ApiError::invalid("控制面本地仓库只支持查看"));
+        }
+        CORE_BACKUP_ROOT
+      } else {
+        BACKUP_ROOT
+      };
+      let dir = Path::new(base).join(&job.service);
+      match DirFd::open_service_root(Path::new(base), &job.service) {
         Ok(_) => {}
         Err(e) if e.code == ErrorCode::NotFound => {
           ctx.say("这台机器上还没有这个服务的备份");
           return match job.action {
+            ResticAction::RepoNonempty => to_value(false),
             ResticAction::Snapshots => {
               to_value(Vec::<Snapshot>::new())
             }
@@ -335,6 +353,14 @@ pub async fn run(
           };
         }
         Err(e) => return Err(e),
+      }
+      if matches!(job.action, ResticAction::RepoNonempty) {
+        let entry = std::fs::read_dir(&dir)
+          .map_err(io_err(&dir))?
+          .next()
+          .transpose()
+          .map_err(io_err(&dir))?;
+        return to_value(entry.is_some());
       }
       (
         "/repo".to_string(),
@@ -558,6 +584,9 @@ pub async fn run(
       Ok(Value::Null)
     }
     ResticAction::ListKeys => to_value(list_keys(&j, ctx).await?),
+    ResticAction::RepoNonempty => {
+      unreachable!("已在打开本机仓库时返回")
+    }
     ResticAction::Restore { snapshot } => {
       if job.core_marker.is_some() {
         return Err(ApiError::invalid(

@@ -29,6 +29,11 @@ pub(super) fn encode(
 pub(super) fn step_services(step: &Step) -> Vec<String> {
   match step {
     Step::Backup { service, .. }
+    | Step::BackupMove {
+      service,
+      is_core: false,
+      ..
+    }
     | Step::Restore { service, .. }
     | Step::Rebuild { service }
     | Step::ServiceRestart { service, .. }

@@ -58,10 +58,10 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub(crate) const RESTIC_TIMEOUT: Duration =
   Duration::from_secs(6 * 3600);
 const SERVER_TIMEOUT: Duration = Duration::from_secs(20 * 60);
-const LIST_TIMEOUT: Duration = Duration::from_secs(3 * 60);
+pub(crate) const LIST_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 
-struct ServiceCreds {
-  key: String,
+pub(crate) struct ServiceCreds {
+  pub(crate) key: String,
   http: String,
 }
 
@@ -71,7 +71,7 @@ pub(crate) fn random_hex() -> String {
   hex::encode(bytes)
 }
 
-async fn ensure_service_creds(
+pub(crate) async fn ensure_service_creds(
   state: &AppState,
   service: &str,
 ) -> Result<ServiceCreds, ApiError> {
@@ -399,7 +399,7 @@ async fn target_htpasswd(
   Ok(htpasswd)
 }
 
-async fn ensure_server(
+pub(crate) async fn ensure_server(
   state: &AppState,
   snap: &Snap,
   w: &Where,
@@ -1292,6 +1292,11 @@ pub async fn list(
   Ok(Json(BackupsView {
     exclude: policy.map(|p| p.exclude.clone()).unwrap_or_default(),
     retention: policy.and_then(|p| p.retention),
+    pending_move: snap
+      .pending
+      .backup_moves
+      .get(&name)
+      .map(|p| p.status.clone()),
     service: name,
     target,
     snapshot_target: repo_target,
@@ -1301,7 +1306,7 @@ pub async fn list(
   }))
 }
 
-async fn repository_secrets(
+pub(crate) async fn repository_secrets(
   state: &AppState,
   service: &str,
 ) -> Result<(Option<String>, Option<String>), ApiError> {
@@ -1357,7 +1362,7 @@ async fn local_call<T: serde::de::DeserializeOwned>(
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
-enum MigrationStatus {
+pub(crate) enum MigrationStatus {
   Migrated,
   AlreadyOk,
   NoRepo,
@@ -1365,7 +1370,7 @@ enum MigrationStatus {
   Failed,
 }
 
-async fn ensure_repo_has_service_key(
+pub(crate) async fn ensure_repo_has_service_key(
   state: &AppState,
   snap: &Snap,
   repo: (&str, &str),

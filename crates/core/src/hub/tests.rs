@@ -41,6 +41,7 @@ fn old_hello_has_no_host_shell_capability() {
     safe_adopt,
     safe_migrate,
     safe_backup,
+    backup_move,
     backup_v2,
     build_v2,
     safe_rollback,
@@ -70,6 +71,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!safe_adopt);
   assert!(!safe_migrate);
   assert!(!safe_backup);
+  assert!(!backup_move);
   assert!(!backup_v2);
   assert!(!build_v2);
   assert!(!safe_rollback);
@@ -127,6 +129,7 @@ fn old_core_ignores_new_hello_capability() {
     safe_adopt: false,
     safe_migrate: true,
     safe_backup: true,
+    backup_move: false,
     backup_v2: false,
     build_v2: true,
     deploy_v2: false,
@@ -166,6 +169,24 @@ impl Hub {
 
   pub(crate) fn enable_mock_host_shell(&self, server: &str) {
     lock(&self.conns).get_mut(server).unwrap().host_shell = true;
+  }
+
+  pub(crate) fn mock_backup_move_agent(
+    &self,
+    server: &str,
+    handle: impl FnMut(
+      AgentOp,
+      Option<ProgressFn>,
+    ) -> Option<Result<Value, ApiError>>
+    + Send
+    + 'static,
+  ) {
+    self
+      .mock_agent_options(server, false, true, false, false, handle);
+    let mut all = lock(&self.conns);
+    let conn = all.get_mut(server).unwrap();
+    conn.safe_backup = true;
+    conn.backup_move = true;
   }
 
   pub(crate) fn enable_mock_backup_v2(&self, server: &str) {
@@ -349,6 +370,7 @@ impl Hub {
         safe_adopt: false,
         safe_migrate: false,
         safe_backup: false,
+        backup_move: false,
         backup_v2: false,
         build_v2: false,
         deploy_v2: false,
@@ -499,6 +521,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     safe_adopt: false,
     safe_migrate: false,
     safe_backup: false,
+    backup_move: false,
     backup_v2: false,
     build_v2: false,
     deploy_v2: false,
@@ -575,6 +598,7 @@ fn probe_connection(
     safe_adopt: false,
     safe_migrate: false,
     safe_backup: false,
+    backup_move: false,
     backup_v2: false,
     build_v2: false,
     deploy_v2: false,
@@ -909,4 +933,66 @@ async fn backfill_ingests_without_clock_skew_and_rejects_duplicate_or_foreign_sa
     Ok(())
   }).await.unwrap();
   assert!(crate::rules::firing_subjects("clock_skew").is_empty());
+}
+
+#[tokio::test]
+async fn backup_move_blocks_old_agent_and_keeps_service_sync_compat()
+{
+  use wharf_api_types::agent::{
+    OneTimeSecret, ResticAction, ResticJob, ResticRepo, SyncKind,
+    SyncPass, SyncPush, SyncServe,
+  };
+  let hub = Hub::default();
+  hub.mock_agent("s1", false, |_| panic!("旧 agent 不应收到新操作"));
+  let serve = SyncServe {
+    service: "app".into(),
+    bind: "100.64.0.1".into(),
+    allow: "100.64.0.2".into(),
+    password: OneTimeSecret(String::new()),
+    preserve_existing: false,
+    require_empty: false,
+    kind: SyncKind::ServiceData,
+  };
+  let serialized = serde_json::to_value(&serve).unwrap();
+  assert!(
+    serialized.get("kind").is_none()
+      && serialized.get("require_empty").is_none()
+  );
+  let cancel = CancellationToken::new();
+  for op in [
+    AgentOp::SyncServe(SyncServe {
+      kind: SyncKind::BackupRepo,
+      ..serve
+    }),
+    AgentOp::SyncPush(SyncPush {
+      service: "wharf-core".into(),
+      host: "100.64.0.2".into(),
+      port: 1000,
+      password: OneTimeSecret(String::new()),
+      pass: SyncPass::Final,
+      kind: SyncKind::CoreBackupRepo,
+    }),
+    AgentOp::Restic(ResticJob {
+      service: "wharf-core".into(),
+      core_marker: None,
+      repo: ResticRepo::LocalCore,
+      password: OneTimeSecret(String::new()),
+      action: ResticAction::Snapshots,
+      pull: wharf_api_types::agent::PullPolicy {
+        mirrors: Default::default(),
+        mirrors_only: false,
+        attempt_timeout_secs: 10,
+        git_proxy: None,
+        github_mirror: None,
+        registry_proxy: None,
+      },
+    }),
+  ] {
+    let error = hub
+      .call::<Value>("s1", op, Duration::from_secs(1), None, &cancel)
+      .await
+      .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert_eq!(error.suggest, ["wharf upgrade"]);
+  }
 }

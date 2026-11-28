@@ -177,6 +177,8 @@ pub enum AgentMsg {
     safe_migrate: bool,
     #[serde(default)]
     safe_backup: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    backup_move: bool,
     #[serde(default)]
     backup_v2: bool,
     #[serde(default)]

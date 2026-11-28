@@ -58,7 +58,8 @@ fn is_backup_candidate(
   online: impl Fn(&str) -> bool,
 ) -> bool {
   row.spec.backup.as_ref().is_some_and(|backup| {
-    snap.deployed.contains_key(name)
+    !snap.pending.backup_moves.contains_key(name)
+      && snap.deployed.contains_key(name)
       && snapshot::service_runtime_server(snap, name)
         .is_some_and(&online)
       && online(&backup.to)
@@ -164,13 +165,10 @@ async fn backups(state: &Arc<AppState>) -> Result<(), ApiError> {
     let repo = crate::core_backup::REPO;
     let h = history.get(&(repo.to_string(), target.clone()));
     let empty = crate::data::repo_verified_empty(
-      state,
-      &snap,
-      &target,
-      repo,
-      h.and_then(|h| h.ok),
+      state, &snap, &target, repo, h,
     );
-    if state.hub.is_online(&target)
+    if !snap.pending.backup_moves.contains_key(repo)
+      && state.hub.is_online(&target)
       && crate::core_node::server_of(&snap)
         .is_some_and(|name| state.hub.is_online(&name))
       && due(h, empty, now)
@@ -226,7 +224,7 @@ async fn backups(state: &Arc<AppState>) -> Result<(), ApiError> {
     let h = history.get(&(name.clone(), backup.to.clone()));
     let ok = h.and_then(|h| h.ok);
     let empty = crate::data::repo_verified_empty(
-      state, &snap, &backup.to, name, ok,
+      state, &snap, &backup.to, name, h,
     );
     if due(h, empty, now) {
       candidates.push((ok.filter(|_| !empty), name));

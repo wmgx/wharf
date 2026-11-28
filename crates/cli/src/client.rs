@@ -335,6 +335,13 @@ fn local_http() -> CliResult<reqwest::Client> {
     .map_err(|e| ApiError::internal(e.to_string()).into())
 }
 
+pub(crate) struct DownloadMeta {
+  pub filename: Option<String>,
+  pub size: u64,
+  pub sha256: String,
+  pub format: String,
+}
+
 pub struct Client {
   http: reqwest::Client,
   /// 控制面地址，只用于提示。
@@ -618,6 +625,96 @@ impl Client {
       );
     }
     Ok(())
+  }
+
+  pub(crate) async fn post_download(
+    &self,
+    path: &str,
+    body: &impl Serialize,
+    timeout: Duration,
+    mut on_chunk: impl FnMut(&[u8]) -> io::Result<()>,
+  ) -> CliResult<DownloadMeta> {
+    use sha2::{Digest, Sha256};
+    let req = self
+      .http
+      .post(format!("{}{path}", self.endpoint))
+      .json(body)
+      .timeout(timeout);
+    let req = match &self.token {
+      Some(token) => req.bearer_auth(token),
+      None => req,
+    };
+    let mut response =
+      req.send().await.map_err(|e| self.conn_error(e))?;
+    if !response.status().is_success() {
+      let status = response.status();
+      let bytes = response.bytes().await.unwrap_or_default();
+      return Err(
+        serde_json::from_slice::<ApiError>(&bytes)
+          .unwrap_or_else(|_| {
+            ApiError::internal(format!("导出失败：HTTP {status}"))
+          })
+          .into(),
+      );
+    }
+    let missing = || ApiError::internal("导出响应缺少文件校验信息");
+    let header = |name| {
+      response
+        .headers()
+        .get(name)
+        .and_then(|h| h.to_str().ok())
+        .map(str::to_owned)
+        .ok_or_else(missing)
+    };
+    let size = response.content_length().ok_or_else(missing)?;
+    let sha256 = header("x-wharf-file-sha256")?;
+    let format = header("x-wharf-export-format")?;
+    let filename =
+      header("content-disposition").ok().and_then(|value| {
+        value
+          .strip_prefix("attachment; filename=\"")
+          .and_then(|name| name.strip_suffix('"'))
+          .filter(|name| {
+            name.starts_with("wharf-core-")
+              && name.ends_with(".wharf-core.enc")
+              && name.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')
+              })
+          })
+          .map(str::to_owned)
+      });
+    if format != "wharf-core-export-v1"
+      || sha256.len() != 64
+      || !sha256.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+      return Err(
+        ApiError::invalid("导出文件格式或 SHA-256 无效").into(),
+      );
+    }
+    let mut received = 0;
+    let mut digest = Sha256::new();
+    while let Some(chunk) =
+      response.chunk().await.map_err(|e| self.conn_error(e))?
+    {
+      received += chunk.len() as u64;
+      if received > size {
+        return Err(ApiError::internal("导出文件长度不符").into());
+      }
+      digest.update(&chunk);
+      on_chunk(&chunk)
+        .map_err(|e| ApiError::internal(format!("写入失败：{e}")))?;
+    }
+    if received != size || hex::encode(digest.finalize()) != sha256 {
+      return Err(
+        ApiError::internal("导出文件长度或 SHA-256 校验失败").into(),
+      );
+    }
+    Ok(DownloadMeta {
+      filename,
+      size,
+      sha256,
+      format,
+    })
   }
 
   pub(crate) async fn require_exec_v2_core(&self) -> CliResult<()> {
