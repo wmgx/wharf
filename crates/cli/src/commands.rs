@@ -388,7 +388,7 @@ async fn dispatch(
       service(c, cmd, j).await
     }
     Command::Data { cmd: Some(cmd) } => {
-      Box::pin(crate::data_sync::run(c, cmd, j)).await
+      crate::data_sync::run(c, cmd, j).await
     }
     Command::Data { cmd: None } => {
       let v: DataView = c.get("/api/data").await?;
@@ -744,7 +744,7 @@ async fn dispatch(
     Command::Server(cmd) => server(c, cmd, j).await,
     Command::Top(args) => crate::top::run(c, args, j).await,
     Command::Report(args) => crate::report::run(c, args, j).await,
-    Command::Service(cmd) => Box::pin(service(c, cmd, j)).await,
+    Command::Service(cmd) => service(c, cmd, j).await,
     Command::Gateway(cmd) => gateway(c, cmd, j).await,
     Command::Route(cmd) => route(c, cmd, j).await,
     Command::Account(cmd) => account(c, cmd, j).await,
@@ -830,9 +830,7 @@ async fn dispatch(
       .await
     }
     Command::Run(cmd) => run_cmd(c, cmd, j).await,
-    Command::Import(args) => {
-      Box::pin(crate::bundle::import(c, args, j)).await
-    }
+    Command::Import(args) => crate::bundle::import(c, args, j).await,
     Command::Export {
       output,
       service,
@@ -1028,8 +1026,7 @@ async fn plan_output(
       }
     }
   }
-  Box::pin(finish_prepared_plan(c, plan, flags, j, detected, None))
-    .await
+  finish_prepared_plan(c, plan, flags, j, detected, None).await
 }
 
 pub(crate) async fn apply_prepared_plan(
@@ -2895,7 +2892,7 @@ async fn service(
           &req,
         )
         .await?;
-      Box::pin(apply_prepared_plan(c, plan, apply, j, context)).await
+      apply_prepared_plan(c, plan, apply, j, context).await
     }
     ServiceCmd::Update { name, image, apply } => {
       changes(

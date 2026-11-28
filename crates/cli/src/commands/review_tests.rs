@@ -74,6 +74,8 @@ async fn run_fixture(
       "commands::review_tests::fixture_cli",
       "--nocapture",
     ])
+    // 测试在 libtest 工作线程里运行，正常 CLI 入口使用主线程的栈。
+    .env("RUST_MIN_STACK", (8 * 1024 * 1024).to_string())
     .env("WHARF_FIXTURE_CLI_ENDPOINT", endpoint)
     .env("WHARF_FIXTURE_CLI_ARGS", json!(args).to_string())
     .kill_on_drop(true);
