@@ -134,6 +134,7 @@ pub async fn watch(
           let probe_result = timeout_at(
             deadline,
             crate::probe::http(HttpCheck {
+              headers: probe.headers.clone(),
               url: probe.url.clone(),
               keyword: probe.keyword.clone(),
               timeout_secs: rem.as_secs().clamp(1, 5),

@@ -106,6 +106,7 @@ async fn notice(state: &AppState, name: &str, why: Option<&str>) {
   crate::rules::notice(
     state,
     "heal",
+    Some(name),
     Some(&format!("heal.{name}")),
     why.is_none(),
     event,

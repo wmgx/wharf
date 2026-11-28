@@ -203,6 +203,7 @@ async fn round(state: &AppState) {
     crate::rules::notice(
       state,
       "unmanaged_container",
+      Some(&seen.server),
       None,
       false,
       Event {

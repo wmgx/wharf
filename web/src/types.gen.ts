@@ -189,6 +189,17 @@ export interface AlertPatch {
 }
 
 /**
+ * 单条告警规则在周期内的触发次数对比。
+ */
+export interface AlertReport {
+  change_pct?: number | null;
+  current: number;
+  name: string;
+  previous?: number | null;
+  rule: string;
+}
+
+/**
  * 一条告警规则：对一个指标的每个对象，最近 `for_n` 个点都满足 `比较 阈值` 时触发。
  */
 export interface AlertRuleView {
@@ -1657,6 +1668,18 @@ export type LoginWrite = {
 };
 
 /**
+ * 单个指标的本期值、上期值与环比变化百分比。
+ */
+export interface MetricDelta {
+  /**
+   * 相对上期的变化百分比（正数增加，负数减少）；上期无数据或上期为 0 且本期非 0 时为空。
+   */
+  change_pct?: number | null;
+  current?: number | null;
+  previous?: number | null;
+}
+
+/**
  * 一次资源采样。速率是和上一次采样相比的平均值。
  */
 export interface Metrics {
@@ -1707,6 +1730,14 @@ export interface MonitorSpec {
    */
   expect?: number | null;
   /**
+   * 自定义请求头，值支持密钥引用。
+   */
+  headers?: Record<string, string>;
+  /**
+   * 检查间隔（秒），缺省 60。
+   */
+  interval_secs?: number | null;
+  /**
    * 响应里必须包含的文字（只看前 64KB）。
    */
   keyword?: string | null;
@@ -1718,6 +1749,10 @@ export interface MonitorSpec {
    * 端口名，默认第一个端口。
    */
   port?: string | null;
+  /**
+   * 单轮失败后的重试次数。
+   */
+  retries?: number | null;
 }
 
 /**
@@ -2158,6 +2193,36 @@ export interface RelayHint {
   via_loss: number;
 }
 
+/**
+ * 报告实际覆盖的时间范围。
+ */
+export interface ReportCoverage {
+  earliest_at?: number | null;
+  has_current: boolean;
+  has_previous: boolean;
+  latest_at?: number | null;
+  period_end: number;
+  period_start: number;
+  previous_end: number;
+  /**
+   * 上期实际覆盖的时间比例（0.0～1.0），按 `earliest_at` 到 `previous_end` 计算。
+   */
+  previous_ratio: number;
+  previous_start: number;
+}
+
+/**
+ * `GET /api/report` 的返回结构。
+ */
+export interface ReportView {
+  alerts: AlertReport[];
+  coverage: ReportCoverage;
+  days: number;
+  servers: ServerReport[];
+  services: ServiceReport[];
+  summary: string[];
+}
+
 export interface ResolvedImage {
   /**
    * 这台机器平台对应的镜像 ID（`sha256:…`），和 `docker image inspect` 的 Id 相同。
@@ -2419,6 +2484,57 @@ export interface SecretView {
 }
 
 /**
+ * 单台服务器的周期指标。
+ */
+export interface ServerReport {
+  /**
+   * CPU 均值（%）。
+   */
+  cpu_avg: MetricDelta;
+  /**
+   * CPU 峰值（%）。
+   */
+  cpu_peak: MetricDelta;
+  /**
+   * 周期内磁盘用量变化（字节，末值减初值）。
+   */
+  disk_change: MetricDelta;
+  /**
+   * 本期最新磁盘总量（字节）。
+   */
+  disk_total?: number | null;
+  /**
+   * 本期最新磁盘已用（字节）。
+   */
+  disk_used?: number | null;
+  /**
+   * 内存均值（字节）。
+   */
+  mem_avg: MetricDelta;
+  /**
+   * 内存峰值（字节）。
+   */
+  mem_peak: MetricDelta;
+  /**
+   * 整机内存容量（字节），用于判断峰值是否接近上限。
+   */
+  mem_total?: number | null;
+  name: string;
+  /**
+   * 周期内网络接收总量（字节）。
+   */
+  net_rx_bytes: MetricDelta;
+  /**
+   * 周期内网络发送总量（字节）。
+   */
+  net_tx_bytes: MetricDelta;
+  /**
+   * 该对象的上期覆盖比例（0.0～1.0）。
+   */
+  previous_ratio?: number | null;
+}
+
+/**
  * 服务器上可以由用户修改的设置。IP 由 agent 上报，这里只是覆盖值。
  */
 export interface ServerSettings {
@@ -2623,6 +2739,46 @@ export interface ServiceDraft {
   warnings?: string[];
 }
 
+/**
+ * 单个服务的周期指标。
+ */
+export interface ServiceReport {
+  /**
+   * CPU 均值（%）。
+   */
+  cpu_avg: MetricDelta;
+  /**
+   * 5xx 占比均值（%）。
+   */
+  err_pct: MetricDelta;
+  /**
+   * 内存均值（字节）。
+   */
+  mem_avg: MetricDelta;
+  /**
+   * 配置的内存上限（字节）。
+   */
+  mem_limit?: number | null;
+  /**
+   * 内存峰值（字节）。
+   */
+  mem_peak: MetricDelta;
+  name: string;
+  /**
+   * p95 延迟均值（毫秒）。
+   */
+  p95_ms: MetricDelta;
+  /**
+   * 该对象的上期覆盖比例（0.0～1.0）。
+   */
+  previous_ratio?: number | null;
+  /**
+   * 经网关的总请求数估算。
+   */
+  requests: MetricDelta;
+  server: string;
+}
+
 export interface ServiceSpec {
   /**
    * 自动更新：每天检查一次，有新版本就自动更新。只支持没有数据卷的服务（compose 来源看 compose 里有没有挂载）。
@@ -2689,6 +2845,10 @@ export interface ServiceSpec {
    * 停止：容器保留但不运行，部署后也保持停止。不影响 compose，也就不会重建容器。
    */
   stopped?: boolean;
+  /**
+   * 镜像和构建版本的更新忽略规则。
+   */
+  update_ignore?: UpdateIgnoreSpec[];
   volumes?: VolumeSpec[];
 }
 
@@ -2997,7 +3157,7 @@ export interface TaskRunView {
 /**
  * 定时任务。名字全局唯一。
  */
-export type TaskSpec = {
+export type TaskSpec = ({
   command: string;
   /**
    * compose 服务名，服务只有一个容器时不用填。
@@ -3029,6 +3189,29 @@ export type TaskSpec = {
    * 报到地址里的口令，新建时自动生成。
    */
   token: string;
+}) & {
+  /**
+   * 错过触发后允许补跑的分钟数。
+   */
+  catch_up_mins?: number | null;
+  enabled: boolean;
+  /**
+   * 失败和恢复时发通知。
+   */
+  notify: boolean;
+  /**
+   * 5 段 cron（分 时 日 月 周），北京时间。
+   */
+  schedule: string;
+  server: string;
+  /**
+   * 关联服务停用时跳过定时执行。
+   */
+  skip_if_stopped?: boolean;
+  /**
+   * 超时秒数，默认 600；宿主机命令最长 600，其他最长 6 小时。
+   */
+  timeout_secs: number;
 };
 
 export type TaskStatus = "running" | "succeeded" | "failed" | "timed_out" | "skipped";
@@ -3155,6 +3338,16 @@ export interface Unmanaged {
   server: string;
 }
 
+export type UpdateIgnoreScope = "all" | "major";
+
+export interface UpdateIgnoreSpec {
+  /**
+   * 镜像仓库名、完整镜像标签，或 *。
+   */
+  image: string;
+  scope: UpdateIgnoreScope;
+}
+
 /**
  * 后台检查：镜像标签、代码分支有没有比固定版本新的（每 6 小时），
  * 现在的配置和机器上的现状差几项（每 10 分钟算一次计划，不保存）。
@@ -3197,6 +3390,10 @@ export interface VersionCheck {
    * 仓库里有比固定版本新的。
    */
   newer: boolean;
+  /**
+   * 有新 digest 的镜像名。
+   */
+  newer_images?: string[];
   /**
    * 仓库里有比现在写的标签更高的版本（例如 `2.20` → `2.21`）。换标签要改配置，不会自动升级。
    */

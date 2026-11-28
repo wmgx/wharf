@@ -509,7 +509,8 @@ fn servers(
 struct Clients {
   direct: reqwest::Client,
   internal: reqwest::Client,
-  egress: Option<(String, reqwest::Client)>,
+  egress:
+    Option<(String, reqwest::Client, wharf_providers::http::Route)>,
   doh: crate::dns_check::DohClients,
 }
 
@@ -523,12 +524,14 @@ impl Clients {
         .tls_info(true)
     };
     let failed = |_| ApiError::internal("无法初始化体检 HTTP 客户端");
-    let proxy = crate::egress::api_proxy(snap);
+    let route = crate::egress::api_route(snap);
     let doh = crate::dns_check::DohClients::new(
-      proxy.as_ref().map(|(_, p)| p.clone()),
+      route.as_ref().map(|(_, r)| r.proxy.clone()),
     );
-    let egress = proxy.and_then(|(name, proxy)| {
-      Some((name.to_owned(), builder().proxy(proxy).build().ok()?))
+    let egress = route.and_then(|(name, route)| {
+      let client =
+        builder().proxy(route.proxy.clone()).build().ok()?;
+      Some((name.to_owned(), client, route))
     });
     Ok(Self {
       direct: builder().build().map_err(failed)?,
@@ -553,9 +556,8 @@ struct RouteChecks<'a> {
 
 fn use_egress_for_doctor(
   snap: &Snapshot,
-  host: &str,
   route: Option<(&RouteSpec, &GatewaySpec)>,
-  edge: bool,
+  matches_exit: bool,
 ) -> bool {
   if let Some((r, g)) = route {
     if r.internal || g.tls == GatewayTls::Internal {
@@ -572,16 +574,7 @@ fn use_egress_for_doctor(
       return true;
     }
   }
-  edge
-    || snap
-      .api_via
-      .as_deref()
-      .map(str::trim)
-      .and_then(|name| snap.world.servers.get(name))
-      .and_then(|s| s.settings.egress.as_ref())
-      .is_some_and(|e| {
-        wharf_api_types::egress::via_exit(host, false, &e.domains)
-      })
+  matches_exit
 }
 
 impl RouteChecks<'_> {
@@ -600,9 +593,12 @@ impl RouteChecks<'_> {
     let gateway_spec = gateway.map(|(_, g)| g);
     let use_egress = use_egress_for_doctor(
       self.snap,
-      host,
       gateway_spec.map(|g| (spec, g)),
-      false,
+      self
+        .clients
+        .egress
+        .as_ref()
+        .is_some_and(|(_, _, r)| r.matches(host)),
     );
     let service = spec
       .upstream
@@ -949,7 +945,7 @@ impl RouteChecks<'_> {
     let mut via = None;
     let result = if options.internal {
       request(&self.clients.internal).send().await
-    } else if let Some((name, client)) =
+    } else if let Some((name, client, _)) =
       self.clients.egress.as_ref().filter(|_| options.use_egress)
     {
       match request(client).send().await {
@@ -1078,6 +1074,8 @@ impl<'a> HttpProbe<'a> {
   ) -> Self {
     let monitor = monitor.filter(|m| {
       gated
+        // 自定义请求头只发给 agent 探测的本机服务端口。
+        && m.headers.is_empty()
         && !spec.auth
         && !spec
           .paths

@@ -369,25 +369,37 @@ pub(super) async fn record_at(
   ok: bool,
   skipped: Option<String>,
 ) {
-  let (id, title) = (id.to_string(), event.title.clone());
-  let subject = subject.map(str::to_string);
-  let result = state
-    .db
-    .call(move |c| {
-      c.execute(
-        "INSERT INTO alert_history (at, source, subject, title, ok, skipped) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![now, id, subject, title, ok, skipped],
-      )
-      .and_then(|_| {
-        c.execute(
-          "DELETE FROM alert_history WHERE at < ?1",
-          [now - KEEP_HISTORY_MS],
-        )
-      })
-      .map(|_| ())
-      .map_err(db::sql_err)
-    })
+  record_delivery(state, now, id, subject, event, ok, skipped, None)
     .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn record_delivery(
+  state: &AppState,
+  now: i64,
+  id: &str,
+  subject: Option<&str>,
+  event: &Event,
+  ok: bool,
+  skipped: Option<String>,
+  retry: Option<String>,
+) {
+  let id = id.to_string();
+  let event = crate::notify::redact_event(event);
+  let subject = subject.map(str::to_string);
+  let result = state.db.call(move |c| {
+    let tx = c.unchecked_transaction().map_err(db::sql_err)?;
+    tx.execute(
+      "INSERT INTO alert_history (at, source, subject, title, ok, skipped) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+      rusqlite::params![now, id, subject, event.title, ok, skipped],
+    ).map_err(db::sql_err)?;
+    if let Some(error) = retry {
+      crate::notify::enqueue(&tx, tx.last_insert_rowid(), &event, &error).map_err(db::sql_err)?;
+    }
+    tx.execute("DELETE FROM alert_history WHERE at < ?1", [now - KEEP_HISTORY_MS])
+      .map_err(db::sql_err)?;
+    tx.commit().map_err(db::sql_err)
+  }).await;
   if let Err(e) = result {
     tracing::warn!("记录推送失败：{}", e.message);
   }

@@ -383,6 +383,7 @@ ALTER TABLE alert_history ADD COLUMN subject TEXT;
   "DELETE FROM plans WHERE status = 'pending';",
   PENDING_STEPS_MIGRATION,
   "CREATE INDEX IF NOT EXISTS backups_service_target ON backups (service, target, id);",
+  crate::notify::RETRY_MIGRATION,
 ];
 
 const PENDING_STEPS_MIGRATION: &str = r#"

@@ -174,6 +174,7 @@ pub async fn notify_new(
         s,
         "login",
         None,
+        None,
         false,
         crate::notify::Event {
           title: "从新的地址登录控制面".into(),

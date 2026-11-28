@@ -165,11 +165,27 @@ async fn build_view(
   });
   if let (Some(allowed), Some(subjects)) = (allowed, subjects) {
     let snap = crate::snapshot::load(&state.db).await?;
+    let tasks = crate::tasks::load(state)
+      .await?
+      .into_iter()
+      .filter_map(|(name, spec, _)| {
+        if let wharf_api_types::view::TaskKind::Exec {
+          service, ..
+        } = spec.how
+          && allowed.contains(&service)
+        {
+          Some(name)
+        } else {
+          None
+        }
+      })
+      .collect();
     crate::scope_filter::filter_alerts(
       allowed,
       &snap.world,
       &mut alerts,
       &subjects,
+      &tasks,
     );
   }
   Ok(alerts)

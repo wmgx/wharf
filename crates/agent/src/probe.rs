@@ -150,7 +150,22 @@ pub async fn http(
     }
   };
   let ms = |s: std::time::Instant| s.elapsed().as_millis() as u64;
-  let mut resp = match client.get(&job.url).send().await {
+  let mut request = client.get(&job.url);
+  for (key, value) in &job.headers {
+    use reqwest::header::{HeaderName, HeaderValue};
+    let (Ok(name), Ok(mut value)) = (
+      HeaderName::from_bytes(key.as_bytes()),
+      HeaderValue::from_str(value),
+    ) else {
+      return HttpCheckResult {
+        error: Some("监控请求头格式无效".into()),
+        ..Default::default()
+      };
+    };
+    value.set_sensitive(true);
+    request = request.header(name, value);
+  }
+  let mut resp = match request.send().await {
     Ok(r) => r,
     Err(e) => {
       let error = if e.is_timeout() {
@@ -334,4 +349,51 @@ async fn probe_bounds_unterminated_banner() {
       .unwrap()
   );
   writer.abort();
+}
+
+#[tokio::test]
+async fn http_probe_forwards_host_and_custom_header() {
+  let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let url =
+    format!("http://{}/health", listener.local_addr().unwrap());
+  let peer = tokio::spawn(async move {
+    let (stream, _) = listener.accept().await.unwrap();
+    let mut stream = BufReader::new(stream);
+    let mut lines = Vec::new();
+    loop {
+      let mut line = String::new();
+      if stream.read_line(&mut line).await.unwrap() == 0
+        || line == "\r\n"
+      {
+        break;
+      }
+      lines.push(line.trim().to_string());
+    }
+    stream
+      .get_mut()
+      .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+      .await
+      .unwrap();
+    lines
+  });
+  let result = http(wharf_api_types::agent::HttpCheck {
+    url,
+    headers: std::collections::BTreeMap::from([
+      ("Host".into(), "app.example.test".into()),
+      ("Authorization".into(), "Bearer fixture-value".into()),
+    ]),
+    keyword: None,
+    timeout_secs: 2,
+  })
+  .await;
+  assert_eq!(result.status, Some(200));
+  let lines = peer.await.unwrap();
+  assert!(
+    lines
+      .iter()
+      .any(|l| l.eq_ignore_ascii_case("host: app.example.test"))
+  );
+  assert!(lines.iter().any(|l| {
+    l.eq_ignore_ascii_case("authorization: Bearer fixture-value")
+  }));
 }

@@ -1986,6 +1986,10 @@ fn validate_service(
       "启动等待上限需在 10 到 1800 秒之间",
     ));
   }
+  crate::updates::validate_ignore(spec)?;
+  if let Some(m) = &spec.monitor {
+    crate::monitor::validate(m)?;
+  }
   validate_deploy_options(name, spec)?;
   if name.starts_with(GATEWAY_PROJECT_PREFIX) {
     return Err(ApiError::invalid(format!(
@@ -2708,6 +2712,7 @@ mod tests {
       heartbeat: None,
       limits: None,
       auto_update: false,
+      update_ignore: vec![],
       container: None,
       files: vec![],
       stop_grace_secs: None,

@@ -1,5 +1,5 @@
-//! 定时任务：控制面每 30 秒看一次到点的任务，下发给 agent 执行，记录结果，失败和恢复时通知。
-//! 任务定义直接改，不走计划（定义本身不改机器）。控制面停机期间错过的不补跑。
+//! 定时任务：控制面每 15 秒看一次到点的任务，下发给 agent 执行，记录结果，失败和恢复时通知。
+//! 任务定义直接改。开启补跑的任务可在宽限期内补上最近一次计划。
 
 use std::{
   collections::{BTreeMap, BTreeSet, HashMap},
@@ -42,7 +42,7 @@ use crate::{
   state::AppState,
 };
 
-const TICK: Duration = Duration::from_secs(30);
+const TICK: Duration = Duration::from_secs(15);
 const KEEP_RUNS: i64 = 50;
 const HOST_MAX: u64 = 600;
 const OTHER_MAX: u64 = 6 * 3600;
@@ -134,13 +134,14 @@ impl Drop for RunGuard {
 pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
     let mut checked = minute_floor(Utc::now());
+    tokio::time::sleep(Duration::from_secs(30)).await;
     loop {
-      tokio::time::sleep(TICK).await;
       let now = minute_floor(Utc::now());
       if let Err(e) = tick(&state, checked, now).await {
         tracing::warn!("检查定时任务失败：{e}");
       }
       checked = now;
+      tokio::time::sleep(TICK).await;
     }
   });
 }
@@ -151,10 +152,16 @@ async fn tick(
   after: DateTime<Utc>,
   until: DateTime<Utc>,
 ) -> Result<(), ApiError> {
-  if until <= after {
-    return Ok(());
-  }
-  for (name, spec, _) in load(state).await? {
+  let rows = load(state).await?;
+  let world = if rows
+    .iter()
+    .any(|(_, spec, _)| spec.enabled && spec.skip_if_stopped)
+  {
+    Some(snapshot::load(&state.db).await?.world)
+  } else {
+    None
+  };
+  for (name, spec, updated_at) in rows {
     if !spec.enabled || spec.schedule.is_empty() {
       continue;
     }
@@ -162,17 +169,142 @@ async fn tick(
       continue;
     };
     if let TaskKind::Ping { grace_mins, .. } = spec.how {
-      crate::ping::check_due(
-        state, &name, &spec, &cron, grace_mins, after, until,
-      )
-      .await;
+      if until > after {
+        crate::ping::check_due(
+          state, &name, &spec, &cron, grace_mins, after, until,
+        )
+        .await;
+      }
       continue;
     }
-    if cron.next_after(after).is_some_and(|t| t <= until) {
-      let _ = start(state, &name, spec, "schedule", None).await;
+    let stopped =
+      world.as_ref().and_then(|w| should_skip_stopped(&spec, w));
+    let online = state.hub.is_online(&spec.server);
+    if until > after
+      && cron.next_after(after).is_some_and(|t| t <= until)
+    {
+      if let Some(service) = stopped {
+        record_skipped(state, &name, "schedule", service).await?;
+        continue;
+      }
+      if spec.catch_up_mins.is_none() || online {
+        start(state, &name, spec, "schedule", None).await?;
+        continue;
+      }
+    }
+    let Some(window) = spec.catch_up_mins else {
+      continue;
+    };
+    let grace = chrono::Duration::minutes(i64::from(window));
+    if let Some(due) = cron.prev_at_or_before(until, window)
+      && due.timestamp_millis() >= updated_at
+      && (stopped.is_some() || online)
+      && let Some(guard) = RunGuard::acquire(&name)
+      && !scheduled_since(state, &name, due).await?
+    {
+      if let Some(service) = stopped {
+        record_skipped(state, &name, "catch_up", service).await?;
+      } else {
+        start_with_guard(
+          state,
+          &name,
+          spec,
+          "catch_up",
+          None,
+          Some(guard),
+        )
+        .await?;
+      }
+      continue;
+    }
+    if until > after
+      && let Some(due) = cron.next_after(after - grace)
+      && due + grace <= until
+      && due.timestamp_millis() >= updated_at
+      && !scheduled_since(state, &name, due).await?
+    {
+      let output = format!(
+        "错过计划时间 {}，在 {window} 分钟宽限内服务器 {} 未补跑",
+        due
+          .with_timezone(
+            &chrono::FixedOffset::east_opt(8 * 3600)
+              .expect("固定时区")
+          )
+          .format("%H:%M"),
+        spec.server,
+      );
+      // 这条记录对应未执行的旧计划点，用实际写入时间会挡住后续补跑。
+      let id = insert_run_at(
+        state,
+        &name,
+        TaskStatus::Failed,
+        "catch_up",
+        due.timestamp_millis(),
+      )
+      .await?;
+      finish(state, id, TaskStatus::Failed, None, &output, None)
+        .await;
+      let state = state.clone();
+      tokio::spawn(async move {
+        notify_result(&state, &name, id, TaskStatus::Failed, &output)
+          .await;
+      });
     }
   }
   Ok(())
+}
+
+fn should_skip_stopped<'a>(
+  spec: &'a TaskSpec,
+  world: &crate::world::World,
+) -> Option<&'a str> {
+  if spec.skip_if_stopped
+    && let TaskKind::Exec { service, .. } = &spec.how
+    && world.services.get(service).is_some_and(|r| r.spec.stopped)
+  {
+    return Some(service);
+  }
+  None
+}
+
+async fn record_skipped(
+  state: &AppState,
+  name: &str,
+  trigger: &str,
+  service: &str,
+) -> Result<(), ApiError> {
+  let id =
+    insert_run(state, name, TaskStatus::Skipped, trigger).await?;
+  finish(
+    state,
+    id,
+    TaskStatus::Skipped,
+    None,
+    &format!("服务 {service} 已停止，按 skip_if_stopped 跳过"),
+    None,
+  )
+  .await;
+  Ok(())
+}
+
+async fn scheduled_since(
+  state: &AppState,
+  name: &str,
+  due: DateTime<Utc>,
+) -> Result<bool, ApiError> {
+  let name = name.to_string();
+  state
+    .db
+    .call(move |c| {
+      c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM task_runs WHERE task = ?1
+       AND trigger IN ('schedule', 'catch_up') AND started_at >= ?2)",
+        params![name, due.timestamp_millis()],
+        |r| r.get(0),
+      )
+      .map_err(sql_err)
+    })
+    .await
 }
 
 pub(crate) async fn load(
@@ -313,6 +445,7 @@ pub(crate) async fn notify_result(
   crate::rules::notice(
     state,
     "task",
+    Some(name),
     None,
     ok,
     crate::notify::Event {
@@ -544,6 +677,16 @@ pub(crate) async fn insert_run(
   status: TaskStatus,
   trigger: &str,
 ) -> Result<i64, ApiError> {
+  insert_run_at(state, name, status, trigger, now_ms()).await
+}
+
+async fn insert_run_at(
+  state: &AppState,
+  name: &str,
+  status: TaskStatus,
+  trigger: &str,
+  started_at: i64,
+) -> Result<i64, ApiError> {
   let (name, trigger) = (name.to_string(), trigger.to_string());
   let status = enc(status);
   state
@@ -551,13 +694,15 @@ pub(crate) async fn insert_run(
     .call(move |c| {
       c.execute(
         "INSERT INTO task_runs (task, status, trigger, started_at) VALUES (?1, ?2, ?3, ?4)",
-        params![name, status, trigger, now_ms()],
+        params![name, status, trigger, started_at],
       )
       .map_err(sql_err)?;
       let id = c.last_insert_rowid();
       c.execute(
-        "DELETE FROM task_runs WHERE task = ?1 AND id <= ?2 - ?3",
-        params![name, id, KEEP_RUNS],
+        "DELETE FROM task_runs WHERE task = ?1 AND id NOT IN (
+           SELECT id FROM task_runs WHERE task = ?1 ORDER BY id DESC LIMIT ?2
+         )",
+        params![name, KEEP_RUNS],
       )
       .map_err(sql_err)?;
       Ok(id)
@@ -726,6 +871,27 @@ fn validate(
     return Err(crate::world::server_not_found(&spec.server));
   }
   validate_schedule(spec)?;
+  if spec.skip_if_stopped
+    && !matches!(spec.how, TaskKind::Exec { .. })
+  {
+    return Err(ApiError::invalid(
+      "skip_if_stopped 仅适用于容器内执行（--exec）任务",
+    ));
+  }
+  if let Some(mins) = spec.catch_up_mins {
+    if matches!(spec.how, TaskKind::Ping { .. })
+      || spec.schedule.is_empty()
+    {
+      return Err(ApiError::invalid(
+        "补跑只适用于由 Wharf 定时执行的任务",
+      ));
+    }
+    if !(1..=1440).contains(&mins) {
+      return Err(ApiError::invalid(
+        "补跑宽限时间要在 1 到 1440 分钟之间",
+      ));
+    }
+  }
   let max = match spec.how {
     TaskKind::Host { .. } => HOST_MAX,
     _ => OTHER_MAX,
@@ -1456,4 +1622,104 @@ async fn host_task_keeps_command_template_in_shell_log() {
     .await
     .unwrap();
   assert_eq!(command, template);
+}
+
+#[tokio::test]
+async fn task_skips_when_service_stopped_and_catches_up_once_after_offline()
+ {
+  let state = crate::rules::tests::test_state();
+  let now = minute_floor(Utc::now());
+  let before = now - chrono::Duration::minutes(1);
+  state.db.call(move |c| {
+    for (kind, name, spec) in [
+      ("server", "s1", serde_json::json!({})),
+      ("server", "s2", serde_json::json!({})),
+      ("service", "app", serde_json::json!({"server":"s1","source":{"image":"app:1"},"stopped":true})),
+    ] {
+      crate::db::apply_write(c, &crate::db::Write::Upsert { kind: kind.into(), name: name.into(), spec, meta: serde_json::json!({}) })?;
+    }
+    c.execute("INSERT INTO tasks (name, spec, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+      params!["skipped", serde_json::json!({
+        "server":"s1","schedule":"* * * * *","kind":"exec","service":"app","command":"true","skip_if_stopped":true,
+      }).to_string(), before.timestamp_millis()]).map_err(sql_err)?;
+    c.execute("INSERT INTO tasks (name, spec, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+      params!["catchup", serde_json::json!({
+        "server":"s1","schedule":"* * * * *","kind":"host","command":"true","catch_up_mins":120,"notify":false,
+      }).to_string(), before.timestamp_millis()]).map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
+  let expired = now - chrono::Duration::minutes(120);
+  let (_, mut spec, _) = load(&state)
+    .await
+    .unwrap()
+    .into_iter()
+    .find(|(name, ..)| name == "skipped")
+    .unwrap();
+  let world = snapshot::load(&state.db).await.unwrap().world;
+  assert_eq!(should_skip_stopped(&spec, &world), Some("app"));
+  spec.skip_if_stopped = false;
+  assert!(should_skip_stopped(&spec, &world).is_none());
+  let local = expired
+    .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
+  let expired_spec = serde_json::json!({
+    "server":"s2","schedule":local.format("%M %H * * *").to_string(),
+    "kind":"host","command":"true","catch_up_mins":120,"notify":false,
+  })
+  .to_string();
+  state.db.call(move |c| {
+    c.execute("INSERT INTO tasks (name, spec, created_at, updated_at) VALUES ('expired', ?1, ?2, ?2)",
+      params![expired_spec, expired.timestamp_millis()]).map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
+  tick(&state, before, now).await.unwrap();
+  assert!(scheduled_since(&state, "skipped", now).await.unwrap());
+  assert!(!scheduled_since(&state, "catchup", now).await.unwrap());
+  state.hub.mock_agent("s1", false, |_| Ok(serde_json::json!({"output":"","exit_code":0,"timed_out":false})));
+  tick(&state, now, now).await.unwrap();
+  tick(&state, now, now).await.unwrap();
+  state.db.call(|c| {
+    let (count, trigger): (i64, String) = c.query_row(
+      "SELECT COUNT(*), trigger FROM task_runs WHERE task = 'catchup'", [],
+      |r| Ok((r.get(0)?, r.get(1)?)),
+    ).map_err(sql_err)?;
+    assert_eq!((count, trigger.as_str()), (1, "catch_up"));
+    let status: String = c.query_row("SELECT status FROM task_runs WHERE task = 'skipped'", [], |r| r.get(0)).map_err(sql_err)?;
+    assert_eq!(status, "skipped");
+    let expired: (i64, String) = c.query_row(
+      "SELECT COUNT(*), status FROM task_runs WHERE task = 'expired'", [],
+      |r| Ok((r.get(0)?, r.get(1)?)),
+    ).map_err(sql_err)?;
+    assert_eq!(expired, (1, "failed".into()));
+    Ok(())
+  }).await.unwrap();
+}
+
+#[tokio::test]
+async fn expired_schedule_does_not_hide_next_catch_up() {
+  let state = crate::rules::tests::test_state();
+  let next = minute_floor(Utc::now());
+  let missed = next - chrono::Duration::minutes(1);
+  state.db.call(move |c| {
+    c.execute("INSERT INTO tasks (name, spec, created_at, updated_at) VALUES ('overlap', ?1, ?2, ?2)",
+      params![serde_json::json!({
+        "server":"s1","schedule":"* * * * *","kind":"host","command":"true","catch_up_mins":1,"notify":false,
+      }).to_string(), missed.timestamp_millis()]).map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
+
+  tick(&state, missed, next).await.unwrap();
+  assert!(scheduled_since(&state, "overlap", missed).await.unwrap());
+  assert!(!scheduled_since(&state, "overlap", next).await.unwrap());
+
+  state.hub.mock_agent("s1", false, |_| Ok(serde_json::json!({"output":"","exit_code":0,"timed_out":false})));
+  tick(&state, next, next).await.unwrap();
+  tick(&state, next, next).await.unwrap();
+  state.db.call(move |c| {
+    let count: i64 = c.query_row(
+      "SELECT count(*) FROM task_runs WHERE task = 'overlap' AND trigger = 'catch_up' AND started_at >= ?1",
+      [next.timestamp_millis()], |r| r.get(0),
+    ).map_err(sql_err)?;
+    assert_eq!(count, 1);
+    Ok(())
+  }).await.unwrap();
 }

@@ -40,6 +40,7 @@ pub(crate) async fn send(
     state,
     "security_receipt",
     None,
+    None,
     true,
     Event {
       title,

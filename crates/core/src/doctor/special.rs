@@ -29,7 +29,7 @@ async fn service(
   let (mut containers, ports, monitor, forwards) = tokio::join!(
     diagnose_containers(ctx, [(name, container)]),
     crate::service_monitor::doctor_ports(ctx.s, name, row),
-    crate::monitor::doctor_monitor(ctx.s, name, row),
+    crate::monitor::doctor_monitor(ctx.s, ctx.snap, name, row),
     layer4(ctx, name),
   );
   for c in &mut containers {

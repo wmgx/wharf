@@ -78,6 +78,11 @@ fn value(out: &mut Vec<String>, text: &str, sensitive: bool) {
 
 pub fn service_values(spec: &ServiceSpec) -> Vec<String> {
   let mut out = Vec::new();
+  if let Some(m) = &spec.monitor {
+    for (key, text) in &m.headers {
+      value(&mut out, text, crate::monitor::sensitive_header(key));
+    }
+  }
   if let Some(heartbeat) = &spec.heartbeat {
     out.push(heartbeat.token.clone());
   }

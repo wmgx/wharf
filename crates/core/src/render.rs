@@ -2510,6 +2510,7 @@ mod tests {
       heartbeat: None,
       limits: None,
       auto_update: false,
+      update_ignore: vec![],
       container: None,
       files: vec![],
       stop_grace_secs: None,

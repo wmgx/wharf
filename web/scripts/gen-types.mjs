@@ -42,7 +42,12 @@ function type(schema, path) {
     return schema.$ref.slice("#/$defs/".length);
   }
   const union = schema.oneOf ?? schema.anyOf;
-  if (union) return union.map((s, i) => type(s, `${path}[${i}]`)).join(" | ");
+  if (union) {
+    const variants = union.map((s, i) => type(s, `${path}[${i}]`)).join(" | ");
+    return schema.properties ? `(${variants}) & {
+${fields(schema, path)}
+}` : variants;
+  }
   if (Array.isArray(schema.type)) {
     return schema.type.map(t => type({ ...schema, type: t }, path)).join(" | ");
   }

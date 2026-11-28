@@ -5,6 +5,15 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BufferedSample {
+  pub at_ms: i64,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub metrics: Option<super::Metrics>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub log_hits: Vec<crate::service_checks::LogHit>,
+}
+
 /// 服务器上的一个容器。
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
@@ -919,6 +928,8 @@ pub struct PrevLogOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettleProbe {
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub headers: BTreeMap<String, String>,
   pub url: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub expect: Option<u16>,
@@ -958,6 +969,8 @@ pub fn judge_http_check(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpCheck {
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub headers: BTreeMap<String, String>,
   pub url: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub keyword: Option<String>,

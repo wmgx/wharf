@@ -264,3 +264,124 @@ async fn partial_previous_ten_minutes_disables_comparison() {
   assert!(report.summary.iter().all(|line| !line.contains('%')));
   assert_eq!(report.summary, vec!["和上期相比没有明显变化"]);
 }
+
+#[tokio::test]
+async fn report_filters_domain_expiry_and_notices_by_server_and_service()
+ {
+  Db::memory().call(|c| {
+    seed_world(c);
+    for (kind, name, spec) in [
+      ("service", "api", json!({"server":"s1","source":{"image":"app:1"}})),
+      ("gateway", "gw1", json!({"kind":"caddy","server":"s1"})),
+      ("route", "web.example.test", json!({
+        "hostname":"web.example.test", "service":"web","gateway":"gw1",
+        "paths":[{"path":"/api","service":"api"}]
+      })),
+    ] {
+      db::apply_write(c, &db::Write::Upsert {
+        kind: kind.into(), name: name.into(), spec, meta: json!({}),
+      })?;
+    }
+    let world = World::from_rows(db::all_resources(c)?)?;
+    let now = 1_750_000_000_000;
+    for (rule, subject) in [
+      ("domain_down", "web.example.test"), ("cert_expiring", "web.example.test"),
+      ("expiry_soon", "server:s1"), ("link_cert_expiring", "gw1"), ("backup", "web"),
+    ] {
+      c.execute("INSERT INTO alert_history(at, source, subject, title, ok) VALUES (?1, ?2, ?3, '', 0)",
+        params![now - MINUTE_MS, rule, subject]).map_err(sql_err)?;
+    }
+    for (server, service, count) in [(Some("s1"), None, 5), (None, Some("web"), 3), (None, Some("api"), 2)] {
+      let report = compute_at(c, &world, now, 1, server, service, MAX_SCAN_POINTS, None)?;
+      assert_eq!(report.alerts.len(), count);
+    }
+    Ok(())
+  }).await.unwrap();
+}
+
+#[tokio::test]
+async fn compact_preserves_peak_and_report_compares_same_granularity()
+{
+  Db::memory()
+    .call(|c| {
+      let world = seed_world(c);
+      let now = 1_750_000_000_000 / HOUR_MS * HOUR_MS;
+      for minute in 0..14 * 24 * 60 {
+        insert_point(
+          c,
+          "host.cpu",
+          "s1",
+          now - 14 * DAY_MS + minute * MINUTE_MS,
+          if minute % 60 == 1 { 90.0 } else { 10.0 },
+        );
+      }
+      metrics::compact_at(c, now)?;
+      assert!(
+        !metrics::read(c, "s1", &[], now - 14 * DAY_MS, HOUR_MS)?
+          .contains_key("host.cpu.max")
+      );
+      let view = compute_at(
+        c,
+        &world,
+        now,
+        7,
+        None,
+        None,
+        MAX_SCAN_POINTS,
+        None,
+      )?;
+      let peak = &view.servers[0].cpu_peak;
+      assert_eq!(
+        (peak.current, peak.previous, peak.change_pct),
+        (Some(90.0), Some(90.0), Some(0.0))
+      );
+      c.execute("DELETE FROM points WHERE name = 'host.cpu.max'", [])
+        .map_err(sql_err)?;
+      let view = compute_at(
+        c,
+        &world,
+        now,
+        7,
+        None,
+        None,
+        MAX_SCAN_POINTS,
+        None,
+      )?;
+      assert!(
+        view.servers[0].cpu_peak.change_pct.unwrap().abs() < 0.01
+      );
+      assert!(view.summary.iter().any(|s| s.contains("接近上限")));
+      Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn report_weights_err_by_qps_integrates_real_gaps_and_scopes_coverage()
+ {
+  Db::memory().call(|c| {
+    let world = seed_world(c);
+    let now = 1_750_000_000_000 / HOUR_MS * HOUR_MS;
+    let earliest = now - 14 * DAY_MS + HOUR_MS;
+    insert_point(c, "host.cpu", "s1", earliest, 10.0);
+    c.execute("INSERT INTO alert_history(at, source, title, ok) VALUES (?1, 'http_5xx', '', 0)", [earliest - MINUTE_MS]).map_err(sql_err)?;
+    for i in 0..10 {
+      let at = now - HOUR_MS + (i + 1) * MINUTE_MS;
+      insert_point(c, "host.net_rx", "s1", at, 10_000_000.0);
+    }
+    for h in 1..=11 {
+      let at = now - h * HOUR_MS;
+      insert_point(c, "req.err", "web", at, if h == 1 { 100.0 } else { 0.0 });
+      insert_point(c, "req.qps", "web", at, if h == 1 { 1.0 / 3600.0 } else { 10.0 });
+    }
+    let view = compute_at(c, &world, now, 7, None, None, MAX_SCAN_POINTS, None)?;
+    assert_eq!(view.coverage.earliest_at, Some(earliest));
+    assert!(view.coverage.has_previous);
+    assert_eq!(view.servers[0].net_rx_bytes.current, Some(6_000_000_000.0));
+    assert!(view.services[0].err_pct.current.unwrap() < 0.1);
+    assert_eq!(view.services[0].previous_ratio, Some(0.0));
+    assert_eq!(view.services[0].requests.previous, None);
+    Ok(())
+  }).await.unwrap();
+}

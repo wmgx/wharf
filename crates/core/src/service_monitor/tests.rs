@@ -275,6 +275,26 @@ fn previous_agent_report_and_service_spec_still_deserialize() {
 }
 
 #[test]
+fn backfilled_log_hits_keep_the_sample_time_and_reject_other_servers()
+{
+  let mut memory = Memory::default();
+  let w = watch();
+  let hit = LogHit {
+    id: w.id.clone(),
+    count: 1,
+    at: 20 * MINUTE,
+    lines: vec![],
+  };
+  memory.watches.insert("s1".into(), vec![w]);
+  let at = 19 * MINUTE;
+  add_log_hits(&mut memory, "s2", at, vec![hit.clone()]);
+  add_log_hits(&mut memory, "s1", at, vec![hit.clone()]);
+  let hits = &memory.hits[&hit.id];
+  assert_eq!(hits.last, Some(at));
+  assert_eq!(hits.batches.len(), 1);
+}
+
+#[test]
 fn unchanged_legacy_check_survives_plan_validation() {
   let mut spec: ServiceSpec = serde_json::from_value(json!({
     "source":{"image":"nginx:1"},"server":"s1",

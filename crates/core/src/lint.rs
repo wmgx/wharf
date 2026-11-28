@@ -219,6 +219,18 @@ fn service_warnings(
       warnings.push(format!("的 env 变量 {key} {detail}"));
     }
   }
+  if let Some(m) = &spec.monitor {
+    for (key, value) in &m.headers {
+      let check_key = if crate::monitor::sensitive_header(key) {
+        "ACCESS_TOKEN"
+      } else {
+        key
+      };
+      if let Some(detail) = env_secret(check_key, value, secrets) {
+        warnings.push(format!("的监控请求头 {key} {detail}"));
+      }
+    }
+  }
   if let Some(containers) = compose_services(spec) {
     for (name, container) in &containers {
       let Some(name) = name.as_str() else { continue };
@@ -740,6 +752,16 @@ services:
 
   #[test]
   fn plaintext_secret_warnings_never_echo_values() {
+    let spec = serde_json::from_value(json!({
+      "server": "s1",
+      "source": {"image": "app:1"},
+      "monitor": {"headers": {"Authorization": "Bearer fixture-header-value"}},
+    })).unwrap();
+    let warnings = service_warnings(&spec, false, &BTreeMap::new());
+    assert!(warnings.iter().any(|w| w.contains("Authorization")));
+    assert!(
+      !warnings.iter().any(|w| w.contains("fixture-header-value"))
+    );
     let password = concat!("abc", "12345");
     let url_password = concat!("p4ss", "w0rd");
     let url = format!("postgres://u:{url_password}@db/x");

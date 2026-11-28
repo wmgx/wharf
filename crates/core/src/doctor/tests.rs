@@ -210,21 +210,11 @@ fn edge_domains_included_and_egress_routing_rules() {
   );
   let should_egress =
     |snap: &Snapshot, patch: &RouteSpec, gw: &GatewaySpec| {
-      use_egress_for_doctor(
-        snap,
-        &patch.hostname,
-        Some((patch, gw)),
-        false,
-      )
+      use_egress_for_doctor(snap, Some((patch, gw)), false)
     };
   let mut route = snap.world.routes["app.example.test"].spec.clone();
   let mut gateway = snap.world.gateways["entry"].spec.clone();
-  assert!(use_egress_for_doctor(
-    &snap,
-    "edge.example.test",
-    None,
-    true
-  ));
+  assert!(use_egress_for_doctor(&snap, None, true));
   assert!(!should_egress(&snap, &route, &gateway));
   gateway.kind = GatewayKind::CloudflareTunnel;
   assert!(should_egress(&snap, &route, &gateway));
@@ -317,7 +307,7 @@ fn filtered_monitor_preserves_header_gate_response() {
     &mut snap.world.routes.get_mut("app.example.test").unwrap().spec;
   route.sso =
     Some(serde_json::from_value(json!({"mode":"header"})).unwrap());
-  let monitor: MonitorSpec =
+  let mut monitor: MonitorSpec =
     serde_json::from_value(json!({"path":"/api/health"})).unwrap();
   for auth in [false, true] {
     route.auth = auth;
@@ -341,6 +331,18 @@ fn filtered_monitor_preserves_header_gate_response() {
       );
     }
   }
+  route.auth = false;
+  assert!(
+    HttpProbe::for_route(route, true, Some(&monitor))
+      .monitor
+      .is_some()
+  );
+  monitor
+    .headers
+    .insert("Host".into(), "local.example.test".into());
+  let probe = HttpProbe::for_route(route, true, Some(&monitor));
+  assert!(probe.monitor.is_none());
+  assert!(probe.header);
 }
 
 #[tokio::test]

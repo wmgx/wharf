@@ -15,6 +15,7 @@ use clap::{Parser, Subcommand};
 mod access_logs;
 mod adopt;
 mod agent_memory;
+mod backfill;
 mod build;
 mod conn;
 mod container_probe;
