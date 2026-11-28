@@ -1570,6 +1570,7 @@ pub(crate) async fn run_step(
             server,
             AgentOp::ProjectStatus {
               projects: vec![gateway_project(gateway)],
+              include_links: false,
             },
             SHORT_TIMEOUT,
             None,
