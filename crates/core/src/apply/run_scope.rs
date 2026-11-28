@@ -412,10 +412,9 @@ async fn plan_list_show_and_confirm_details() {
   let mut plan = serde_json::from_value::<Plan>(json!({
     "plan_id":"p_fixture", "status":"pending", "created_at":now, "expires_at": now + chrono::Duration::minutes(5),
     "base_versions":{}, "items":[{"id":1,"address":"service/app","layer":"config",
-      "action":"delete","reason":"清理数据","impacts":["remove"],"host_access":["宿主机数据"]}],
+      "action":"delete","reason":"清理数据","impacts":["remove"]}],
     "needs_confirm":["service/app"],
   })).unwrap();
-  let visible = plan.clone();
   state.db.call(move |c| {
     for (id, service, expires_at) in [
       ("p_fixture", "app", now + chrono::Duration::minutes(5)),
@@ -442,12 +441,14 @@ async fn plan_list_show_and_confirm_details() {
   };
   let plans = list_plans(&state, &auth, true, 1).await.unwrap();
   assert_eq!(plans[0].plan_id, "p_fixture");
-  let plan = load_plan_for(&state, &auth, "p_fixture").await.unwrap();
-  assert_eq!(plan.plan_id, visible.plan_id);
+  let mut plan =
+    load_plan_for(&state, &auth, "p_fixture").await.unwrap();
+  assert_eq!(plan.plan_id, "p_fixture");
   assert!(load_plan_for(&state, &auth, "p_other").await.is_err());
+  plan.items[0].host_access.push("宿主机数据".into());
   let details = wharf_api_types::plan::confirm_details(
-    &visible,
-    &visible.needs_confirm.iter().collect::<Vec<_>>(),
+    &plan,
+    &plan.needs_confirm.iter().collect::<Vec<_>>(),
   );
   assert_eq!(details["plan_id"], "p_fixture");
   assert_eq!(
