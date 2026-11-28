@@ -36,6 +36,9 @@ pub async fn refs(
     c.get(&format!("/api/refs?target={}", seg(target))).await?;
   out(j, &report, |r| {
     println!("{}/{}：{} 处引用", r.kind, r.name, r.count);
+    if r.kind == "secret" && r.exists && r.complete && r.count == 0 {
+      println!("无引用：wharf secret rm {}", r.name);
+    }
     let mut previous = None;
     for hit in &r.refs {
       let resource = (&hit.kind, &hit.name);

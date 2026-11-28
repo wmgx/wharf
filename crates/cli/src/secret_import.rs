@@ -125,7 +125,11 @@ pub(crate) async fn import(
   mode: SecretImportMode,
   keep_days: Option<u16>,
 ) -> CliResult<SecretImportResponse> {
-  Ok(c.post("/api/secrets/import", &json!({ "items": items, "mode": mode, "keep_days": keep_days })).await?)
+  c.post(
+    "/api/secrets/import",
+    &json!({ "items": items, "mode": mode, "keep_days": keep_days }),
+  )
+  .await
 }
 
 fn show(result: &SecretImportResponse) {

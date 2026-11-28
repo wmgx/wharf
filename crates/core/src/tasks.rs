@@ -1284,8 +1284,8 @@ pub struct TaskQuery {
   reveal: bool,
 }
 
-#[path = "tasks/read.rs"]
 pub(crate) mod artifacts;
+#[path = "tasks/read.rs"]
 mod read;
 use read::build_views;
 

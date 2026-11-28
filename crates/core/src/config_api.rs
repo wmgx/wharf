@@ -307,10 +307,19 @@ async fn configured_audit_retention_and_allowlist() {
     let entry = item("retention.audit_days")?;
     db::set_setting(c, entry.0, Some("30"))?;
     assert_eq!(view(c, entry)?.value, json!(30));
-    let days = number(c, entry.0)?;
-    assert_eq!(days, 30);
+    let now = db::now_ms();
+    let old = now - 40 * 86_400_000;
+    let insert = || c.execute(
+      "INSERT INTO audit_log (at, kind, actor, method, path) VALUES (?1, 'api', 'fixture', 'GET', '/api/config')", [old],
+    ).map_err(db::sql_err);
+    let count = || c.query_row("SELECT count(*) FROM audit_log", [], |r| r.get::<_, i64>(0)).map_err(db::sql_err);
+    insert()?;
+    crate::audit::cleanup_rows(c, now)?;
+    assert_eq!(count()?, 0);
     db::set_setting(c, entry.0, None)?;
-    assert_eq!(number(c, entry.0)?, 90);
+    insert()?;
+    crate::audit::cleanup_rows(c, now)?;
+    assert_eq!(count()?, 1);
     assert!(matches!(item("gate.rt_key"), Err(e) if e.code == wharf_api_types::ErrorCode::NotFound));
     assert!(writable(item("core_backup.to")?).is_err());
     Ok(())

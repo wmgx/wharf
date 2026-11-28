@@ -206,3 +206,14 @@ pub(super) async fn prune(
     }
   }
 }
+
+#[tokio::test]
+async fn old_agent_is_rejected_before_artifact_dispatch() {
+  let state = crate::rules::tests::test_state();
+  state
+    .hub
+    .mock_agent("s1", false, |_| panic!("旧 agent 不应收到产物请求"));
+  let error = state.hub.task_artifacts_conn_id("s1").unwrap_err();
+  assert_eq!(error.code, wharf_api_types::ErrorCode::Conflict);
+  assert!(error.hint.unwrap().contains("wharf upgrade"));
+}

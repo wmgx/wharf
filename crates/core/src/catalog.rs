@@ -63,13 +63,47 @@ pub async fn refs(
   let (kind, name) = parse_target(&q.target)?;
   let snap = snapshot::load_inner(&s.db).await?;
   let tasks = s.db.call(|c| crate::tasks::load_rows(c)).await?;
-  Ok(Json(collect_refs(
-    &snap,
-    &tasks,
-    auth.services.as_ref(),
-    kind,
-    name,
-  )))
+  let mut report =
+    collect_refs(&snap, &tasks, auth.services.as_ref(), kind, name);
+  if auth.services.is_none() && kind == "route" {
+    let host = report.name.clone();
+    let gate_keys: Vec<String> = s.db.call(move |c| {
+      let mut stmt = c.prepare(
+        "SELECT name FROM gate_keys WHERE EXISTS (SELECT 1 FROM json_each(gate_keys.hosts) WHERE value = ?1) ORDER BY name"
+      ).map_err(crate::db::sql_err)?;
+      stmt.query_map([host], |r| r.get(0)).and_then(Iterator::collect).map_err(crate::db::sql_err)
+    }).await?;
+    report.refs.extend(gate_keys.into_iter().map(|name| RefHit {
+      kind: "gate_key".into(),
+      name,
+      field: "hosts".into(),
+      relation: "authorizes".into(),
+      detail: None,
+    }));
+    report.refs.extend(
+      snap
+        .world
+        .bookmarks
+        .iter()
+        .filter(|(_, b)| {
+          reqwest::Url::parse(&b.spec.url).is_ok_and(|url| {
+            url.host_str() == Some(report.name.as_str())
+          })
+        })
+        .map(|(name, _)| RefHit {
+          kind: "bookmark".into(),
+          name: name.clone(),
+          field: "url".into(),
+          relation: "links_to".into(),
+          detail: None,
+        }),
+    );
+    report.count = report.refs.len();
+    report.refs.sort_by(|a, b| {
+      (&a.kind, &a.name, &a.field).cmp(&(&b.kind, &b.name, &b.field))
+    });
+  }
+  Ok(Json(report))
 }
 
 pub async fn tree(
@@ -500,8 +534,10 @@ fn search_snapshot(
       .lines()
       .filter(|line| !line.trim_start().starts_with("wharf-enc:v1:"))
     {
-      let clean =
-        crate::log_redact::redact_text_with(line, &snap.log_values);
+      let clean = crate::log_redact::redact_text_with(
+        &crate::redact::redact_command(line),
+        &snap.log_values,
+      );
       let text = clean.to_lowercase();
       if !text.contains(&needle) {
         continue;
@@ -534,7 +570,10 @@ fn search_snapshot(
         "service",
         service,
         "ports",
-        &format!("{}={}", port.name, port.container),
+        &port.container.map_or_else(
+          || port.name.clone(),
+          |n| format!("{}={n}", port.name),
+        ),
       );
     }
     for (field, text) in service_texts(&row.spec) {

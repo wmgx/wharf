@@ -333,7 +333,7 @@ pub async fn cleanup(state: &AppState) -> Result<(), ApiError> {
   state.db.call(|c| cleanup_rows(c, now_ms())).await
 }
 
-fn cleanup_rows(
+pub(crate) fn cleanup_rows(
   c: &rusqlite::Connection,
   now: i64,
 ) -> Result<(), ApiError> {
@@ -541,13 +541,12 @@ fn query_rows(
      FROM audit_log WHERE (?1 IS NULL OR actor = ?1) AND (?2 IS NULL OR kind = ?2)
      AND (?3 IS NULL OR id < ?3) AND (?4 IS NULL OR at >= ?4) AND (?5 IS NULL OR at <= ?5)
      AND (?6 IS NULL OR status = ?6)
-     AND ?8 >= 0 AND (NOT ?7 OR status >= 400 OR method IN ('login_failed', 'gate_key_failed'))"
+     AND (NOT ?7 OR status >= 400 OR method IN ('login_failed', 'gate_key_failed'))"
   );
   let limit = q.limit.unwrap_or(100).min(500);
   let errors = matches!(q.errors.as_deref(), Some("1" | "true"));
   let mut bind: Vec<&dyn rusqlite::ToSql> = vec![
     &q.actor, &q.kind, &q.before, &since, &until, &q.status, &errors,
-    &limit,
   ];
   let target =
     q.target.as_deref().map(target_patterns).transpose()?;
@@ -574,7 +573,8 @@ fn query_rows(
     }
     sql.push(')');
   }
-  sql.push_str(" ORDER BY id DESC LIMIT ?8");
+  sql.push_str(" ORDER BY id DESC LIMIT ?");
+  bind.push(&limit);
   let mut stmt = c.prepare(&sql).map_err(sql_err)?;
   stmt
     .query_map(rusqlite::params_from_iter(bind), |r| {

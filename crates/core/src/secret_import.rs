@@ -153,10 +153,10 @@ fn store(
         result.skipped.push(name);
         continue;
       }
-      key.rotate_secret(&tx, &name, &value, now, until, true)?;
+      key.rotate_secret_in(&tx, &name, &value, now, until, true)?;
       result.updated.push(name);
     } else {
-      key.rotate_secret(&tx, &name, &value, now, until, true)?;
+      key.rotate_secret_in(&tx, &name, &value, now, until, true)?;
       result.created.push(name);
     }
   }

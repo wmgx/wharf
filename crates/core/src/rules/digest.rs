@@ -42,13 +42,14 @@ pub(super) struct DigestRow {
   pub is_notice: bool,
 }
 
+#[cfg(test)]
 pub(super) fn beijing() -> FixedOffset {
   FixedOffset::east_opt(8 * 3600).expect("固定时区")
 }
 
-fn fmt_hm(ms: i64) -> String {
+fn fmt_hm(ms: i64, offset: FixedOffset) -> String {
   db::to_time(ms)
-    .with_timezone(&beijing())
+    .with_timezone(&offset)
     .format("%H:%M")
     .to_string()
 }
@@ -72,7 +73,10 @@ fn due_action(
 }
 
 /// 按规则分组拼每日汇总正文；没有内容返回 `None`。
-pub(super) fn render(rows: &[DigestRow]) -> Option<(String, String)> {
+fn render(
+  rows: &[DigestRow],
+  offset: FixedOffset,
+) -> Option<(String, String)> {
   if rows.is_empty() {
     return None;
   }
@@ -85,12 +89,12 @@ pub(super) fn render(rows: &[DigestRow]) -> Option<(String, String)> {
   'groups: for (source, items) in groups {
     let mut header = format!("【{}】\n", display_name(source));
     for item in items {
-      let at = fmt_hm(item.fired_at);
+      let at = fmt_hm(item.fired_at, offset);
       let line = if item.is_notice {
         format!("- {}（{at}）\n", item.title)
       } else {
         let state = match item.recovered_at {
-          Some(t) => format!("已恢复（{}）", fmt_hm(t)),
+          Some(t) => format!("已恢复（{}）", fmt_hm(t, offset)),
           None => "仍在触发".into(),
         };
         let label = item.subject.as_deref().unwrap_or(&item.title);
@@ -224,7 +228,9 @@ pub(super) async fn preview(
 ) -> Result<AlertDigestPreview, ApiError> {
   let (rows, last_sent_date, _) = load_rows(state).await?;
   let count = rows.len();
-  let (title, body) = match render(&rows) {
+  let offset =
+    state.db.call(|c| crate::config_api::offset(c)).await?;
+  let (title, body) = match render(&rows, offset) {
     Some((t, b)) => (Some(t), Some(b)),
     None => (None, None),
   };
@@ -282,7 +288,7 @@ where
   ) else {
     return false;
   };
-  let Some((title, body)) = render(&rows) else {
+  let Some((title, body)) = render(&rows, offset) else {
     // 今天 09:00 没有待汇总内容：不发送，但记下今天已过 09:00，免得之后的新条目提前发出。
     let _ = state
       .db

@@ -174,23 +174,25 @@ pub(crate) fn collect_plan_missing(
     .filter(|(_, r)| crate::oidc::route_is_oidc(&r.spec))
     .map(|(host, _)| crate::oidc::secret_name(host))
     .collect::<BTreeSet<_>>();
-  let exists_secret = |name| {
+  let exists_secret = |name: &str| {
     snap.secrets.contains_key(name)
       || oidc.contains(name)
       || crate::secret_policy::is_system_secret(name)
   };
-  let mut add = |kind, target, source, exists| {
-    if !exists {
-      missing.push(hit(kind, target, source));
-    }
-  };
+  let mut add =
+    |kind: &str, target: &str, source: &str, exists: bool| {
+      if !exists {
+        missing.push(hit(kind, target, source));
+      }
+    };
   let port_exists = |service: &str, port: Option<&str>| {
     desired
       .services
       .get(service)
       .is_some_and(|s| s.spec.find_port(port).is_some())
   };
-  let account_exists = |name| snap.app_account_names.contains(name);
+  let account_exists =
+    |name: &str| snap.app_account_names.contains(name);
   for (name, row) in &desired.servers {
     if let Some(via) = &row.settings.via {
       add(
@@ -428,6 +430,9 @@ pub(crate) fn check_plan(
   desired: &World,
   snap: &Snapshot,
 ) -> Result<(), ApiError> {
+  if desired == &snap.world {
+    return Ok(());
+  }
   let before = collect_plan_missing(&snap.world, snap)
     .into_iter()
     .collect::<BTreeSet<_>>();

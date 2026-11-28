@@ -82,7 +82,8 @@ pub(super) fn build_tree(
           p.name.clone(),
           format!(
             "{}→{}",
-            p.container,
+            p.container
+              .map_or_else(|| "-".into(), |port| port.to_string()),
             row.host_ports.get(&p.name).copied().unwrap_or_default()
           ),
         )
