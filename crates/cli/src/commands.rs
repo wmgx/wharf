@@ -5872,7 +5872,8 @@ async fn backup(
           ("limit", Some(&limit.to_string())),
         ],
       );
-      let v: BackupLsView = c.get(&url).await?;
+      let v: BackupLsView =
+        c.get_timeout(&url, Duration::from_secs(7 * 60)).await?;
       out(j, &v, print::backup_ls);
       Ok(())
     }
@@ -5919,7 +5920,8 @@ async fn backup(
           ("limit", Some(&limit.to_string())),
         ],
       );
-      let v: BackupDiffView = c.get(&url).await?;
+      let v: BackupDiffView =
+        c.get_timeout(&url, Duration::from_secs(35 * 60)).await?;
       out(j, &v, print::backup_diff);
       Ok(())
     }

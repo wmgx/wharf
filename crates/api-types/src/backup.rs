@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -157,6 +157,9 @@ impl BackupRunRequest {
     self.keep || self.note.is_some()
   }
 }
+
+pub const RESTIC_INDEX_TIMEOUT: Duration = Duration::from_secs(180);
+pub const RESTIC_DUMP_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub const EXTRACT_LIMIT: u64 = 512 << 20;
 pub const EXTRACT_CHUNK: u32 = 512 << 10;

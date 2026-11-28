@@ -139,24 +139,31 @@ pub async fn diff(
   }
 
   let w = location(&snap, &service, target);
-  if w.target_ip.is_empty() {
-    return Err(ApiError::invalid("备份服务器没有内网地址").into());
-  }
+  let guard = s.locks.acquire(
+    crate::locks::LockSpec::Backup(service.clone()),
+    "预览备份差异",
+  )?;
+  guard.reserve_backup_target(w.target.clone())?;
+  check_location(
+    &s,
+    &snap,
+    &w,
+    &service,
+    crate::link::ProbeMode::Plan,
+  )
+  .await?;
   if !s.hub.supports_backup_v2(&w.server) {
     return Err(old_backup_v2(&w.server).into());
   }
   let (key, legacy) = repository_secrets(&s, &service).await?;
-  let username = service.clone();
-  let http = s
-    .db
-    .call_credentials(move |c, master| {
-      let key = db::scoped_secret_name(HTTP_PREFIX, &username)?;
-      Ok((
-        master.secret(c, &key)?,
-        master.secret(c, LEGACY_HTTP_SECRET)?,
-      ))
-    })
+  let key = key
+    .as_deref()
+    .or(legacy.as_deref())
+    .ok_or_else(|| ApiError::not_found("没有业务备份仓库口令"))?;
+  let progress: ProgressFn = Arc::new(|_| {});
+  ensure_server(&s, &snap, &w, Some(&service), &progress, &cancel)
     .await?;
+  let (http, _) = service_http_pair(&s, &service).await?;
   let action = ResticAction::DiffLocal {
     snapshot: q.snapshot,
     excludes: snap.world.services[&service]
@@ -167,36 +174,27 @@ pub async fn diff(
       .unwrap_or_default(),
     limit: q.limit,
   };
-  let call = |login, http, key| {
+  let call = |key| {
     s.hub.call(
       &w.server,
       job(
         &snap,
         &w.server,
         &service,
-        rest_repo(&w.target_ip, REST_SERVER_PORT, login, http),
+        rest_repo(&w.target_ip, REST_SERVER_PORT, &service, &http),
         key,
         action.clone(),
       ),
-      LIST_TIMEOUT,
+      restic_call_timeout(&action),
       None,
       &cancel,
     )
   };
-  let result: Result<BackupDiffView, ApiError> =
-    match (key.as_deref(), http.0.as_deref()) {
-      (Some(key), Some(password)) => {
-        call(&service, password, key).await
-      }
-      _ => {
-        Err(ApiError::new(ErrorCode::Forbidden, "没有当前仓库凭证"))
-      }
-    };
-  if matches!(&result, Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::AgentFailed))
-    && let (Some(key), Some(http)) =
-      (legacy.as_deref(), http.1.as_deref())
+  let result: Result<BackupDiffView, ApiError> = call(key).await;
+  if let Some(legacy) = legacy.as_deref().filter(|p| *p != key)
+    && matches!(&result, Err(e) if e.code == ErrorCode::Forbidden)
   {
-    return Ok(Json(call("wharf", http, key).await?));
+    return Ok(Json(call(legacy).await?));
   }
   Ok(Json(result?))
 }

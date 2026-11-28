@@ -629,6 +629,21 @@ impl Client {
       .await
   }
 
+  pub async fn get_timeout<T: DeserializeOwned>(
+    &self,
+    path: &str,
+    timeout: Duration,
+  ) -> CliResult<T> {
+    self
+      .send(
+        self
+          .http
+          .get(format!("{}{path}", self.endpoint))
+          .timeout(timeout),
+      )
+      .await
+  }
+
   pub async fn post<B: Serialize, T: DeserializeOwned>(
     &self,
     path: &str,

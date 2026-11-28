@@ -405,7 +405,6 @@ pub(super) async fn snapshots(
     &[
       "diff",
       "--json",
-      "--metadata",
       &format!("{}:{root}", view.base),
       &format!("{}:{root}", view.target),
     ],
@@ -445,6 +444,55 @@ pub(super) async fn snapshots(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn snapshot_diff_does_not_report_parent_mtime_as_modified() {
+    let (_dir, docker) = crate::docker::fake_docker(
+      r#"
+case "$*" in
+  *' ls --json --recursive '*)
+    id=""
+    for arg do
+      case "$arg" in
+        aaaaaaaa|bbbbbbbb) id="$arg$arg$arg$arg$arg$arg$arg$arg";;
+      esac
+    done
+    printf '{"struct_type":"snapshot","id":"%s"}\n' "$id"
+    echo '{"struct_type":"node","path":"/srv/app/data","type":"dir"}'
+    case "$id" in
+      b*) echo '{"struct_type":"node","path":"/srv/app/data/new.txt","type":"file","size":1}';;
+    esac;;
+  *' diff --json '*)
+    case "$*" in
+      *' --metadata '*) echo '{"message_type":"change","path":"/data","modifier":"U"}';;
+    esac
+    echo '{"message_type":"change","path":"/data/new.txt","modifier":"+"}'
+    echo '{"message_type":"statistics"}';;
+  *) exit 1;;
+esac
+"#,
+    );
+    let j = Job {
+      docker: &docker,
+      service: "app",
+      repo: String::new(),
+      password: "",
+      http_auth: None,
+      mounts: vec![],
+    };
+    let diff = snapshots(
+      &j,
+      Path::new("/srv/app"),
+      "aaaaaaaa",
+      "bbbbbbbb",
+      10,
+      &Ctx::detached(),
+    )
+    .await
+    .unwrap();
+    assert_eq!((diff.summary.added, diff.summary.modified), (1, 0));
+    assert_eq!(diff.entries[0].path, "data/new.txt");
+  }
 
   #[test]
   fn compute_live_diff_marks_added_removed_modified_and_excluded() {

@@ -432,6 +432,87 @@ fn mock_backup_path(
 }
 
 #[tokio::test]
+async fn live_diff_reopens_historical_target_with_legacy_repo_key() {
+  let state = test_state();
+  seed_servers(&state).await;
+  seed_service(&state, "svc-a", false).await;
+  let legacy = seed_legacy(&state).await;
+  let creds = ensure_service_creds(&state, "svc-a").await.unwrap();
+  let mut attempted_current = false;
+  let ready = Arc::new(AtomicBool::new(false));
+  let deployed = ready.clone();
+  state.hub.mock_agent_with_backup(
+    "s2", false, true, false,
+    move |op| match op {
+      AgentOp::ProjectStatus { .. } => Ok(json!([])),
+      AgentOp::ProjectUp(up) => {
+        assert!(up.compose.contains("svc-a:"));
+        deployed.store(true, Ordering::Release);
+        Ok(json!({"containers":[{"name":"rest-server","service":"rest-server","state":"running"}], "images":[]}))
+      }
+      _ => panic!("预览不应修改备份仓库"),
+    },
+  );
+  state.hub.mock_agent_with_backup(
+    "s1", false, true, false,
+    move |op| match op {
+      AgentOp::Probe { .. } => Ok(json!([true])),
+      AgentOp::Restic(job) => {
+        assert!(ready.load(Ordering::Acquire));
+        assert!(matches!(job.action, ResticAction::DiffLocal { .. }));
+        assert!(matches!(job.repo, ResticRepo::Rest { user, password, .. }
+          if user == "svc-a" && password.0 == creds.http));
+        if !attempted_current {
+          assert!(job.password.0 == creds.key);
+          attempted_current = true;
+          return Err(ApiError::new(ErrorCode::Forbidden, "仓库口令不匹配"));
+        }
+        assert!(job.password.0 == legacy);
+        Ok(json!({
+          "service": "svc-a", "mode": "live", "base": "", "target": "abcdef01",
+          "summary": wharf_api_types::backup::BackupDiffSummary::default(),
+          "entries": [], "truncated": false,
+        }))
+      }
+      _ => panic!("预览不应停服或恢复"),
+    },
+  );
+  state.hub.mock_safe_backup_agent("s1");
+  state.hub.mock_safe_backup_agent("s2");
+  state.hub.enable_mock_backup_v2("s1");
+  let mut read_only = auth(false);
+  read_only.perms = [Perm::Read].into_iter().collect();
+  let result = browse::diff(
+    State(state.clone()),
+    read_only,
+    Path("svc-a".into()),
+    Query(serde_json::from_value(json!({"from": "s2"})).unwrap()),
+  )
+  .await
+  .map_err(|e| e.0)
+  .unwrap();
+  assert_eq!(result.target, "abcdef01");
+}
+
+#[test]
+fn backup_browse_timeouts_cover_sequential_restic_calls() {
+  assert!(
+    restic_call_timeout(&ResticAction::ExtractPrepare {
+      snapshot: "latest".into(),
+      path: "file".into(),
+      max_bytes: 1,
+    }) > Duration::from_secs(180 + 300)
+  );
+  assert!(
+    restic_call_timeout(&ResticAction::DiffSnapshots {
+      base: "abcdef01".into(),
+      target: "latest".into(),
+      limit: 0,
+    }) > Duration::from_secs(3 * 180)
+  );
+}
+
+#[tokio::test]
 async fn backup_and_restore_block_shared_mounts_before_stopping_owner()
  {
   let state = test_state();

@@ -17,6 +17,7 @@ pub struct AppState {
   pub data_dir: std::path::PathBuf,
   pub downloads: crate::uploads::Downloads,
   pub safe_mode: std::sync::atomic::AtomicBool,
+  pub resumed_at: std::sync::OnceLock<chrono::DateTime<chrono::Utc>>,
   /// 正在后台同步的边缘应用。
   pub edge_syncing: crate::edge_sync::Syncing,
 }
@@ -72,7 +73,12 @@ pub async fn resume(
 ) -> ApiResult<CoreSafeModeView> {
   auth.require(Perm::Admin)?;
   audit.set_detail("解除安全接管模式".into());
-  let resumed = s.safe_mode.swap(false, Ordering::AcqRel);
+  let resumed = if s.is_safe_mode() {
+    s.resumed_at.get_or_init(chrono::Utc::now);
+    s.safe_mode.swap(false, Ordering::AcqRel)
+  } else {
+    false
+  };
   Ok(Json(safe_mode_view(&s, Some(resumed))))
 }
 
@@ -123,5 +129,6 @@ mod tests {
     .0;
     assert_eq!(view.resumed, Some(true));
     assert!(!s.is_safe_mode());
+    assert!(s.resumed_at.get().is_some());
   }
 }

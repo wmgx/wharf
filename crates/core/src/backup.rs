@@ -260,6 +260,7 @@ async fn check_location(
   snap: &Snap,
   w: &Where,
   service: &str,
+  mode: crate::link::ProbeMode,
 ) -> Result<(), ApiError> {
   if !snap.world.servers.contains_key(&w.target) {
     return Err(crate::world::server_not_found(&w.target));
@@ -290,7 +291,7 @@ async fn check_location(
     &w.server,
     &w.target,
     "连接备份服务器",
-    crate::link::ProbeMode::Persist,
+    mode,
   )
   .await
 }
@@ -785,7 +786,14 @@ pub async fn backup_with_options(
   }
   let mut started = Ok(());
   let result: Result<_, ApiError> = async {
-    check_location(state, &snap, &w, service).await?;
+    check_location(
+      state,
+      &snap,
+      &w,
+      service,
+      crate::link::ProbeMode::Persist,
+    )
+    .await?;
     let creds = ensure_service_creds(state, service).await?;
     ensure_server(state, &snap, &w, None, &progress, cancel).await?;
     ensure_repo_has_service_key(
@@ -944,7 +952,14 @@ pub async fn restore(
   let snap = snapshot::load(&state.db).await?;
   let target = restore_target(state, &snap, service, target).await?;
   let w = location(&snap, service, target);
-  check_location(state, &snap, &w, service).await?;
+  check_location(
+    state,
+    &snap,
+    &w,
+    service,
+    crate::link::ProbeMode::Persist,
+  )
+  .await?;
   let creds = ensure_service_creds(state, service).await?;
   ensure_server(state, &snap, &w, Some(service), &progress, cancel)
     .await?;
@@ -1299,6 +1314,26 @@ async fn repository_secrets(
     .await
 }
 
+fn restic_call_timeout(action: &ResticAction) -> Duration {
+  use wharf_api_types::backup::{
+    RESTIC_DUMP_TIMEOUT, RESTIC_INDEX_TIMEOUT,
+  };
+  let browse_budget = match action {
+    ResticAction::ExtractPrepare { .. } => {
+      RESTIC_INDEX_TIMEOUT + RESTIC_DUMP_TIMEOUT
+    }
+    ResticAction::DiffSnapshots { .. } => RESTIC_INDEX_TIMEOUT * 3,
+    ResticAction::Ls { .. } | ResticAction::DiffLocal { .. } => {
+      RESTIC_INDEX_TIMEOUT
+    }
+    ResticAction::Prune | ResticAction::PruneV2 { .. } => {
+      return RESTIC_TIMEOUT;
+    }
+    _ => return LIST_TIMEOUT,
+  };
+  browse_budget + Duration::from_secs(15)
+}
+
 async fn local_call<T: serde::de::DeserializeOwned>(
   state: &AppState,
   snap: &Snap,
@@ -1307,14 +1342,7 @@ async fn local_call<T: serde::de::DeserializeOwned>(
   action: ResticAction,
   cancel: &CancellationToken,
 ) -> Result<T, ApiError> {
-  let timeout = if matches!(
-    action,
-    ResticAction::Prune | ResticAction::PruneV2 { .. }
-  ) {
-    RESTIC_TIMEOUT
-  } else {
-    LIST_TIMEOUT
-  };
+  let timeout = restic_call_timeout(&action);
   state
     .hub
     .call(

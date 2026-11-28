@@ -35,6 +35,7 @@ fn state_with_db(db: db::Db) -> Arc<AppState> {
     data_dir: Default::default(),
     downloads: Default::default(),
     safe_mode: Default::default(),
+    resumed_at: Default::default(),
     edge_syncing: Default::default(),
   })
 }
@@ -471,6 +472,35 @@ async fn migrated_exec_task_is_suppressed_by_its_runtime_server() {
       .as_deref(),
     Some("服务器 s2 离线")
   );
+}
+
+#[tokio::test]
+async fn persistent_fault_is_reported_once_after_safe_mode() {
+  use std::sync::atomic::Ordering;
+
+  let _g = TEST_LOCK.lock().await;
+  reset_memory();
+  let s = test_state();
+  seed_server_service(&s, "s1", "web").await;
+  assert!(!notify::transition(&s, "server.s1", true).await);
+  s.safe_mode.store(true, Ordering::Release);
+  let t0 = beijing_ms(2026, 6, 1, 12, 0);
+  for i in 0..3 {
+    observe_at(&s, t0 + i * 60_000, "server.online", "s1", 0.0, "")
+      .await;
+  }
+  assert!(firing_since("server_offline", "s1").is_some());
+  assert!(history_rows(&s).await.is_empty());
+
+  s.safe_mode.store(false, Ordering::Release);
+  for i in 3..5 {
+    observe_at(&s, t0 + i * 60_000, "server.online", "s1", 0.0, "")
+      .await;
+  }
+  let rows = history_rows(&s).await;
+  assert_eq!(rows.len(), 1);
+  assert_eq!(rows[0].0, "server_offline");
+  assert!(!rows[0].2);
 }
 
 #[tokio::test]

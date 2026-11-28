@@ -282,6 +282,7 @@ async fn main() -> anyhow::Result<()> {
     downloads: Default::default(),
     edge_syncing: Default::default(),
     safe_mode: cli.safe_mode.into(),
+    resumed_at: Default::default(),
   });
   if state.is_safe_mode() {
     tracing::warn!(

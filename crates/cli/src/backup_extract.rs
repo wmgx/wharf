@@ -4,9 +4,12 @@ use std::{
   io::{self, Write},
   os::{
     fd::{AsRawFd, FromRawFd},
-    unix::{ffi::OsStrExt, fs::PermissionsExt},
+    unix::{
+      ffi::OsStrExt,
+      fs::{OpenOptionsExt, PermissionsExt},
+    },
   },
-  path::{Component, Path, PathBuf},
+  path::{Path, PathBuf},
   time::Duration,
 };
 
@@ -83,24 +86,15 @@ fn open_from(
 }
 
 fn open_dir(path: &Path) -> Result<File, ApiError> {
-  let mut dir =
-    File::open(if path.is_absolute() { "/" } else { "." })
-      .map_err(file_error)?;
-  for part in path.components() {
-    let name = match part {
-      Component::RootDir | Component::CurDir => continue,
-      Component::Normal(name) => name,
-      Component::ParentDir => OsStr::new(".."),
-      _ => return Err(path_error()),
-    };
-    dir = open_from(
-      &dir,
-      &component(name)?,
-      libc::O_RDONLY | libc::O_DIRECTORY,
-    )
-    .map_err(|_| path_error())?;
-  }
-  Ok(dir)
+  File::options()
+    .read(true)
+    .custom_flags(libc::O_DIRECTORY)
+    .open(if path.as_os_str().is_empty() {
+      Path::new(".")
+    } else {
+      path
+    })
+    .map_err(|_| path_error())
 }
 
 fn target_state(
@@ -165,27 +159,27 @@ impl Drop for OutputFile {
 
 impl OutputFile {
   fn open(
-    path: &Path,
+    output: Option<&Path>,
     basename: &str,
     force: bool,
   ) -> Result<Self, ApiError> {
-    let mut path = path.to_owned();
-    let (dir, name) = if path.file_name().is_none() {
+    let mut path = output.unwrap_or(Path::new(basename)).to_owned();
+    let existing = if output.is_some() {
+      std::fs::metadata(&path)
+    } else {
+      std::fs::symlink_metadata(&path)
+    };
+    let (dir, name) = if path.file_name().is_none()
+      || existing.is_ok_and(|m| m.is_dir())
+    {
+      // 先打开用户选定的目录，之后的文件操作都以该目录为锚点。
       let dir = open_dir(&path)?;
       path = path.join(basename);
       (dir, component(OsStr::new(basename))?)
     } else {
       let name = component(path.file_name().ok_or_else(path_error)?)?;
       let dir = open_dir(path.parent().ok_or_else(path_error)?)?;
-      if target_state(&dir, &name)? == Some(libc::S_IFDIR) {
-        path = path.join(basename);
-        let dir =
-          open_from(&dir, &name, libc::O_RDONLY | libc::O_DIRECTORY)
-            .map_err(|_| path_error())?;
-        (dir, component(OsStr::new(basename))?)
-      } else {
-        (dir, name)
-      }
+      (dir, name)
     };
     check_destination(&dir, &name, force)?;
     let mut bytes = [0; 16];
@@ -264,16 +258,11 @@ pub(crate) async fn run(
     );
   }
   let mut target = (!raw)
-    .then(|| {
-      OutputFile::open(
-        Path::new(output.unwrap_or(basename)),
-        basename,
-        force,
-      )
-    })
+    .then(|| OutputFile::open(output.map(Path::new), basename, force))
     .transpose()?;
-  let mut response =
-    c.download_response(url, Duration::from_secs(600)).await?;
+  let mut response = c
+    .download_response(url, Duration::from_secs(15 * 60))
+    .await?;
   let header = |name| {
     response
       .headers()
@@ -348,12 +337,29 @@ mod tests {
   use super::*;
 
   #[test]
+  fn extract_accepts_symlinked_output_directory_and_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    let link = dir.path().join("link");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    for path in [link.clone(), link.join("out")] {
+      let mut output =
+        OutputFile::open(Some(&path), "out", true).unwrap();
+      output.file.write_all(b"backup").unwrap();
+      output.commit(0o600, true).unwrap();
+      assert_eq!(std::fs::read(real.join("out")).unwrap(), b"backup");
+    }
+  }
+
+  #[test]
   fn extract_blocks_symlink_escape_and_never_widens_mode() {
     let dir = tempfile::tempdir().unwrap();
     let outside = dir.path().join("outside");
     let target = dir.path().join("link");
     std::os::unix::fs::symlink(&outside, &target).unwrap();
-    let err = OutputFile::open(&target, "link", true).err().unwrap();
+    let err =
+      OutputFile::open(Some(&target), "link", true).err().unwrap();
     assert_eq!(err.code, ErrorCode::InvalidInput);
     assert!(!outside.exists());
     assert_eq!(

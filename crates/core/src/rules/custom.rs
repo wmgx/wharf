@@ -663,8 +663,9 @@ pub(super) async fn evaluate_at(
         (true, e)
       }
     };
-    if notify::transition(state, &cr.notify_key(), ok).await
-      || (!ok && suppress::confirm_sample(state, &fkey).await)
+    if !state.is_safe_mode()
+      && (notify::transition(state, &cr.notify_key(), ok).await
+        || (!ok && suppress::confirm_sample(state, &fkey).await))
     {
       let o = cr.as_override();
       push_with_world(

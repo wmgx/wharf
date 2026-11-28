@@ -32,6 +32,8 @@ pub struct Args {
   recovery_key: Option<PathBuf>,
   #[arg(long, default_value = "latest")]
   snapshot: String,
+  #[arg(long, default_value = "restic")]
+  restic_bin: PathBuf,
   #[arg(long)]
   yes: bool,
 }
@@ -301,7 +303,7 @@ pub async fn run(data: &Path, args: &Args) -> Result<(), ApiError> {
     [password.clone(), user, password]
   };
   let stage = Stage(private_dir(data, ".wharf-core-restore-")?);
-  let mut command = tokio::process::Command::new("restic");
+  let mut command = tokio::process::Command::new(&args.restic_bin);
   command
     .args([
       "--no-cache",
@@ -347,6 +349,39 @@ pub async fn run(data: &Path, args: &Args) -> Result<(), ApiError> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn core_restore_uses_configured_restic_binary() {
+    use clap::Parser;
+
+    let dir = tempfile::tempdir().unwrap();
+    let binary = dir.path().join("custom-restic");
+    let recovery = dir.path().join("recovery");
+    fs::write(&binary, "#!/bin/sh\ntouch \"$0.called\"\nexit 1\n")
+      .unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+      .unwrap();
+    fs::write(&recovery, "RESTIC_PASSWORD=fixture\nRESTIC_REST_USERNAME=fixture\nRESTIC_REST_PASSWORD=fixture\n").unwrap();
+    let cli = crate::Cli::try_parse_from([
+      std::ffi::OsStr::new("wharf-core"),
+      "restore".as_ref(),
+      "--from".as_ref(),
+      "s2".as_ref(),
+      "--recovery-key".as_ref(),
+      recovery.as_os_str(),
+      "--restic-bin".as_ref(),
+      binary.as_os_str(),
+    ])
+    .unwrap();
+    let Some(crate::Command::Restore(args)) = cli.command else {
+      panic!("需要恢复命令");
+    };
+    assert_eq!(
+      run(dir.path(), &args).await.unwrap_err().code,
+      ErrorCode::Conflict
+    );
+    assert!(dir.path().join("custom-restic.called").exists());
+  }
 
   #[test]
   fn core_restore_rejects_damaged_database_and_symlink() {

@@ -20,7 +20,10 @@ use wharf_api_types::{
     ResticPreflight, ResticPreflightMode, ResticPreflightResult,
     ResticRepo, Snapshot,
   },
-  backup::{KEEP_TAG, NOTE_TAG_PREFIX, restic_exclude_patterns},
+  backup::{
+    KEEP_TAG, NOTE_TAG_PREFIX, RESTIC_DUMP_TIMEOUT,
+    RESTIC_INDEX_TIMEOUT, restic_exclude_patterns,
+  },
   validate_name,
 };
 
@@ -135,7 +138,12 @@ impl Job<'_> {
     dest: &mut (impl tokio::io::AsyncWrite + Unpin),
     ctx: &Ctx,
   ) -> Result<(), ApiError> {
-    let (cmd, name) = self.restic_command(args, SHORT_TIMEOUT);
+    let timeout = if args.first() == Some(&"dump") {
+      RESTIC_DUMP_TIMEOUT
+    } else {
+      RESTIC_INDEX_TIMEOUT
+    };
+    let (cmd, name) = self.restic_command(args, timeout);
     let result = cmd.stdout_to(ctx, limit, dest).await;
     match result {
       Err(e) => {

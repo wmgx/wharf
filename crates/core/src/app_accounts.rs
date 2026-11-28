@@ -397,6 +397,7 @@ mod tests {
       data_dir: Default::default(),
       downloads: Default::default(),
       safe_mode: Default::default(),
+      resumed_at: Default::default(),
       edge_syncing: Default::default(),
     });
     state
