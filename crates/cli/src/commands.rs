@@ -201,7 +201,16 @@ pub(crate) fn pretty<T: serde::Serialize>(value: &T) {
   print::json(value);
 }
 
-async fn dispatch(
+// 分发包含许多异步分支。让调用方只持有指针，避免在进程启动时复制大状态。
+fn dispatch(
+  c: &Client,
+  command: Command,
+  j: bool,
+) -> impl std::future::Future<Output = CliResult<()>> + '_ {
+  Box::pin(dispatch_command(c, command, j))
+}
+
+async fn dispatch_command(
   c: &Client,
   command: Command,
   j: bool,
