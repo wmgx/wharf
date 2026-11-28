@@ -101,6 +101,7 @@ pub fn spawn_probe_on_connect(
           &server,
           Some(conn_id),
           binding.as_ref(),
+          true,
           &closed,
         )
         .await
@@ -120,16 +121,32 @@ pub async fn require_verified(
   state: &AppState,
   cancel: &CancellationToken,
 ) -> Result<VerifiedCore, ApiError> {
+  require_verified_with(state, true, cancel).await
+}
+
+pub(crate) async fn require_verified_readonly(
+  state: &AppState,
+  cancel: &CancellationToken,
+) -> Result<VerifiedCore, ApiError> {
+  require_verified_with(state, false, cancel).await
+}
+
+async fn require_verified_with(
+  state: &AppState,
+  persist: bool,
+  cancel: &CancellationToken,
+) -> Result<VerifiedCore, ApiError> {
   let _guard = tokio::select! {
     biased;
     _ = cancel.cancelled() => return Err(cancelled()),
     guard = VERIFY.lock() => guard,
   };
-  find_verified(state, cancel).await
+  find_verified(state, persist, cancel).await
 }
 
 async fn find_verified(
   state: &AppState,
+  persist: bool,
   cancel: &CancellationToken,
 ) -> Result<VerifiedCore, ApiError> {
   let persisted = state.db.call(|c| load_persisted(c)).await?;
@@ -141,8 +158,15 @@ async fn find_verified(
     if cancel.is_cancelled() {
       return Err(cancelled());
     }
-    match probe_one(state, &server, None, persisted.as_ref(), cancel)
-      .await
+    match probe_one(
+      state,
+      &server,
+      None,
+      persisted.as_ref(),
+      persist,
+      cancel,
+    )
+    .await
     {
       Ok(Some(verified)) => return Ok(verified),
       Ok(None) => {}
@@ -168,6 +192,7 @@ async fn probe_one(
   server: &str,
   expected_conn: Option<u64>,
   persisted: Option<&(String, String)>,
+  persist: bool,
   cancel: &CancellationToken,
 ) -> Result<Option<VerifiedCore>, ApiError> {
   let Some((conn_id, public_key)) =
@@ -230,7 +255,20 @@ async fn probe_one(
   {
     return Ok(None);
   }
-  finish_probe(state, verified, persisted, &expected, response).await
+  if persist {
+    return finish_probe(
+      state, verified, persisted, &expected, response,
+    )
+    .await;
+  }
+  match response {
+    Ok(result) => Ok(
+      valid_response(&expected, result.token.trim())
+        .then_some(verified),
+    ),
+    Err(e) if e.code == ErrorCode::NotFound => Ok(None),
+    Err(e) => Err(e),
+  }
 }
 
 async fn finish_probe(

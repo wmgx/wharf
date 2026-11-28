@@ -14,6 +14,43 @@ use crate::{
   },
 };
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CoreBackupVerifySnapshot {
+  pub id: String,
+  pub short_id: String,
+  pub time: DateTime<Utc>,
+  #[serde(default)]
+  pub has_core_path: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CoreBackupVerifyView {
+  pub ok: bool,
+  pub target: String,
+  pub username: String,
+  pub user_key_current: bool,
+  pub login_password_ok: bool,
+  pub htpasswd_ok: bool,
+  pub repo_decrypt_ok: bool,
+  pub repo_exists: bool,
+  pub snapshot_count: usize,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub latest_snapshot: Option<CoreBackupVerifySnapshot>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CoreBackupExportResult {
+  pub output: String,
+  pub size_bytes: u64,
+  pub sha256: String,
+  pub format: String,
+  pub restore_command: String,
+}
+
 /// `GET /api/network`：各机器怎么接入、谁能连谁。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct NetworkView {
@@ -1176,6 +1213,39 @@ pub struct BackupRecord {
   pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BackupMoveStatus {
+  pub from: String,
+  pub to: String,
+  pub phase: String,
+  pub source_snapshots: usize,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub target_archive: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BackupMovePreview {
+  pub service: String,
+  pub is_core: bool,
+  pub from: String,
+  pub to: String,
+  pub source_snapshots: usize,
+  pub target_existing_snapshots: usize,
+  pub resuming: bool,
+  pub needs_confirm: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub confirm: Option<String>,
+  pub old_repo_path: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BackupMoveAbort {
+  pub aborted: bool,
+  pub service: String,
+}
+
 /// `GET /api/services/{name}/backups`
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BackupsView {
@@ -1193,6 +1263,8 @@ pub struct BackupsView {
   /// 读取快照失败的原因（例如备份服务器离线）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub snapshots_error: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub pending_move: Option<BackupMoveStatus>,
 }
 
 /// `POST /api/services/{name}/restore`

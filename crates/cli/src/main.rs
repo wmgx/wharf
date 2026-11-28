@@ -14,6 +14,7 @@ mod bookmark;
 mod client;
 mod commands;
 mod connect;
+mod core_export;
 mod deploy;
 mod describe;
 mod edge;
@@ -399,6 +400,8 @@ pub enum Command {
   Validate { file: std::path::PathBuf },
   /// 输出字段说明（JSON Schema），不需要连接控制面。
   Schema {
+    #[arg(long, requires = "resource")]
+    paths: bool,
     /// fleet、service、gateway、route、server、change、plan、run、status、error。不填则列出全部。
     resource: Option<String>,
   },
@@ -1695,6 +1698,28 @@ pub enum SecretCmd {
 
 #[derive(Subcommand)]
 pub enum BackupCmd {
+  /// 无损迁移历史备份仓库，支持断点续传，保留旧仓库。
+  Move {
+    #[arg(required_unless_present = "core", conflicts_with = "core")]
+    service: Option<String>,
+    #[arg(long)]
+    core: bool,
+    #[arg(long, required_unless_present = "abort")]
+    to: Option<String>,
+    #[arg(long)]
+    from: Option<String>,
+    /// 只检查连通性、源快照和目标仓库冲突。
+    #[arg(long, conflicts_with = "abort")]
+    dry_run: bool,
+    /// 丢弃续传进度，两端文件均保留。
+    #[arg(long)]
+    abort: bool,
+    /// 确认归档目标机上的旧仓库，格式为 backup-move/<名称>。
+    #[arg(long)]
+    confirm: Option<String>,
+    #[arg(long)]
+    no_wait: bool,
+  },
   /// 给历史业务仓库加上服务专属口令。
   Migrate,
   /// 验证业务仓库的新口令后，摘除并清理旧全局口令。
@@ -1749,6 +1774,18 @@ pub enum BackupCmd {
     unlock: bool,
     #[arg(long, requires = "unlock")]
     stale_only: bool,
+    /// 只读验证登录密码可用于灾备恢复。
+    #[arg(long, conflicts_with_all = ["to", "run", "unlock", "export"])]
+    verify_password: bool,
+    /// 用控制面登录密码加密导出离线灾备包。
+    #[arg(long, conflicts_with_all = ["to", "run", "unlock"])]
+    export: bool,
+    /// 输出路径或目录，- 表示 stdout。
+    #[arg(short, long, requires = "export")]
+    output: Option<std::path::PathBuf>,
+    /// 覆盖已有普通文件。
+    #[arg(long, requires = "export")]
+    force: bool,
   },
   /// 恢复快照：停服务、恢复数据、启动。原来的数据改名保留在 /srv/.wharf-restore/ 下。
   Restore {
@@ -1890,9 +1927,54 @@ pub enum TokenCmd {
   },
 }
 
+fn wants_json() -> bool {
+  std::env::args_os()
+    .skip(1)
+    .take_while(|arg| arg != "--")
+    .any(|arg| {
+      let arg = arg.to_string_lossy();
+      let flag = arg.split('=').next().unwrap_or_default();
+      matches!(
+        flag,
+        "--json" | "--fields" | "--page-size" | "--changed"
+      )
+    })
+}
+
 #[tokio::main]
 async fn main() {
-  let mut cli = Cli::parse();
+  let mut cli = match Cli::try_parse() {
+    Ok(cli) => cli,
+    Err(err) => {
+      use clap::error::ErrorKind;
+      if matches!(
+        err.kind(),
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+      ) {
+        let _ = err.print();
+        std::process::exit(0);
+      }
+      if wants_json() {
+        let text = err.to_string();
+        let message = text
+          .lines()
+          .next()
+          .unwrap_or_default()
+          .trim_start_matches("error: ");
+        let mut api = wharf_api_types::ApiError::invalid(message);
+        if let Some(hint) = text
+          .lines()
+          .find_map(|line| line.trim().strip_prefix("tip: "))
+        {
+          api = api.with_hint(hint);
+        }
+        print::error(&api, true);
+      } else {
+        let _ = err.print();
+      }
+      std::process::exit(1);
+    }
+  };
   if let Some(fields) = &cli.fields {
     print::set_fields(fields);
     cli.json = true;

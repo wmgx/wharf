@@ -190,6 +190,15 @@ pub enum Step {
   Backup {
     service: String,
   },
+  BackupMove {
+    service: String,
+    #[serde(default)]
+    is_core: bool,
+    from: String,
+    to: String,
+    #[serde(default)]
+    replace_target: bool,
+  },
   Restore {
     service: String,
     snapshot: String,
@@ -313,6 +322,7 @@ impl Step {
       | Self::TunnelDelete { .. } => 7,
       Self::ServiceDown { .. } => 8,
       Self::Backup { .. }
+      | Self::BackupMove { .. }
       | Self::Restore { .. }
       | Self::Rebuild { .. }
       | Self::AgentUpgrade { .. }
@@ -1077,6 +1087,21 @@ fn finish_plan(
       .collect();
     vec![format!("wharf apply {plan_id}{confirms}")]
   };
+  for (name, row) in &desired.services {
+    if let (Some(before), Some(after)) = (
+      snap
+        .world
+        .services
+        .get(name)
+        .and_then(|row| row.spec.backup.as_ref()),
+      row.spec.backup.as_ref(),
+    ) && before.to != after.to
+    {
+      b.warnings.push(format!(
+        "{name} 改备份目标不会迁移历史仓库，保留历史请用 wharf backup move {name} --to {}", after.to,
+      ));
+    }
+  }
   let now = Utc::now();
   let plan = Plan {
     plan_id,

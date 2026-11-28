@@ -23,10 +23,13 @@ use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
     AgentOp, BackupSummary, CORE_BACKUP_DIR, CORE_REST_SERVER_PORT,
-    OneTimeSecret, ResticAction, ResticKeyInfo,
+    OneTimeSecret, ResticAction, ResticKeyInfo, Snapshot,
   },
   plan::ApplyResponse,
-  view::{BackupRecord, Issue, IssueLevel, Perm},
+  view::{
+    BackupRecord, CoreBackupVerifySnapshot, CoreBackupVerifyView,
+    Issue, IssueLevel, Perm,
+  },
 };
 
 use crate::{
@@ -75,6 +78,8 @@ pub struct CoreBackupView {
   /// 控制面整个丢了时，在新机器上执行的恢复命令。
   #[serde(skip_serializing_if = "Option::is_none")]
   pub restore_command: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub pending_move: Option<wharf_api_types::view::BackupMoveStatus>,
 }
 
 pub fn target(
@@ -145,6 +150,11 @@ pub async fn show(
     to,
     records,
     restore_command,
+    pending_move: snap
+      .pending
+      .backup_moves
+      .get(REPO)
+      .map(|p| p.status.clone()),
   }))
 }
 
@@ -197,7 +207,7 @@ pub(crate) async fn require_recovery_ready(
     .await
 }
 
-fn password_source(
+pub(crate) fn password_source(
   peer: SocketAddr,
   headers: &HeaderMap,
 ) -> Result<String, ApiError> {
@@ -212,7 +222,7 @@ fn password_source(
   Ok(key)
 }
 
-async fn verify_backup_password(
+pub(crate) async fn verify_backup_password(
   s: &AppState,
   auth: &Auth,
   audit: &AuditSlot,
@@ -236,6 +246,196 @@ async fn verify_backup_password(
   audit.set_detail("控制面备份登录密码校验失败".into());
   tokio::time::sleep(Duration::from_secs(1)).await;
   Err(ApiError::new(ErrorCode::Forbidden, "登录密码不对"))
+}
+
+pub async fn verify_password(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  ConnectInfo(peer): ConnectInfo<SocketAddr>,
+  headers: HeaderMap,
+  Extension(audit): Extension<AuditSlot>,
+  Json(req): Json<PasswordRequest>,
+) -> ApiResult<CoreBackupVerifyView> {
+  auth.require(Perm::Admin)?;
+  let key = password_source(peer, &headers)?;
+  let (username, hash) = login::admin(&s.db)
+    .await?
+    .ok_or_else(|| ApiError::invalid("尚未设置管理员密码"))?;
+  verify_backup_password(
+    &s,
+    &auth,
+    &audit,
+    &key,
+    login::source(peer.ip(), &headers),
+    req.password.clone(),
+    hash.clone(),
+  )
+  .await?;
+  let (target, current) = s
+    .db
+    .call(move |c| {
+      let target = target(c)?.ok_or_else(|| {
+        ApiError::invalid("还没有开启控制面备份")
+          .with_hint("开启请运行 wharf backup core --to <server>")
+      })?;
+      let current = user_key_current(c, Some(&target), Some(&hash))?;
+      Ok((target, current))
+    })
+    .await?;
+  let cancel = CancellationToken::new();
+  let _cancel = cancel.clone().drop_guard();
+  let core =
+    crate::core_node::require_verified_readonly(&s, &cancel).await?;
+  backup::require_isolation(&s, &core.server)?;
+  backup::require_safe_backup(&s, &core.server)?;
+  let snap = snapshot::load(&s.db).await?;
+  let ip = target_ip(&snap, &target)?;
+  let job = |action| {
+    backup::job(
+      &snap,
+      &core.server,
+      REPO,
+      backup::rest_repo(
+        &ip,
+        CORE_REST_SERVER_PORT,
+        &username,
+        &req.password,
+      ),
+      &req.password,
+      action,
+    )
+  };
+  let mut view = CoreBackupVerifyView {
+    ok: false,
+    target,
+    username: username.clone(),
+    user_key_current: current,
+    login_password_ok: true,
+    htpasswd_ok: false,
+    repo_decrypt_ok: false,
+    repo_exists: false,
+    snapshot_count: 0,
+    latest_snapshot: None,
+    error: None,
+    hint: None,
+  };
+  let snapshots: Result<Vec<Snapshot>, _> = core
+    .call(
+      &s,
+      job(ResticAction::Snapshots),
+      backup::LIST_TIMEOUT,
+      None,
+      &cancel,
+    )
+    .await;
+  match snapshots {
+    Ok(snapshots) if !snapshots.is_empty() => {
+      let latest = &snapshots[0];
+      let has_core_path =
+        latest.paths.iter().any(|path| path == CORE_BACKUP_DIR);
+      view.ok = true;
+      view.htpasswd_ok = true;
+      view.repo_decrypt_ok = true;
+      view.repo_exists = true;
+      view.snapshot_count = snapshots.len();
+      view.latest_snapshot = Some(CoreBackupVerifySnapshot {
+        id: latest.id.clone(),
+        short_id: latest.short_id.clone(),
+        time: latest.time,
+        has_core_path,
+      });
+      if !has_core_path {
+        view.hint = Some("最新快照不含控制面备份目录，建议运行 wharf backup core --run".into());
+      }
+    }
+    Ok(_) => {
+      let keys: Result<Vec<ResticKeyInfo>, _> = core
+        .call(
+          &s,
+          job(ResticAction::ListKeys),
+          backup::LIST_TIMEOUT,
+          None,
+          &cancel,
+        )
+        .await;
+      match keys {
+        Ok(keys) => {
+          view.htpasswd_ok = true;
+          view.repo_exists = !keys.is_empty();
+          view.repo_decrypt_ok = view.repo_exists;
+          view.error = Some(
+            if view.repo_exists {
+              "密码可解开仓库，但仓库中还没有任何快照"
+            } else {
+              "备份机上尚未初始化控制面仓库"
+            }
+            .into(),
+          );
+          view.hint =
+            Some("运行 wharf backup core --run 生成首份快照".into());
+        }
+        Err(error) => classify_verify_error(&mut view, &error),
+      }
+    }
+    Err(error) => classify_verify_error(&mut view, &error),
+  }
+  audit.set_detail(
+    if view.ok {
+      "核验控制面备份密码：通过"
+    } else {
+      "核验控制面备份密码：失败"
+    }
+    .into(),
+  );
+  Ok(Json(view))
+}
+
+fn classify_verify_error(
+  view: &mut CoreBackupVerifyView,
+  error: &ApiError,
+) {
+  let lower = error.message.to_ascii_lowercase();
+  let (message, hint) = if error.code == ErrorCode::Forbidden
+    && !lower.contains("401")
+  {
+    view.htpasswd_ok = true;
+    view.repo_exists = true;
+    (
+      "备份服务器认证通过，但当前登录密码无法解开仓库",
+      format!(
+        "运行 wharf backup core --to {} 重新同步恢复口令",
+        view.target
+      ),
+    )
+  } else if ["401", "unauthorized", "authentication"]
+    .iter()
+    .any(|text| lower.contains(text))
+  {
+    (
+      "备份服务器 HTTP 认证（htpasswd）拒绝当前登录密码",
+      format!(
+        "运行 wharf backup core --to {} 重新同步备份账号与恢复口令",
+        view.target
+      ),
+    )
+  } else if error.code == ErrorCode::Conflict
+    && error.message.contains("已锁定")
+  {
+    (
+      "备份仓库已锁定",
+      "运行 wharf backup core --unlock 清理残留锁后重试".into(),
+    )
+  } else {
+    (
+      "无法读取控制面备份仓库",
+      format!(
+        "检查 {} 是否在线、wharf-backup-core 容器是否运行及内网连通性",
+        view.target
+      ),
+    )
+  };
+  view.error = Some(message.into());
+  view.hint = Some(hint);
 }
 
 /// `POST /api/core-backup`：开启（或换备份服务器、改过密码后重新输入），并立刻备份一次。
@@ -288,6 +488,10 @@ pub async fn enable(
   let guard = s
     .locks
     .acquire(crate::locks::LockSpec::CoreBackup, "备份控制面")?;
+  crate::backup_move::require_idle(
+    &snapshot::load(&s.db).await?,
+    REPO,
+  )?;
   let cancel = CancellationToken::new();
   let _cancel = cancel.clone().drop_guard();
   let core_server = match crate::core_node::server_of(&snap) {
@@ -478,6 +682,13 @@ async fn backup_impl(
     state.db.call(|c| db::setting(c, TO)).await.map(|old| {
       (target.map(str::to_string).or_else(|| old.clone()), old)
     })?;
+  if target.is_some()
+    && old_target
+      .as_ref()
+      .is_some_and(|old| Some(old.as_str()) != target)
+  {
+    progress("换机不会搬迁历史快照，保留历史请用 wharf backup move --core --to <server>".into());
+  }
   let to = to.ok_or_else(|| ApiError::invalid("还没有开启控制面备份")
     .with_hint("本机快速回退用 wharf core snapshot，整机异地灾备用 wharf backup core")
     .suggest("wharf backup core --to <server>"))?;
@@ -660,6 +871,29 @@ async fn ensure_creds(
     http_hash,
     owner,
   })
+}
+
+pub(crate) async fn deploy_move_target(
+  state: &AppState,
+  snap: &snapshot::Snapshot,
+  w: &Where,
+  progress: &ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  let creds = ensure_creds(state).await?;
+  ensure_core_server(state, snap, w, &creds, progress, cancel).await
+}
+
+pub(crate) fn switch_move_target(
+  c: &rusqlite::Connection,
+  from: &str,
+  to: &str,
+) -> Result<(), ApiError> {
+  db::set_setting(c, TO, Some(to))?;
+  if db::setting(c, USER_KEY_TARGET)?.as_deref() == Some(from) {
+    db::set_setting(c, USER_KEY_TARGET, Some(to))?;
+  }
+  Ok(())
 }
 
 async fn ensure_core_server(
@@ -1416,5 +1650,122 @@ mod tests {
         .await
         .unwrap();
     }
+  }
+}
+
+#[cfg(test)]
+mod verification_tests {
+  use super::*;
+  use crate::rules::tests::{TEST_LOCK, test_state};
+  use serde_json::json;
+  use std::sync::atomic::{AtomicU8, Ordering};
+  use wharf_api_types::agent::{CoreHostProbeResult, ResticRepo};
+
+  async fn fixture()
+  -> (tempfile::TempDir, Arc<AppState>, String, Arc<AtomicU8>) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = test_state();
+    Arc::get_mut(&mut state).unwrap().data_dir = dir.path().into();
+    backup::tests::seed_servers(&state).await;
+    let password = backup::random_hex();
+    let expected = password.clone();
+    let hash = login::hash_password(&password).unwrap();
+    state
+      .db
+      .call(move |c| {
+        login::set_admin(c, "operator", &hash)?;
+        db::set_setting(c, TO, Some("s2"))
+      })
+      .await
+      .unwrap();
+    let mode = Arc::new(AtomicU8::new(0));
+    let fixture = mode.clone();
+    state.hub.mock_agent_with_backup("s1", false, true, true, move |op| match op {
+      AgentOp::ProbeCoreHost(probe) => {
+        let token = std::fs::read_to_string(Path::new(&probe.data_dir).join(".core-probe").join(probe.challenge_id)).unwrap();
+        Ok(json!(CoreHostProbeResult { token }))
+      }
+      AgentOp::Restic(job) => {
+        let ResticRepo::Rest { user, password, .. } = job.repo else { panic!("需要经 HTTP 核验") };
+        assert_eq!(user, "operator");
+        assert!(password.0 == expected && job.password.0 == expected);
+        let mode = fixture.load(Ordering::Relaxed);
+        match (mode, job.action) {
+          (0, ResticAction::Snapshots) => Ok(json!([
+            {"id":"a", "short_id":"a", "time":"2026-01-01T00:00:00Z", "hostname":"s1", "paths":[CORE_BACKUP_DIR]},
+            {"id":"b", "short_id":"b", "time":"2025-12-31T00:00:00Z", "hostname":"s1"},
+          ])),
+          (1, _) => Err(ApiError::new(ErrorCode::AgentFailed, "401 Unauthorized")),
+          (2, _) => Err(ApiError::new(ErrorCode::Forbidden, "口令错误")),
+          (3 | 4, ResticAction::Snapshots) | (3, ResticAction::ListKeys) => Ok(json!([])),
+          (4, ResticAction::ListKeys) => Ok(json!([{"id":"a", "current":true}])),
+          _ => panic!("意外的仓库操作"),
+        }
+      }
+      _ => panic!("意外的 agent 操作"),
+    });
+    state.hub.mock_safe_backup_agent("s1");
+    (dir, state, password, mode)
+  }
+
+  async fn check(
+    s: &Arc<AppState>,
+    password: String,
+  ) -> Result<CoreBackupVerifyView, ApiError> {
+    verify_password(
+      State(s.clone()),
+      crate::security_receipt::tests::auth(true),
+      ConnectInfo(SocketAddr::from(([203, 0, 113, 13], 1234))),
+      HeaderMap::new(),
+      Extension(AuditSlot::default()),
+      Json(PasswordRequest { password }),
+    )
+    .await
+    .map(|Json(v)| v)
+    .map_err(|e| e.0)
+  }
+
+  #[tokio::test]
+  async fn verify_password_checks_htpasswd_and_repo_decrypt() {
+    let _lock = TEST_LOCK.lock().await;
+    let (_dir, state, password, mode) = fixture().await;
+    let v = check(&state, password.clone()).await.unwrap();
+    assert!(
+      v.ok
+        && v.htpasswd_ok
+        && v.repo_decrypt_ok
+        && v.snapshot_count == 2
+    );
+    assert!(v.latest_snapshot.as_ref().unwrap().has_core_path);
+    assert!(!serde_json::to_string(&v).unwrap().contains(&password));
+    mode.store(1, Ordering::Relaxed);
+    assert!(
+      !check(&state, password.clone()).await.unwrap().htpasswd_ok
+    );
+    mode.store(2, Ordering::Relaxed);
+    let v = check(&state, password).await.unwrap();
+    assert!(v.htpasswd_ok && !v.repo_decrypt_ok);
+    assert_eq!(
+      check(&state, backup::random_hex()).await.unwrap_err().code,
+      ErrorCode::Forbidden
+    );
+  }
+
+  #[tokio::test]
+  async fn verify_password_distinguishes_missing_repo_from_empty_snapshots()
+   {
+    let _lock = TEST_LOCK.lock().await;
+    let (_dir, state, password, mode) = fixture().await;
+    mode.store(3, Ordering::Relaxed);
+    let missing = check(&state, password.clone()).await.unwrap();
+    assert!(!missing.ok && !missing.repo_exists);
+    mode.store(4, Ordering::Relaxed);
+    let empty = check(&state, password).await.unwrap();
+    assert!(
+      !empty.ok
+        && empty.repo_exists
+        && empty.repo_decrypt_ok
+        && empty.snapshot_count == 0
+    );
   }
 }

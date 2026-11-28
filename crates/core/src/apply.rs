@@ -736,7 +736,11 @@ async fn lock_task(
 ) -> Result<OpLockGuard, ApiError> {
   let spec = match step {
     Step::Backup { service } => LockSpec::Backup(service.clone()),
-    Step::CoreBackup { .. } => LockSpec::CoreBackup,
+    Step::CoreBackup { .. }
+    | Step::BackupMove { is_core: true, .. } => LockSpec::CoreBackup,
+    Step::BackupMove { service, .. } => {
+      LockSpec::Backup(service.clone())
+    }
     Step::Prune {
       restore_days: Some(_),
       ..
@@ -745,8 +749,20 @@ async fn lock_task(
   };
   let guard = state.locks.acquire(spec, title)?;
   match step {
+    Step::BackupMove { from, to, .. } => {
+      guard.reserve_backup_target(from.clone())?;
+      guard.reserve_backup_target(to.clone())?;
+    }
+    Step::CoreBackup { .. } => {
+      let snap = snapshot::load(&state.db).await?;
+      crate::backup_move::require_idle(
+        &snap,
+        crate::core_backup::REPO,
+      )?;
+    }
     Step::Backup { service } => {
       let snap = snapshot::load(&state.db).await?;
+      crate::backup_move::require_idle(&snap, service)?;
       guard.reserve_backup_target(crate::backup::service_target(
         &snap, service,
       )?)?;
@@ -1400,7 +1416,14 @@ async fn run_step_with_dns(
       )
       .await?;
     }
+    Step::BackupMove { .. } => {
+      crate::backup_move::execute(
+        state, &snap, run_id, step, &progress, cancel,
+      )
+      .await?;
+    }
     Step::Backup { service } => {
+      crate::backup_move::require_idle(&snap, service)?;
       crate::backup::backup(state, run_id, service, progress, cancel)
         .await?;
     }
@@ -1527,6 +1550,10 @@ async fn run_step_with_dns(
       target,
       owner_secret,
     } => {
+      crate::backup_move::require_idle(
+        &snap,
+        crate::core_backup::REPO,
+      )?;
       crate::core_backup::backup(
         state,
         run_id,

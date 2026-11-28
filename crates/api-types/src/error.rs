@@ -105,6 +105,8 @@ pub struct ApiError {
   pub suggest: Vec<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub upstream: Option<crate::external::Upstream>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub details: Option<serde_json::Value>,
 }
 
 impl ApiError {
@@ -115,6 +117,7 @@ impl ApiError {
       hint: None,
       suggest: Vec::new(),
       upstream: None,
+      details: None,
     }
   }
 
@@ -132,6 +135,11 @@ impl ApiError {
 
   pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
     self.hint = Some(hint.into());
+    self
+  }
+
+  pub fn with_details(mut self, details: serde_json::Value) -> Self {
+    self.details = Some(details);
     self
   }
 

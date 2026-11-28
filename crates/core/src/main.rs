@@ -19,6 +19,7 @@ mod audit;
 mod auth;
 mod auto_update;
 mod backup;
+mod backup_move;
 mod baseline;
 mod build;
 mod caddy_validate;
@@ -30,7 +31,9 @@ mod clock;
 mod cloudflare_ips;
 mod connect;
 mod core_backup;
+mod core_export;
 mod core_node;
+mod core_restore;
 mod cron;
 mod data;
 mod db;
@@ -175,6 +178,13 @@ enum Command {
   /// 控制面已停止时查看或恢复本机数据库热快照。
   #[command(subcommand)]
   Snapshot(db_snapshot::OfflineCommand),
+  /// 从离线加密灾备包恢复控制面。
+  Restore {
+    #[arg(long)]
+    file: PathBuf,
+    #[arg(long)]
+    yes: bool,
+  },
   /// 重置页面登录的管理员密码：`docker exec -it wharf-core wharf-core reset-password`。
   ResetPassword {
     /// 同时改账号名。不给时沿用现在的账号（没有账号时用 admin）。
@@ -218,6 +228,18 @@ async fn main() -> anyhow::Result<()> {
   let cli = Cli::parse();
   if let Some(Command::Snapshot(cmd)) = cli.command {
     match db_snapshot::offline(&cli.data_dir, cmd) {
+      Ok(()) => return Ok(()),
+      Err(e)
+        if e.code == wharf_api_types::ErrorCode::ConfirmRequired =>
+      {
+        eprintln!("{e}");
+        std::process::exit(2);
+      }
+      Err(e) => return Err(anyhow::anyhow!("{e}")),
+    }
+  }
+  if let Some(Command::Restore { file, yes }) = cli.command {
+    match core_restore::restore_from_file(&cli.data_dir, &file, yes) {
       Ok(()) => return Ok(()),
       Err(e)
         if e.code == wharf_api_types::ErrorCode::ConfirmRequired =>
@@ -282,6 +304,7 @@ async fn main() -> anyhow::Result<()> {
   cloudflare_ips::spawn(state.db.clone());
   tailnet_ips::spawn(state.db.clone());
   core_backup::cleanup_staged(&state.data_dir);
+  core_export::cleanup_stale(&state.data_dir);
   apply::recover(&state).await?;
   shell::recover(&state).await?;
   tasks::recover(&state).await?;

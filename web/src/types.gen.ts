@@ -277,6 +277,7 @@ export type AllCookies = "all";
  */
 export interface ApiError {
   code: ErrorCode;
+  details?: unknown;
   /**
    * 怎么解决。
    */
@@ -353,6 +354,14 @@ export interface AuditEntry {
   status: number | null;
 }
 
+export interface BackupMoveStatus {
+  from: string;
+  phase: string;
+  source_snapshots: number;
+  target_archive?: string | null;
+  to: string;
+}
+
 /**
  * 一次备份的记录（成功或失败）。
  */
@@ -395,6 +404,7 @@ export interface BackupSummary {
  * `GET /api/services/{name}/backups`
  */
 export interface BackupsView {
+  pending_move?: BackupMoveStatus | null;
   /**
    * 最近的备份记录，新的在前。
    */

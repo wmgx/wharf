@@ -231,6 +231,15 @@ pub fn router(state: Arc<AppState>) -> Router {
       "/api/core-backup",
       get(crate::core_backup::show).post(crate::core_backup::enable),
     )
+    .route(
+      "/api/core-backup/verify-password",
+      post(crate::core_backup::verify_password),
+    )
+    .route(
+      "/api/core-backup/export",
+      post(crate::core_export::export),
+    )
+    .route("/api/core-backup/move", post(crate::backup_move::core))
     .route("/api/core-backup/run", post(crate::core_backup::run_now))
     .route(
       "/api/core-backup/unlock",
@@ -384,6 +393,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route(
       "/api/services/{name}/backups",
       get(crate::backup::list).post(crate::backup::run_now),
+    )
+    .route(
+      "/api/services/{name}/backups/move",
+      post(crate::backup_move::service),
     )
     .route(
       "/api/services/{name}/backups/unlock",

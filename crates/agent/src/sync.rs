@@ -14,7 +14,10 @@ use std::{
 use serde_json::Value;
 use wharf_api_types::{
   ApiError, ErrorCode,
-  agent::{SYNC_BACKUP, SYNC_READY, SyncPass, SyncPush, SyncServe},
+  agent::{
+    BACKUP_ROOT, CORE_BACKUP_ROOT, SYNC_BACKUP, SYNC_READY, SyncKind,
+    SyncPass, SyncPush, SyncServe,
+  },
   validate_name,
 };
 
@@ -31,9 +34,21 @@ const RETRY_DELAY: Duration = Duration::from_secs(3);
 const MODULE: &str = "wharf";
 const USER: &str = "wharf";
 
-fn data_root(service: &str) -> Result<PathBuf, ApiError> {
+fn sync_root(
+  kind: SyncKind,
+  service: &str,
+) -> Result<&'static Path, ApiError> {
   validate_name("service", service)?;
-  Ok(Path::new("/srv").join(service))
+  match kind {
+    SyncKind::ServiceData => Ok(Path::new("/srv")),
+    SyncKind::BackupRepo => Ok(Path::new(BACKUP_ROOT)),
+    SyncKind::CoreBackupRepo if service == "wharf-core" => {
+      Ok(Path::new(CORE_BACKUP_ROOT))
+    }
+    SyncKind::CoreBackupRepo => {
+      Err(ApiError::invalid("控制面备份仓库名必须是 wharf-core"))
+    }
+  }
 }
 
 fn parse_ip(what: &str, ip: &str) -> Result<IpAddr, ApiError> {
@@ -58,6 +73,7 @@ fn preserve_nonempty_target(
   root: &Path,
   service: &str,
   stamp: &str,
+  kind: SyncKind,
 ) -> Result<Option<PathBuf>, ApiError> {
   let path = root.join(service);
   if std::fs::read_dir(&path)
@@ -69,7 +85,12 @@ fn preserve_nonempty_target(
   {
     return Ok(None);
   }
-  let archive = root.join(".wharf-migrate");
+  let (dir, tag) = if kind.is_service_data() {
+    (".wharf-migrate", "before")
+  } else {
+    (".wharf-backup-archive", "replaced")
+  };
+  let archive = root.join(dir);
   match std::fs::DirBuilder::new().mode(0o700).create(&archive) {
     Ok(()) => {}
     Err(e)
@@ -78,7 +99,7 @@ fn preserve_nonempty_target(
           .is_ok_and(|m| m.is_dir()) => {}
     Err(e) => return Err(io_err(&archive)(e)),
   }
-  let backup = archive.join(format!("{service}-before-{stamp}"));
+  let backup = archive.join(format!("{service}-{tag}-{stamp}"));
   if std::fs::symlink_metadata(&backup).is_ok() {
     return Err(ApiError::new(
       ErrorCode::Conflict,
@@ -94,19 +115,35 @@ pub async fn serve(
   s: &SyncServe,
   ctx: &Ctx,
 ) -> Result<Value, ApiError> {
-  let root = data_root(&s.service)?;
+  let base = sync_root(s.kind, &s.service)?;
+  let root = base.join(&s.service);
+  if !s.kind.is_service_data() {
+    let relative = base.strip_prefix("/srv").expect("固定备份根目录");
+    crate::dirfd::ensure_beneath(Path::new("/srv"), relative)?;
+  }
   let bind = parse_ip("监听地址", &s.bind)?;
   let allow = parse_ip("发送端地址", &s.allow)?;
-  crate::dirfd::ensure_beneath(
-    Path::new("/srv"),
-    Path::new(&s.service),
-  )?;
+  crate::dirfd::ensure_beneath(base, Path::new(&s.service))?;
+  if s.require_empty
+    && std::fs::read_dir(&root)
+      .map_err(io_err(&root))?
+      .next()
+      .transpose()
+      .map_err(io_err(&root))?
+      .is_some()
+  {
+    return Err(ApiError::new(
+      ErrorCode::Conflict,
+      "目标仓库已出现数据，请重新预检并确认归档",
+    ));
+  }
 
   if s.preserve_existing
     && let Some(path) = preserve_nonempty_target(
-      Path::new("/srv"),
+      base,
       &s.service,
-      &chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string(),
+      &chrono::Utc::now().format("%Y%m%d-%H%M%S-%f").to_string(),
+      s.kind,
     )?
   {
     ctx.say(format!("{SYNC_BACKUP}{}", path.display()));
@@ -216,12 +253,10 @@ pub async fn push(
   p: &SyncPush,
   ctx: &Ctx,
 ) -> Result<Value, ApiError> {
-  let root = data_root(&p.service)?;
+  let base = sync_root(p.kind, &p.service)?;
+  let root = base.join(&p.service);
   let host = parse_ip("接收端地址", &p.host)?;
-  match crate::dirfd::DirFd::open_service_root(
-    Path::new("/srv"),
-    &p.service,
-  ) {
+  match crate::dirfd::DirFd::open_service_root(base, &p.service) {
     Err(e) if e.code == ErrorCode::NotFound => {
       return Err(
         ApiError::not_found(format!(
@@ -245,7 +280,7 @@ pub async fn push(
   let mut attempt = 1;
   loop {
     let result = Cmd::new("rsync")
-      .args(rsync_args(p.pass))
+      .args(rsync_args(p.pass, p.kind))
       .arg(format!("{}/", root.display()))
       .arg(format!("rsync://{USER}@{host}:{}/{MODULE}/", p.port))
       // 口令走环境变量，不出现在命令行里。
@@ -309,9 +344,16 @@ fn rsyncd_config(
   )
 }
 
-fn rsync_args(pass: SyncPass) -> Vec<&'static str> {
+fn rsync_args(pass: SyncPass, kind: SyncKind) -> Vec<&'static str> {
   let mut args = vec!["-aH", "--numeric-ids"];
-  if pass == SyncPass::Final {
+  if !kind.is_service_data() {
+    args.extend([
+      "--partial",
+      "--delete-after",
+      "--exclude=/locks/",
+      "--safe-links",
+    ]);
+  } else if pass == SyncPass::Final {
     args.extend(["--delete", "--checksum"]);
   }
   args.extend([
@@ -361,8 +403,9 @@ mod tests {
   #[test]
   fn rsync_args_live_omits_delete_and_final_enables_checksum_and_hardlinks()
    {
-    let live = rsync_args(SyncPass::Live);
-    let final_pass = rsync_args(SyncPass::Final);
+    let live = rsync_args(SyncPass::Live, SyncKind::ServiceData);
+    let final_pass =
+      rsync_args(SyncPass::Final, SyncKind::ServiceData);
     assert!(live.contains(&"-aH"));
     assert!(final_pass.contains(&"-aH"));
     for arg in ["--delete", "--checksum"] {
@@ -377,18 +420,27 @@ mod tests {
     let photos = tmp.path().join("photos");
     std::fs::create_dir(&photos).unwrap();
     std::fs::write(photos.join("old.jpg"), "old").unwrap();
-    let backup =
-      preserve_nonempty_target(tmp.path(), "photos", "test")
-        .unwrap()
-        .unwrap();
+    let backup = preserve_nonempty_target(
+      tmp.path(),
+      "photos",
+      "test",
+      SyncKind::ServiceData,
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(
       std::fs::read_to_string(backup.join("old.jpg")).unwrap(),
       "old"
     );
     assert!(
-      preserve_nonempty_target(tmp.path(), "photos", "test")
-        .unwrap()
-        .is_none()
+      preserve_nonempty_target(
+        tmp.path(),
+        "photos",
+        "test",
+        SyncKind::ServiceData
+      )
+      .unwrap()
+      .is_none()
     );
   }
 
@@ -434,6 +486,7 @@ mod tests {
       port: 1,
       password: wharf_api_types::agent::OneTimeSecret(String::new()),
       pass: SyncPass::Live,
+      kind: SyncKind::ServiceData,
     };
     assert_eq!(
       push(&job, &Ctx::detached()).await.unwrap_err().code,
@@ -444,10 +497,11 @@ mod tests {
   #[test]
   fn only_service_dirs() {
     assert_eq!(
-      data_root("blog").unwrap(),
-      PathBuf::from("/srv/blog")
+      sync_root(SyncKind::ServiceData, "blog").unwrap(),
+      Path::new("/srv")
     );
-    assert!(data_root("../etc").is_err());
-    assert!(data_root("a/b").is_err());
+    assert!(sync_root(SyncKind::ServiceData, "../etc").is_err());
+    assert!(sync_root(SyncKind::ServiceData, "a/b").is_err());
+    assert!(sync_root(SyncKind::CoreBackupRepo, "blog").is_err());
   }
 }

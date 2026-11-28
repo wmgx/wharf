@@ -158,9 +158,17 @@ wharf service move <服务> --to <服务器> --json             # 同步数据�
 wharf backup enable <服务> --to <另一台服务器> --json   # 每天备份 /srv/<服务>/
 wharf backup run <服务> --json
 wharf backup list <服务> --json
+wharf backup core --verify-password --json    # 交互输入登录密码，核验 HTTP 认证、仓库解密和快照
+wharf backup core --export -o <文件> --json    # 交互输入登录密码，下载离线加密灾备包
+wharf backup move <服务> --to <新备份机> --dry-run --json
+wharf backup move <服务> --to <新备份机> --json  # 控制面仓库把服务名替换为 --core
 # 恢复会停服务并覆盖数据（原数据改名保留），必须先问用户，用户同意后：
 wharf backup restore <服务> --snapshot <快照 id> --confirm service/<服务> --json
 ```
+
+仓库迁移中断后重跑同一条命令即可续传。目标机已有仓库时按预检提示确认归档。源仓库保留，由 `wharf data cleanup` 统一管理。
+
+在新机执行 `wharf-core restore --file <文件>`，输入导出时的登录密码。数据目录已有控制面文件时，确认归档后加 `--yes`。恢复后以 `WHARF_SAFE_MODE=1` 启动控制面，核对节点和备份目标，再执行 `wharf core resume`。
 
 ### 让服务或脚本发通知
 

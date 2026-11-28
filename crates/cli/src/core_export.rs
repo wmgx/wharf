@@ -1,0 +1,186 @@
+use std::{
+  fs::{self, File, OpenOptions},
+  io::{self, Write},
+  os::unix::fs::OpenOptionsExt,
+  path::{Path, PathBuf},
+  time::Duration,
+};
+
+use serde_json::json;
+use wharf_api_types::{
+  ApiError, ErrorCode, view::CoreBackupExportResult,
+};
+
+use crate::{
+  client::{CliResult, Client, read_secret},
+  commands::out,
+};
+
+const TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+struct Temp(PathBuf);
+
+impl Drop for Temp {
+  fn drop(&mut self) {
+    let _ = fs::remove_file(&self.0);
+  }
+}
+
+fn io_error(e: io::Error) -> ApiError {
+  ApiError::internal(format!("保存灾备包失败：{e}"))
+}
+
+fn check_target(path: &Path, force: bool) -> Result<(), ApiError> {
+  match fs::symlink_metadata(path) {
+    Ok(m) if m.file_type().is_symlink() => {
+      Err(ApiError::invalid("目标路径是符号链接，已拒绝覆盖"))
+    }
+    Ok(m) if !m.is_file() => {
+      Err(ApiError::invalid("目标必须是普通文件"))
+    }
+    Ok(_) if !force => Err(
+      ApiError::new(ErrorCode::Conflict, "输出文件已存在")
+        .with_hint("更换输出路径，或添加 --force 覆盖"),
+    ),
+    Ok(_) => Ok(()),
+    Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+    Err(e) => Err(io_error(e)),
+  }
+}
+
+fn temporary(target: &Path) -> Result<(File, Temp), ApiError> {
+  let mut nonce = [0; 12];
+  getrandom::fill(&mut nonce)
+    .map_err(|_| ApiError::internal("随机数不可用"))?;
+  let path = target.with_file_name(format!(
+    ".wharf-export-{}.tmp",
+    hex::encode(nonce)
+  ));
+  let file = OpenOptions::new()
+    .write(true)
+    .create_new(true)
+    .mode(0o600)
+    .custom_flags(libc::O_NOFOLLOW)
+    .open(&path)
+    .map_err(io_error)?;
+  Ok((file, Temp(path)))
+}
+
+fn publish(
+  temp: &Temp,
+  target: &Path,
+  force: bool,
+) -> Result<(), ApiError> {
+  check_target(target, force)?;
+  if force {
+    fs::rename(&temp.0, target).map_err(io_error)
+  } else {
+    fs::hard_link(&temp.0, target).map_err(|e| {
+      if e.kind() == io::ErrorKind::AlreadyExists {
+        ApiError::new(ErrorCode::Conflict, "输出文件已存在")
+      } else {
+        io_error(e)
+      }
+    })
+  }
+}
+
+pub(crate) async fn download(
+  c: &Client,
+  output: Option<PathBuf>,
+  force: bool,
+  j: bool,
+) -> CliResult<()> {
+  let endpoint = "/api/core-backup/export";
+  if output.as_deref() == Some(Path::new("-")) {
+    if j {
+      return Err(
+        ApiError::invalid("--json 与 --export -o - 不能同时使用")
+          .into(),
+      );
+    }
+    let password = read_secret("控制面登录密码：")?;
+    let mut stdout = io::stdout();
+    c.post_download(
+      endpoint,
+      &json!({"password": password}),
+      TIMEOUT,
+      |chunk| stdout.write_all(chunk),
+    )
+    .await?;
+    return stdout.flush().map_err(|e| io_error(e).into());
+  }
+  let basename = || {
+    format!(
+      "wharf-core-{}.wharf-core.enc",
+      chrono::Utc::now().format("%Y%m%d-%H%M%S")
+    )
+  };
+  let target = match output {
+    Some(path)
+      if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) =>
+    {
+      path.join(basename())
+    }
+    Some(path) => path,
+    None => PathBuf::from(basename()),
+  };
+  check_target(&target, force)?;
+  let password = read_secret("控制面登录密码：")?;
+  let (mut file, temp) = temporary(&target)?;
+  let meta = c
+    .post_download(
+      endpoint,
+      &json!({"password": password}),
+      TIMEOUT,
+      |chunk| file.write_all(chunk),
+    )
+    .await?;
+  file.sync_all().map_err(io_error)?;
+  drop(file);
+  publish(&temp, &target, force)?;
+  let output = target.display().to_string();
+  let quoted = format!("'{}'", output.replace('\'', "'\\''"));
+  let result = CoreBackupExportResult {
+    output,
+    size_bytes: meta.size,
+    sha256: meta.sha256,
+    format: meta.format,
+    restore_command: format!("wharf-core restore --file {quoted}"),
+  };
+  out(j, &result, |r| {
+    println!("已导出 {}（{} B）", r.output, r.size_bytes);
+    println!("{}", r.restore_command);
+    println!(
+      "恢复后以 WHARF_SAFE_MODE=1 启动控制面，核对状态后运行 wharf core resume。"
+    );
+  });
+  Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::os::unix::fs::{PermissionsExt, symlink};
+
+  #[test]
+  fn core_export_cli_writes_0600_and_refuses_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("export.enc");
+    let (mut file, temp) = temporary(&target).unwrap();
+    file.write_all(b"encrypted bytes").unwrap();
+    file.sync_all().unwrap();
+    publish(&temp, &target, false).unwrap();
+    assert_eq!(
+      fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+      0o600
+    );
+    let link = dir.path().join("link.enc");
+    symlink(&target, &link).unwrap();
+    assert_eq!(
+      publish(&temp, &link, true).unwrap_err().code,
+      ErrorCode::InvalidInput
+    );
+    assert_eq!(fs::read(target).unwrap(), b"encrypted bytes");
+  }
+}

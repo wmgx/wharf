@@ -37,6 +37,21 @@ fn arg(a: &clap::Arg) -> Value {
   }))
 }
 
+fn meta(command: &str) -> Value {
+  match command {
+    "wharf backup core" => json!({
+      "effect":"direct", "perms":["admin"], "read_when_no_args":true,
+      "returns_by_flag":{"--verify-password":"core_backup_verify","--export":"core_backup_export"},
+    }),
+    "wharf backup move" => json!({
+      "effect":"direct", "perms":["apply"], "returns":"apply_response", "dry_run":true,
+      "returns_by_flag":{"--dry-run":"backup_move_preview","--abort":"backup_move_abort"},
+      "perms_by_flag":{"--core":["admin"],"--confirm":["confirm"]},
+    }),
+    _ => json!({}),
+  }
+}
+
 fn walk(
   cmd: &clap::Command,
   path: &mut Vec<String>,
@@ -61,12 +76,20 @@ fn walk(
       })
       .map(arg)
       .collect();
-    out.push(compact(json!({
-      "command": format!("wharf {}", path.join(" ")),
+    let command = format!("wharf {}", path.join(" "));
+    let metadata = meta(&command);
+    let mut entry = json!({
+      "command": command,
       "about": cmd.get_about().map(|h| h.to_string()),
       "details": cmd.get_long_about().map(|h| h.to_string()),
       "args": args,
-    })));
+    });
+    if let (Some(entry), Some(metadata)) =
+      (entry.as_object_mut(), metadata.as_object())
+    {
+      entry.extend(metadata.clone());
+    }
+    out.push(compact(entry));
   }
   for s in subs {
     path.push(s.get_name().to_string());

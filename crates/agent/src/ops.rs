@@ -317,10 +317,22 @@ impl Ops {
       }
       AgentOp::SyncServe(s) => {
         check_project(&s.service)?;
-        let _guard = self.lock_data(&s.service, ctx).await?;
-        crate::sync::serve(&s, ctx).await
+        if s.kind.is_service_data() {
+          let _guard = self.lock_data(&s.service, ctx).await?;
+          crate::sync::serve(&s, ctx).await
+        } else {
+          let _guard = self.lock_backup_repo(&s.service, ctx).await?;
+          crate::sync::serve(&s, ctx).await
+        }
       }
-      AgentOp::SyncPush(p) => crate::sync::push(&p, ctx).await,
+      AgentOp::SyncPush(p) => {
+        let _guard = if p.kind.is_service_data() {
+          None
+        } else {
+          Some(self.lock_backup_repo(&p.service, ctx).await?)
+        };
+        crate::sync::push(&p, ctx).await
+      }
       AgentOp::RemoveData { service } => {
         self.remove_data(&service, ctx).await
       }
@@ -551,6 +563,51 @@ impl Ops {
     ))
   }
 
+  fn restic_lock(&self, key: String) -> Arc<tokio::sync::RwLock<()>> {
+    self
+      .restic_locks
+      .lock()
+      .unwrap_or_else(|p| p.into_inner())
+      .entry(key)
+      .or_default()
+      .clone()
+  }
+
+  async fn lock_backup_repo(
+    &self,
+    service: &str,
+    ctx: &Ctx,
+  ) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>, ApiError> {
+    check_project(service)?;
+    let busy = || {
+      ApiError::new(
+        ErrorCode::Busy,
+        format!("{service} 的备份仓库正在使用"),
+      )
+    };
+    let guard = self
+      .restic_lock(format!("local:{service}"))
+      .try_write_owned()
+      .map_err(|_| busy())?;
+    let output = self
+      .docker
+      .cmd()
+      .args([
+        "ps",
+        "-q",
+        "--filter",
+        &format!("label=wharf.restic.service={service}"),
+      ])
+      .timeout(Duration::from_secs(30))
+      .run(ctx)
+      .await?
+      .check("docker ps")?;
+    if !output.stdout.trim().is_empty() {
+      return Err(busy());
+    }
+    Ok(guard)
+  }
+
   async fn restic(
     &self,
     job: &wharf_api_types::agent::ResticJob,
@@ -559,17 +616,11 @@ impl Ops {
     use wharf_api_types::agent::{ResticAction, ResticRepo};
     wharf_api_types::validate_name("service", &job.service)?;
     let scope = match &job.repo {
-      ResticRepo::Local => "local",
+      ResticRepo::Local | ResticRepo::LocalCore => "local",
       ResticRepo::Rest { .. } => "rest",
     };
     let key = format!("{scope}:{}", job.service);
-    let lock = self
-      .restic_locks
-      .lock()
-      .unwrap_or_else(|p| p.into_inner())
-      .entry(key)
-      .or_default()
-      .clone();
+    let lock = self.restic_lock(key);
     let busy = || {
       ApiError::new(
         ErrorCode::Busy,
@@ -583,6 +634,7 @@ impl Ops {
       &job.action,
       ResticAction::Snapshots
         | ResticAction::ListKeys
+        | ResticAction::RepoNonempty
         | ResticAction::Preflight(_)
     ) {
       let _guard = tokio::select! {

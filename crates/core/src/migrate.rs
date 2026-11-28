@@ -182,6 +182,8 @@ pub async fn volume_sync(
           allow: source_ip,
           password: password.clone(),
           preserve_existing,
+          kind: wharf_api_types::agent::SyncKind::ServiceData,
+          require_empty: false,
         }),
         SERVE_TIMEOUT,
         Some(serve_progress),
@@ -227,6 +229,7 @@ pub async fn volume_sync(
         port,
         password: password.clone(),
         pass,
+        kind: wharf_api_types::agent::SyncKind::ServiceData,
       });
       let result: Pushed = if let Some(conn) = mount_conn {
         state

@@ -41,7 +41,7 @@ use crate::{
 const MAX_COUNT: usize = 10;
 const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 const MIN_FREE_AFTER_BYTES: u64 = MAX_TOTAL_BYTES;
-const TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy)]
 pub enum Trigger {
@@ -339,7 +339,7 @@ fn clean_temp(dir: &Path) -> Result<(), ApiError> {
   Ok(())
 }
 
-fn free_bytes(dir: &Path) -> Result<u64, ApiError> {
+pub(crate) fn free_bytes(dir: &Path) -> Result<u64, ApiError> {
   let path = std::ffi::CString::new(dir.as_os_str().as_bytes())
     .map_err(|_| ApiError::invalid("数据目录路径无效"))?;
   let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
@@ -389,7 +389,7 @@ fn preflight(
   Ok(())
 }
 
-fn hash(path: &Path) -> Result<String, ApiError> {
+pub(crate) fn hash(path: &Path) -> Result<String, ApiError> {
   let mut digest = Sha256::new();
   let mut file = File::open(path).map_err(io_error)?;
   let mut buf = [0; 16384];
@@ -453,20 +453,8 @@ fn write_snapshot(
   let mut published = false;
   let mut published_json = false;
   let result = (|| {
-    if cancelled() {
-      return Err(timed_out());
-    }
-    let path = db_tmp
-      .to_str()
-      .ok_or_else(|| ApiError::invalid("快照路径必须是 UTF-8"))?;
     let check = cancelled.clone();
-    c.progress_handler(1000, Some(move || check()));
-    let vacuum = c.execute("VACUUM INTO ?1", [path]);
-    c.progress_handler(0, None::<fn() -> bool>);
-    if cancelled() {
-      return Err(timed_out());
-    }
-    vacuum.map_err(|_| conflict("SQLite 无法导出本机热快照"))?;
+    vacuum_into(c, &db_tmp, move || check())?;
     fs::set_permissions(&db_tmp, fs::Permissions::from_mode(0o600))
       .map_err(io_error)?;
     let file = File::open(&db_tmp).map_err(io_error)?;
@@ -505,7 +493,32 @@ fn write_snapshot(
   result
 }
 
-fn schema_version(c: &Connection) -> Result<usize, ApiError> {
+pub(crate) fn vacuum_into(
+  c: &Connection,
+  path: &Path,
+  cancelled: impl Fn() -> bool + Send + Sync + 'static,
+) -> Result<(), ApiError> {
+  let cancelled = Arc::new(cancelled);
+  if cancelled() {
+    return Err(timed_out());
+  }
+  let path = path
+    .to_str()
+    .ok_or_else(|| ApiError::invalid("快照路径必须是 UTF-8"))?;
+  let check = cancelled.clone();
+  c.progress_handler(1000, Some(move || check()));
+  let vacuum = c.execute("VACUUM INTO ?1", [path]);
+  c.progress_handler(0, None::<fn() -> bool>);
+  if cancelled() {
+    return Err(timed_out());
+  }
+  vacuum.map_err(|_| conflict("SQLite 无法导出本机热快照"))?;
+  Ok(())
+}
+
+pub(crate) fn schema_version(
+  c: &Connection,
+) -> Result<usize, ApiError> {
   c.pragma_query_value(None, "user_version", |r| r.get(0))
     .map_err(|_| conflict("读取 SQLite schema 版本失败"))
 }
@@ -718,6 +731,7 @@ pub async fn delete_api(
 }
 
 mod offline;
+pub(crate) use offline::lock_sqlite;
 pub use offline::{OfflineCommand, offline, process_lock};
 
 #[cfg(test)]

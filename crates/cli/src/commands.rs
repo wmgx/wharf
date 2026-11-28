@@ -39,7 +39,7 @@ pub async fn run(cli: Cli) -> CliResult<()> {
   let j = cli.json;
   match cli.command {
     Command::Login { url, core_key, token_file, token_cmd } => login(url, core_key, token_file, token_cmd, j).await,
-    Command::Schema { resource } => schema(resource.as_deref()),
+    Command::Schema { resource, paths } => schema(resource.as_deref(), paths, j),
     Command::Validate { file } => {
       let v = fleet::validate(&file);
       out(j, &v, |v| {
@@ -866,9 +866,18 @@ async fn login_credentials(
   Ok((config, token))
 }
 
-fn schema(resource: Option<&str>) -> CliResult<()> {
+fn schema(
+  resource: Option<&str>,
+  paths: bool,
+  j: bool,
+) -> CliResult<()> {
   if resource == Some("web") {
-    print::json(&wharf_api_types::web_schema::web_schema());
+    let schema = wharf_api_types::web_schema::web_schema();
+    if paths {
+      print_schema_paths(&schema, j);
+    } else {
+      print::json(&schema);
+    }
     return Ok(());
   }
   use schemars::schema_for;
@@ -884,6 +893,17 @@ fn schema(resource: Option<&str>) -> CliResult<()> {
     ("run", schema_for!(plan::Run)),
     ("status", schema_for!(view::Status)),
     ("error", schema_for!(ApiError)),
+    ("apply_response", schema_for!(plan::ApplyResponse)),
+    ("backup_move_preview", schema_for!(view::BackupMovePreview)),
+    ("backup_move_abort", schema_for!(view::BackupMoveAbort)),
+    (
+      "core_backup_verify",
+      schema_for!(view::CoreBackupVerifyView),
+    ),
+    (
+      "core_backup_export",
+      schema_for!(view::CoreBackupExportResult),
+    ),
   ];
   match resource {
     None => {
@@ -901,10 +921,102 @@ fn schema(resource: Option<&str>) -> CliResult<()> {
             names.join("、")
           ))
         })?;
-      print::json(&found.1);
+      if paths {
+        let schema = serde_json::to_value(&found.1)
+          .map_err(anyhow::Error::from)?;
+        print_schema_paths(&schema, j);
+      } else {
+        print::json(&found.1);
+      }
     }
   }
   Ok(())
+}
+
+fn schema_paths(root: &Value) -> Vec<Value> {
+  fn walk<'a>(
+    root: &'a Value,
+    node: &'a Value,
+    path: &str,
+    active: &mut Vec<&'a str>,
+    rows: &mut BTreeMap<String, Value>,
+  ) {
+    if let Some(reference) = node["$ref"].as_str()
+      && let Some(target) =
+        reference.strip_prefix('#').and_then(|r| root.pointer(r))
+      && !active.contains(&reference)
+    {
+      active.push(reference);
+      walk(root, target, path, active, rows);
+      active.pop();
+    }
+    let types: Vec<_> = match &node["type"] {
+      Value::String(ty) => vec![ty.as_str()],
+      Value::Array(types) => {
+        types.iter().filter_map(Value::as_str).collect()
+      }
+      _ => Vec::new(),
+    };
+    if !path.is_empty() && !types.is_empty() {
+      let row = rows.entry(path.to_string()).or_insert_with(|| json!({
+        "path": path, "type": "", "nullable": false, "description": null,
+      }));
+      let ty = types
+        .iter()
+        .copied()
+        .filter(|ty| *ty != "null")
+        .collect::<Vec<_>>()
+        .join(" | ");
+      if !ty.is_empty() {
+        row["type"] = json!(ty);
+      }
+      if types.contains(&"null") {
+        row["nullable"] = json!(true);
+      }
+      if node["description"].is_string() {
+        row["description"] = node["description"].clone();
+      }
+    }
+    if let Some(properties) = node["properties"].as_object() {
+      for (key, schema) in properties {
+        let path = if path.is_empty() {
+          key.clone()
+        } else {
+          format!("{path}.{key}")
+        };
+        walk(root, schema, &path, active, rows);
+      }
+    }
+    if let Some(items) = node.get("items") {
+      walk(root, items, &format!("{path}[]"), active, rows);
+    }
+    if let Some(additional) = node.get("additionalProperties") {
+      walk(root, additional, &format!("{path}.*"), active, rows);
+    }
+    for key in ["anyOf", "oneOf"] {
+      if let Some(variants) = node[key].as_array() {
+        for variant in variants {
+          walk(root, variant, path, active, rows);
+        }
+      }
+    }
+  }
+
+  let mut rows = BTreeMap::new();
+  walk(root, root, "", &mut Vec::new(), &mut rows);
+  rows.into_values().collect()
+}
+
+fn print_schema_paths(schema: &Value, j: bool) {
+  out(j, &schema_paths(schema), |rows| {
+    for row in rows {
+      println!(
+        "{}  {}",
+        row["path"].as_str().unwrap_or_default(),
+        row["type"].as_str().unwrap_or_default()
+      );
+    }
+  });
 }
 
 // PLAN / APPLY
@@ -4965,6 +5077,64 @@ async fn backup(
       });
       Ok(())
     }
+    BackupCmd::Move {
+      service,
+      core,
+      to,
+      from,
+      dry_run,
+      abort,
+      confirm,
+      no_wait,
+    } => {
+      let path = if core {
+        "/api/core-backup/move".into()
+      } else {
+        let name = service
+          .ok_or_else(|| ApiError::invalid("请指定服务或 --core"))?;
+        format!("/api/services/{}/backups/move", seg(&name))
+      };
+      let body = json!({"from": from, "to": to, "dry_run": dry_run, "abort": abort, "confirm": confirm});
+      let timeout = Duration::from_secs(8 * 60);
+      if dry_run {
+        let view: wharf_api_types::view::BackupMovePreview =
+          c.post_timeout(&path, &body, timeout).await?;
+        out(j, &view, |v| {
+          println!(
+            "{}：{} → {}，源快照 {} 份",
+            v.service, v.from, v.to, v.source_snapshots
+          );
+          if v.resuming {
+            println!("将从上次进度续传");
+          }
+          if let Some(confirm) = &v.confirm {
+            println!(
+              "{}，请添加 --confirm {confirm}",
+              v.hint.as_deref().unwrap_or_default()
+            );
+          }
+        });
+      } else if abort {
+        let view: wharf_api_types::view::BackupMoveAbort =
+          c.post(&path, &body).await?;
+        out(j, &view, |v| {
+          println!("已放弃 {} 的续传进度，两端仓库已保留", v.service)
+        });
+      } else {
+        let result: ApplyResponse =
+          c.post_timeout(&path, &body, timeout).await?;
+        if no_wait {
+          finish_task(c, &result.run_id, false, j).await?;
+        } else {
+          let run = wait_run(c, &result.run_id, j).await?;
+          out(j, &run, print::run_summary);
+          if run.status != RunStatus::Succeeded {
+            return Err(CliError::Exit(1));
+          }
+        }
+      }
+      Ok(())
+    }
     BackupCmd::Enable { service, to, apply } => {
       let change =
         set_backup(service, Some(BackupSpec { to })).await?;
@@ -5010,6 +5180,47 @@ async fn backup(
       out(j, &value, |_| println!("已解锁控制面备份仓库"));
       Ok(())
     }
+    BackupCmd::Core {
+      verify_password: true,
+      ..
+    } => {
+      let password = read_secret("控制面登录密码：")?;
+      let v: wharf_api_types::view::CoreBackupVerifyView = c
+        .post_timeout(
+          "/api/core-backup/verify-password",
+          &json!({"password": password}),
+          Duration::from_secs(390),
+        )
+        .await?;
+      out(j, &v, |v| {
+        let status = |ok| if ok { "✓" } else { "✗" };
+        println!(
+          "{} ({})  登录密码 {}  HTTP 认证 {}  仓库解密 {}  快照 {} 份",
+          v.target,
+          v.username,
+          status(v.login_password_ok),
+          status(v.htpasswd_ok),
+          status(v.repo_decrypt_ok),
+          v.snapshot_count
+        );
+        if let Some(latest) = &v.latest_snapshot {
+          println!("最新快照 {}  {}", latest.short_id, latest.time);
+        }
+        if let Some(error) = &v.error {
+          println!("{error}");
+        }
+        if let Some(hint) = &v.hint {
+          println!("{hint}");
+        }
+      });
+      if v.ok { Ok(()) } else { Err(CliError::Exit(1)) }
+    }
+    BackupCmd::Core {
+      export: true,
+      output,
+      force,
+      ..
+    } => crate::core_export::download(c, output, force, j).await,
     BackupCmd::Core { to: Some(to), .. } => {
       let password = read_secret("登录密码（会成为恢复口令）：")?;
       let r: ApplyResponse = c

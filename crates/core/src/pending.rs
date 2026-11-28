@@ -94,6 +94,7 @@ pub struct TunnelDeletePayload {
 #[derive(Default)]
 pub struct PendingState {
   pub migrations: BTreeMap<String, Migration>,
+  pub backup_moves: BTreeMap<String, crate::backup_move::PendingMove>,
   pub gateway_downs: Vec<GatewayDownPayload>,
   pub tunnel_deletes: Vec<TunnelDeletePayload>,
   pub service_deletes: Vec<ServiceDeletePayload>,
@@ -134,6 +135,12 @@ pub fn load(c: &Connection) -> Result<PendingState, ApiError> {
     let phase: String = row.get(2).map_err(sql_err)?;
     let payload: String = row.get(3).map_err(sql_err)?;
     match kind.as_str() {
+      crate::backup_move::KIND => {
+        pending.backup_moves.insert(
+          key,
+          serde_json::from_str(&payload).map_err(json_err)?,
+        );
+      }
       "migrate" => {
         let phase = match phase.as_str() {
           "pending" => MigratePhase::Pending,
