@@ -15,20 +15,66 @@ use wharf_api_types::{
   view::{Issue, IssueLevel, IssueSubject, MonitorView},
 };
 
-use crate::{state::AppState, world::ServiceRow};
+use crate::{
+  service_monitor, snapshot::Snapshot, state::AppState,
+  world::ServiceRow,
+};
 
 const TICK: Duration = Duration::from_secs(10);
 const TIMEOUT_SECS: u64 = 10;
 
-static LAST: Mutex<BTreeMap<String, MonitorView>> =
+#[derive(Clone, PartialEq)]
+struct Target {
+  server: String,
+  connection: u64,
+  instance: String,
+  spec: MonitorSpec,
+  url: Result<String, String>,
+}
+
+static LAST: Mutex<BTreeMap<String, (Target, MonitorView)>> =
   Mutex::new(BTreeMap::new());
 static LAST_RUN: Mutex<BTreeMap<String, Instant>> =
   Mutex::new(BTreeMap::new());
 static IN_FLIGHT: Mutex<BTreeSet<String>> =
   Mutex::new(BTreeSet::new());
 
-pub fn last(service: &str) -> Option<MonitorView> {
-  LAST.lock().ok()?.get(service).cloned()
+fn target(
+  state: &AppState,
+  snap: &Snapshot,
+  service: &str,
+  row: &ServiceRow,
+) -> Option<Target> {
+  let (server, connection) =
+    service_monitor::probe_server(state, snap, service, row)?;
+  let spec = row.spec.monitor.clone()?;
+  let url = url(row, &spec);
+  Some(Target {
+    server: server.into(),
+    connection,
+    instance: row.instance_id.clone(),
+    spec,
+    url,
+  })
+}
+
+pub fn last_for(
+  state: &AppState,
+  snap: &Snapshot,
+  service: &str,
+  row: &ServiceRow,
+) -> Option<MonitorView> {
+  if crate::rules::op_silence::service_busy(state, service) {
+    return None;
+  }
+  let target = target(state, snap, service, row)?;
+  let applied_at = snap
+    .applied
+    .get(service)
+    .map_or(0, |applied| applied.at.timestamp_millis());
+  let results = LAST.lock().ok()?;
+  let (old, view) = results.get(service)?;
+  (*old == target && view.at >= applied_at).then(|| view.clone())
 }
 
 pub fn issues(world: &crate::world::World) -> Vec<Issue> {
@@ -160,7 +206,14 @@ pub fn require_agent(
   state: &AppState,
   spec: &wharf_api_types::spec::ServiceSpec,
 ) -> Result<(), ApiError> {
-  let server = &spec.server;
+  require_agent_on(state, spec, &spec.server)
+}
+
+fn require_agent_on(
+  state: &AppState,
+  spec: &wharf_api_types::spec::ServiceSpec,
+  server: &str,
+) -> Result<(), ApiError> {
   if spec.monitor.as_ref().is_some_and(|m| !m.headers.is_empty())
     && state.hub.is_online(server)
     && !state.hub.supports_monitor_v2(server)
@@ -248,6 +301,7 @@ pub fn judge(m: &MonitorSpec, r: &HttpCheckResult) -> (bool, String) {
 async fn record(
   state: &AppState,
   service: &str,
+  target: Target,
   at: i64,
   ok: bool,
   detail: &str,
@@ -255,7 +309,11 @@ async fn record(
 ) {
   {
     let Ok(mut results) = LAST.lock() else { return };
-    let fails = match results.get(service) {
+    let fails = match results
+      .get(service)
+      .filter(|(old, _)| old == &target)
+      .map(|(_, view)| view)
+    {
       Some(old) if old.at > at => return,
       previous if !ok => previous
         .map_or(0, |old| old.fails)
@@ -264,12 +322,15 @@ async fn record(
     };
     results.insert(
       service.into(),
-      MonitorView {
-        ok,
-        detail: detail.into(),
-        at,
-        fails,
-      },
+      (
+        target,
+        MonitorView {
+          ok,
+          detail: detail.into(),
+          at,
+          fails,
+        },
+      ),
     );
   }
   if ok || !manual {
@@ -293,18 +354,19 @@ pub(crate) async fn doctor_monitor(
   use wharf_api_types::view::CheckStatus;
   let monitor =
     row.spec.monitor.as_ref().filter(|_| !row.spec.stopped)?;
-  let server = &row.spec.server;
   let check = |status, detail: String| {
     crate::doctor::check("monitor", service, status, detail)
   };
-  if !state.hub.is_online(server) {
+  let Some(observed) = target(state, snap, service, row) else {
     return Some(check(
       CheckStatus::Skip,
       "agent 离线，测不了".into(),
     ));
-  }
-  let at = chrono::Utc::now().timestamp_millis();
-  if let Err(error) = require_agent(state, &row.spec) {
+  };
+  let at = crate::db::now_ms();
+  if let Err(error) =
+    require_agent_on(state, &row.spec, &observed.server)
+  {
     return Some(check(CheckStatus::Skip, error.message));
   }
   let secrets = crate::secret_policy::service_secrets(
@@ -313,7 +375,7 @@ pub(crate) async fn doctor_monitor(
     &snap.secrets,
   );
   let (ok, detail) = match build_http_check(row, monitor, &secrets) {
-    Ok(job) => match request(state, server, job).await {
+    Ok(job) => match request(state, &observed.server, job).await {
       Ok(result) => judge(monitor, &result),
       Err(_) => {
         return Some(check(
@@ -325,7 +387,17 @@ pub(crate) async fn doctor_monitor(
     Err(e) => (false, e),
   };
   let detail = crate::log_redact::redact_text(&detail);
-  record(state, service, at, ok, &detail, true).await;
+  if let Ok(fresh) = crate::snapshot::load(&state.db).await
+    && fresh
+      .world
+      .services
+      .get(service)
+      .and_then(|row| target(state, &fresh, service, row))
+      .as_ref()
+      == Some(&observed)
+  {
+    record(state, service, observed, at, ok, &detail, true).await;
+  }
   Some(check(
     if ok {
       CheckStatus::Ok
@@ -380,21 +452,35 @@ async fn round(state: &Arc<AppState>) {
     .collect();
   crate::rules::retain_subjects(state, "monitor_failed", &targets)
     .await;
-  LAST.lock().unwrap().retain(|n, _| targets.contains(n));
+  LAST.lock().unwrap().retain(|name, (observed, _)| {
+    targets.contains(name)
+      && target(state, &snap, name, &snap.world.services[name])
+        .as_ref()
+        == Some(observed)
+  });
   let mut last_run = LAST_RUN.lock().unwrap();
   last_run.retain(|n, _| targets.contains(n));
   let mut running = IN_FLIGHT.lock().unwrap();
   let now = Instant::now();
   for name in targets {
     let row = &snap.world.services[&name];
-    let m = row.spec.monitor.as_ref().expect("已筛出有监控的服务");
+    let Some(observed) = target(state, &snap, &name, row) else {
+      continue;
+    };
+    if !service_monitor::can_probe_in_background(state, &snap, &name)
+    {
+      continue;
+    }
+    let m = &observed.spec;
     if !due(now, last_run.get(&name).copied(), m)
       || !running.insert(name.clone())
     {
       continue;
     }
     last_run.insert(name.clone(), now);
-    if let Err(e) = require_agent(state, &row.spec) {
+    if let Err(e) =
+      require_agent_on(state, &row.spec, &observed.server)
+    {
       tracing::warn!("{}", e.message);
       running.remove(&name);
       continue;
@@ -405,17 +491,24 @@ async fn round(state: &Arc<AppState>) {
       &snap.secrets,
     );
     let job = build_http_check(row, m, &secrets);
-    let (state, server, m) =
-      (state.clone(), row.spec.server.clone(), m.clone());
-    let checked_row = row.clone();
+    let state = state.clone();
     let at = crate::db::now_ms();
     tokio::spawn(async move {
       if let Some((ok, detail)) =
-        check_one(&state, &server, &m, job).await
+        check_one(&state, &observed.server, &observed.spec, job).await
         && let Ok(current) = crate::snapshot::load(&state.db).await
-        && current.world.services.get(&name) == Some(&checked_row)
+        && service_monitor::can_probe_in_background(
+          &state, &current, &name,
+        )
+        && current
+          .world
+          .services
+          .get(&name)
+          .and_then(|row| target(&state, &current, &name, row))
+          .as_ref()
+          == Some(&observed)
       {
-        record(&state, &name, at, ok, &detail, false).await;
+        record(&state, &name, observed, at, ok, &detail, false).await;
       }
       IN_FLIGHT.lock().unwrap().remove(&name);
     });
@@ -517,23 +610,39 @@ mod tests {
     assert!(
       crate::rules::firing_since("monitor_failed", service).is_some()
     );
+    let target = Target {
+      server: "s1".into(),
+      connection: 1,
+      instance: "fixture".into(),
+      spec: MonitorSpec {
+        path: "/health".into(),
+        ..Default::default()
+      },
+      url: Ok("http://127.0.0.1:8080/health".into()),
+    };
     LAST.lock().unwrap().insert(
       service.into(),
-      MonitorView {
-        ok: false,
-        detail: "503".into(),
-        at: 1,
-        fails: 3,
-      },
+      (
+        target.clone(),
+        MonitorView {
+          ok: false,
+          detail: "503".into(),
+          at: 1,
+          fails: 3,
+        },
+      ),
     );
-    record(&state, service, 2, false, "503", true).await;
-    assert_eq!(last(service).unwrap().fails, 3);
-    record(&state, service, 3, true, "200", true).await;
-    record(&state, service, 2, false, "503", false).await;
+    record(&state, service, target.clone(), 2, false, "503", true)
+      .await;
+    assert_eq!(LAST.lock().unwrap()[service].1.fails, 3);
+    record(&state, service, target.clone(), 3, true, "200", true)
+      .await;
+    record(&state, service, target, 2, false, "503", false).await;
     assert!(
       crate::rules::firing_since("monitor_failed", service).is_none()
     );
-    let recovered = LAST.lock().unwrap().remove(service).unwrap();
+    let (_, recovered) =
+      LAST.lock().unwrap().remove(service).unwrap();
     assert!(recovered.ok);
     assert_eq!(recovered.fails, 0);
   }

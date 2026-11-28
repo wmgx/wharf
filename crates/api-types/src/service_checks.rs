@@ -172,7 +172,7 @@ pub struct LogWatch {
   pub spec: LogAlertSpec,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortCheck {
   pub port: u16,
   pub udp: Option<PortCheckSpec>,

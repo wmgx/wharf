@@ -1020,7 +1020,7 @@ async fn list_services(
       })
       .filter_map(|n| {
         let mut view = views::service_view(
-          &s.hub,
+          &s,
           &snap,
           &net,
           n,
@@ -1098,7 +1098,7 @@ async fn show_service(
   let history = crate::data::history(&s.db).await?;
   let live = views::cached_live(&s, &snap.world).await;
   let mut view = views::service_view(
-    &s.hub,
+    &s,
     &snap,
     &net,
     &name,

@@ -265,7 +265,7 @@ fn empty_project(name: &str) -> ProjectState {
 }
 
 pub fn service_view(
-  hub: &crate::hub::Hub,
+  state: &AppState,
   snap: &Snapshot,
   net: &Net,
   name: &str,
@@ -394,17 +394,14 @@ pub fn service_view(
     data: crate::data::observed_mounts(name, &row.spec, history),
     import: import_record(snap, name),
     status,
-    monitor: crate::monitor::last(name),
+    monitor: crate::monitor::last_for(state, snap, name, row),
     log_alerts: crate::service_monitor::log_views(name, &row.spec),
-    port_checks_supported: hub
-      .service_checks_support(&row.spec.server),
+    port_checks_supported: crate::snapshot::service_runtime_server(
+      snap, name,
+    )
+    .and_then(|server| state.hub.service_checks_support(server)),
     port_checks: crate::service_monitor::port_views(
-      name,
-      row,
-      snap
-        .applied
-        .get(name)
-        .map_or(0, |a| a.at.timestamp_millis()),
+      state, snap, name, row,
     ),
     heartbeat: crate::service_monitor::heartbeat::view(
       snap,
@@ -681,7 +678,7 @@ pub async fn status(
     .services
     .keys()
     .filter_map(|n| {
-      service_view(&state.hub, &snap, &net, n, Some(&live), &history)
+      service_view(state, &snap, &net, n, Some(&live), &history)
     })
     .collect();
   let gateways: Vec<GatewayView> = snap
