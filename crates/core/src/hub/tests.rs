@@ -40,6 +40,9 @@ fn old_hello_has_no_host_shell_capability() {
     safe_gateway,
     safe_adopt,
     safe_migrate,
+    service_copy,
+    crash_guard,
+    service_repair,
     safe_backup,
     backup_move,
     backup_v2,
@@ -70,6 +73,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!safe_gateway);
   assert!(!safe_adopt);
   assert!(!safe_migrate);
+  assert!(!service_copy && !crash_guard && !service_repair);
   assert!(!safe_backup);
   assert!(!backup_move);
   assert!(!backup_v2);

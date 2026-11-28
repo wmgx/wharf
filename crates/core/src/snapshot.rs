@@ -1361,6 +1361,12 @@ mod tests {
       serde_json::json!({"compose": {"content": raw}}),
     )
     .unwrap();
+    let old = serde_json::to_value(&*spec).unwrap();
+    assert!(
+      old.get("tags").is_none() && old.get("crash_guard").is_none()
+    );
+    spec.tags.insert("试验".into());
+    spec.crash_guard = true;
     let legacy_compose = raw.replace("[[KEY]]", "ok123");
     let legacy_hash = render::hash(&legacy_compose);
     assert_eq!(

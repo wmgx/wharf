@@ -3147,11 +3147,11 @@ mod tests {
       for (kind, name, spec) in [
         ("server", "s1", json!({})),
         ("service", "photos", json!({
-          "server":"s1", "source":{"image":"nginx:1"},
+          "server":"s1", "source":{"image":"nginx:1"}, "tags":["试验"],
           "volumes":[{"name":"data","target":"/data"}]
         })),
         ("service", "secret-indexer", json!({
-          "server":"s1", "source":{"image":"nginx:1"},
+          "server":"s1", "source":{"image":"nginx:1"}, "tags":["试验"],
           "volumes":[{"name":"data","target":"/data","from_service":"photos:data"}]
         })),
       ] {
@@ -3173,12 +3173,20 @@ mod tests {
       let Json(list) = list_services(
         State(state.clone()),
         scoped(name),
-        Query(ServiceListQuery::default()),
+        Query(ServiceListQuery {
+          tag: Some(" 试验 ".into()),
+          brief: BriefQuery {
+            brief: Some("1".into()),
+            ..Default::default()
+          },
+          ..Default::default()
+        }),
       )
       .await
       .map_err(|e| e.0)
       .unwrap();
       assert_eq!(list.len(), 1);
+      assert!(list[0].spec.tags.contains("试验"));
       let Json(show) = show_service(
         State(state.clone()),
         scoped(name),

@@ -2979,11 +2979,11 @@ export interface ServerView {
   version: number;
 }
 
+export type ServiceActionKind = "restart" | "stop" | "update" | "clone" | "rename" | "resume_protected";
+
 /**
  * 按服务的内置告警规则覆盖。
  */
-export type ServiceActionKind = "restart" | "stop" | "update" | "clone" | "rename" | "resume_protected";
-
 export interface ServiceAlertOverrideView {
   enabled?: boolean | null;
   for_n?: number | null;

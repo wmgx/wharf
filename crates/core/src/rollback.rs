@@ -394,6 +394,8 @@ mod tests {
       let select = |to| super::select(c, "reader", "svc_new", to);
       assert_eq!(select(None)?.0, 203);
       assert_eq!(select(Some(1))?.0, 1);
+      c.execute("UPDATE deployments SET original_service='before' WHERE id=1",[]).map_err(sql_err)?;
+      assert!(select(Some(1)).unwrap_err().message.contains("改名前"));
       assert!(select(Some(2)).unwrap_err().message.contains("旧服务实例"));
       assert!(select(Some(205)).unwrap_err().message.contains("从未启动"));
       assert_eq!(select(Some(206)).unwrap_err().code, wharf_api_types::ErrorCode::NotFound);

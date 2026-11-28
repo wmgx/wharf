@@ -454,6 +454,13 @@ mod tests {
       )
       .is_err()
     );
+    state.db.call_credentials(move |c,key| {
+      c.execute("UPDATE resources SET version=version+1 WHERE kind='service' AND name='a'",[]).map_err(db::sql_err)?;
+      let err=crate::apply::require_fresh(c,key,&plan.plan,Some(&plan.account_refs),Some(&plan.base_instances)).unwrap_err();
+      assert_eq!(err.code,ErrorCode::PlanStale);
+      assert_eq!(err.hint.as_deref(),Some("重新执行原命令生成计划"));
+      Ok(())
+    }).await.unwrap();
   }
 }
 

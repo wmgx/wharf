@@ -513,8 +513,13 @@ pub(crate) async fn stop(
   )
   .await?;
   if observed.containers.iter().any(|c| c.is_active()) {
-    apply::project_stop_start(
-      state, server, name, false, &progress, cancel,
+    apply::project_stop_start_on(
+      state,
+      (server, Some(conn)),
+      name,
+      false,
+      &progress,
+      cancel,
     )
     .await?;
   }
@@ -663,8 +668,13 @@ pub(crate) async fn resume(
       cancel,
     )
     .await?;
-    apply::project_stop_start(
-      state, server, name, true, &progress, cancel,
+    apply::project_stop_start_on(
+      state,
+      (server, Some(conn)),
+      name,
+      true,
+      &progress,
+      cancel,
     )
     .await?;
     let live = project(state, (server, conn), name, cancel).await?;
@@ -689,8 +699,13 @@ pub(crate) async fn resume(
       &undo,
     )
     .await?;
-    apply::project_stop_start(
-      state, server, name, false, &progress, &undo,
+    apply::project_stop_start_on(
+      state,
+      (server, Some(conn)),
+      name,
+      false,
+      &progress,
+      &undo,
     )
     .await?;
     recovery.phase = "protected".into();
@@ -716,6 +731,22 @@ fn crash_window_requires_five_new_restarts_and_current_backoff() {
   assert_eq!(tracker.sample("id", 120_001, 14, true), Some(1));
   assert_eq!(tracker.sample("new", 120_001, 14, true), None);
   assert_eq!(tracker.sample("id", WINDOW + MAX_GAP, 20, true), None);
+}
+
+pub(crate) async fn require_task_idle(
+  state: &AppState,
+  name: &str,
+) -> Result<(), ApiError> {
+  let name = name.to_owned();
+  state
+    .db
+    .call(move |c| {
+      if read_raw(c, &name)?.is_some() {
+        return Err(blocker(&name));
+      }
+      Ok(())
+    })
+    .await
 }
 
 pub(crate) async fn require_data_writable(

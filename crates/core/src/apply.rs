@@ -851,6 +851,14 @@ async fn lock_task(
     _ => LockSpec::apply(run_scope::step_services(step)),
   };
   let guard = state.locks.acquire(spec, title)?;
+  if !matches!(
+    step,
+    Step::CrashStop { .. } | Step::ResumeProtected { .. }
+  ) {
+    for service in run_scope::step_services(step) {
+      crate::crash_guard::require_task_idle(state, &service).await?;
+    }
+  }
   match step {
     Step::BackupMove { from, to, .. } => {
       guard.reserve_backup_target(from.clone())?;
