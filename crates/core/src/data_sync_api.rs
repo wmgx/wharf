@@ -163,7 +163,7 @@ pub(crate) async fn pull(
     });
     let status = if result.is_ok() { 200 } else { 500 };
     if let Err(e) = result {
-      let _ = send.send(Err(io::Error::other(e.message))).await;
+      let _ = send.try_send(Err(io::Error::other(e.message)));
     }
     let _ = crate::audit::insert(&tx.state, AuditEntry {
       id: 0, at: crate::db::now_ms(), kind: "api".into(), actor: auth.name,

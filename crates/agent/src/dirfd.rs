@@ -255,6 +255,26 @@ impl DirFd {
     Ok(out)
   }
 
+  pub(crate) fn read_names_limited(
+    &self,
+    max: usize,
+  ) -> io::Result<(Vec<CString>, bool)> {
+    let mut names = Vec::new();
+    let mut limited = false;
+    let result = self.visit_names(|name| {
+      if names.len() == max {
+        limited = true;
+        return Err(io::ErrorKind::Interrupted.into());
+      }
+      names.push(name.to_owned());
+      Ok(())
+    });
+    if !limited {
+      result?;
+    }
+    Ok((names, limited))
+  }
+
   fn visit_names(
     &self,
     mut visit: impl FnMut(&CStr) -> io::Result<()>,

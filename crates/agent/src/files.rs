@@ -316,8 +316,11 @@ fn write(
   // chown 可能清除 set-ID 位，先改属主再恢复原文件权限。
   std::os::unix::fs::fchown(&f, Some(owner.0), Some(owner.1))
     .map_err(&err)?;
-  let permissions =
-    previous.map(|st| st.st_mode & 0o7777).or_else(|| {
+  let permissions = previous
+    .map(|st| {
+      st.st_mode & if upload.is_some() { 0o777 } else { 0o7777 }
+    })
+    .or_else(|| {
       upload.map(|(_, mode)| {
         #[allow(clippy::unnecessary_cast)]
         let mode = (mode & 0o777) as libc::mode_t;

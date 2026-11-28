@@ -87,7 +87,12 @@ fn scan(
 ) -> Result<(), ApiError> {
   let limit =
     req.max_entries.unwrap_or(MAX_MANIFEST).min(MAX_MANIFEST);
-  let mut names = root.read_names().map_err(io)?;
+  let (mut names, limited) =
+    root.read_names_limited(MAX_MANIFEST).map_err(io)?;
+  if limited {
+    out.truncated = true;
+    return Ok(());
+  }
   names.sort_unstable();
   for name in names {
     cancelled(cancel)?;
@@ -281,11 +286,13 @@ pub(crate) async fn sqlite_snap(
   path: String,
   cancel: CancellationToken,
 ) -> Result<SqliteSnapHandle, ApiError> {
+  let work_cancel = cancel.clone();
   let (handle, temp) = tokio::task::spawn_blocking(move || {
-    snapshot(Path::new(SRV), &service, &path, &cancel)
+    snapshot(Path::new(SRV), &service, &path, &work_cancel)
   })
   .await
   .map_err(|_| ApiError::internal("数据库快照任务失败"))??;
+  cancelled(&cancel)?;
   let id = handle.snap_id.clone();
   SNAPS
     .lock()

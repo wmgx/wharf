@@ -549,12 +549,9 @@ async fn sync(
     let upload =
       c.data_push(&format!("{endpoint}/push"), &opts, body, timeout);
     let produce = send_frames(root, changed, plan.deleted, write);
-    let (response, ()) = tokio::try_join!(upload, async {
-      produce
-        .await
-        .map_err(anyhow::Error::from)
-        .map_err(CliError::from)
-    })?;
+    let (response, produced) = tokio::join!(upload, produce);
+    let response = response?;
+    produced.map_err(anyhow::Error::from)?;
     response
   } else {
     for entry in changed.iter().filter(|e| e.dir) {
