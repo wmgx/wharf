@@ -118,6 +118,9 @@ fn entries() -> BTreeMap<&'static str, Schema> {
     ("doctor", schema_for!(view::DoctorReport)),
     ("network", schema_for!(view::NetworkView)),
     ("data", schema_for!(view::DataView)),
+    ("data_cleanup", schema_for!(view::DataCleanupView)),
+    ("data_cleanup_result", schema_for!(view::DataCleanupResult)),
+    ("data_cleanup_policy", schema_for!(view::DataCleanupPolicy)),
     ("exposure", schema_for!(view::ExposureView)),
     ("alerts", schema_for!(view::AlertsView)),
     ("task", schema_for!(view::TaskView)),
@@ -299,11 +302,62 @@ mod tests {
     let schema = serde_json::to_value(&all["service_view"]).unwrap();
     let paths = super::paths(&schema);
     assert!(paths.iter().any(|row| row["path"] == "status.actual"));
+    let cleanup = serde_json::to_value(&all["data_cleanup"]).unwrap();
+    assert!(
+      super::paths(&cleanup)
+        .iter()
+        .any(|row| row["path"] == "items[].id")
+    );
     let commands = crate::describe::commands(&[]);
     for entry in commands["commands"].as_array().unwrap() {
       if let Some(schema) = entry["returns"].as_str() {
         assert!(all.contains_key(schema));
       }
     }
+  }
+
+  #[test]
+  fn cleanup_web_schema_matches_serialized_fields() {
+    let web = wharf_api_types::web_schema::web_schema();
+    for (name, fields) in [
+      (
+        "DataCleanupExecRequest",
+        &[
+          "all",
+          "confirm",
+          "expired_only",
+          "ids",
+          "include_unlabeled",
+          "kind",
+          "server",
+          "service",
+        ][..],
+      ),
+      ("DataCleanupPolicy", &["auto_expire", "keep_days"][..]),
+      ("DataCleanupItem", &["blocked", "expired"][..]),
+      ("DataCleanupActionResult", &["freed_bytes"][..]),
+    ] {
+      let schema = &web["$defs"][name];
+      for field in fields {
+        assert!(
+          schema["properties"][*field].is_object(),
+          "{name}.{field}"
+        );
+        assert!(
+          schema["required"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|required| required == *field),
+          "{name}.{field}"
+        );
+      }
+    }
+    assert!(
+      serde_json::from_value::<
+        wharf_api_types::view::DataCleanupExecRequest,
+      >(serde_json::json!({}))
+      .is_ok()
+    );
   }
 }

@@ -18,6 +18,7 @@ mod client;
 mod commands;
 mod config_cmd;
 mod connect;
+mod data_cleanup;
 mod data_sync;
 mod deploy;
 mod describe;
@@ -51,6 +52,26 @@ mod top;
 mod tunnel;
 mod view;
 mod wait;
+
+#[derive(Subcommand)]
+pub enum DataCmd {
+  /// 查看迁移、恢复和换备份机的留底及孤儿资源。加 --apply 申请删除确认。
+  Cleanup(data_cleanup::CleanupArgs),
+  /// 拉取服务数据到本地。
+  Pull {
+    #[command(flatten)]
+    common: data_sync::TransferArgs,
+    #[arg(long)]
+    sqlite_safe: bool,
+  },
+  /// 比较本地和远端数据，加 --apply 执行。
+  Push {
+    #[command(flatten)]
+    common: data_sync::TransferArgs,
+    #[arg(long)]
+    apply: bool,
+  },
+}
 
 #[derive(Parser)]
 #[command(
@@ -276,7 +297,7 @@ pub enum Command {
   /// 数据：每个服务的挂载和备份情况。
   Data {
     #[command(subcommand)]
-    cmd: Option<data_sync::DataCmd>,
+    cmd: Option<DataCmd>,
   },
   /// 按服务名在本机开一个端口连到服务（数据库客户端等用）。
   /// 能直连组网或局域网地址就直连，否则经控制面中转。
@@ -998,6 +1019,7 @@ pub enum ServerCmd {
   Prune {
     name: String,
     /// 显式清理超过指定天数的恢复留底，0 表示全部。
+    /// 用 wharf data cleanup --kind restore_backup 可单独查看。
     #[arg(long)]
     restore_days: Option<u32>,
   },

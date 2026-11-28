@@ -80,6 +80,7 @@ async fn lockout_notice_records_alert_history() {
     safe_mode: Default::default(),
     resumed_at: Default::default(),
     edge_syncing: Default::default(),
+    cleanup_cache: Default::default(),
   };
   let mut table = LockoutTable::default();
   let now = Instant::now();

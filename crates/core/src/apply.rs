@@ -271,13 +271,38 @@ pub(crate) async fn start_with_actor(
     .flat_map(|p| run_scope::step_services(&p.step))
     .collect();
   let mut block_backups = false;
+  let mut bind_sources = Vec::new();
   for write in &stored.writes {
-    if let Write::Upsert { kind, spec, .. } = write
+    if let Write::Upsert {
+      kind, name, spec, ..
+    } = write
       && kind == crate::world::KIND_SERVICE
     {
       let spec =
         serde_json::from_value(spec.clone()).map_err(json_err)?;
       crate::monitor::require_agent(&state, &spec)?;
+      bind_sources.extend(
+        crate::data::mounts(name, &spec).into_iter().filter_map(
+          |mount| {
+            use std::path::{Component, Path, PathBuf};
+            let path = Path::new(&mount.source);
+            if !path.is_absolute() {
+              return None;
+            }
+            let mut normalized = PathBuf::from("/");
+            for part in path.components() {
+              match part {
+                Component::Normal(part) => normalized.push(part),
+                Component::ParentDir => {
+                  normalized.pop();
+                }
+                _ => {}
+              }
+            }
+            Some(normalized)
+          },
+        ),
+      );
     }
     match write {
       Write::Upsert { kind, name, .. }
@@ -298,6 +323,7 @@ pub(crate) async fn start_with_actor(
     LockSpec::Apply {
       services,
       block_backups,
+      bind_sources,
     },
     "执行计划",
   )?;
@@ -763,6 +789,12 @@ async fn lock_task(
   let spec = match step {
     Step::Backup { service, .. } => LockSpec::Backup(service.clone()),
     Step::CoreBackup { .. } => LockSpec::CoreBackup,
+    Step::CleanupArchive { entry, .. } => entry
+      .service
+      .as_ref()
+      .map_or(LockSpec::CoreMaintenance, |service| {
+        LockSpec::Cleanup(service.clone())
+      }),
     Step::Prune {
       restore_days: Some(_),
       ..
@@ -790,6 +822,12 @@ async fn lock_task(
       .await?;
       guard.reserve_backup_target(target)?;
     }
+    Step::CleanupData { service, .. } => {
+      guard.reserve_cleanup_path(format!("/srv/{service}").into())?;
+    }
+    Step::CleanupArchive { entry, .. } => {
+      guard.reserve_cleanup_path(entry.target.clone().into())?;
+    }
     _ => {}
   }
   Ok(guard)
@@ -802,10 +840,47 @@ pub(crate) async fn start_task_locked(
   actor: Option<String>,
   guard: OpLockGuard,
 ) -> Result<ApplyResponse, ApiError> {
+  let (response, task) =
+    spawn_task(state, title, step, actor, guard).await?;
+  drop(task);
+  Ok(response)
+}
+
+pub(crate) async fn run_cleanup_archive(
+  state: Arc<AppState>,
+  server: String,
+  entry: wharf_api_types::agent::AgentCleanupEntry,
+) -> Result<(), ApiError> {
+  let title = format!("清理 {server} 上的到期留底 {}", entry.display);
+  let step = Step::CleanupArchive { server, entry };
+  let guard = lock_task(&state, &step, &title).await?;
+  let (_, task) = spawn_task(
+    state,
+    title,
+    step,
+    Some(crate::data_cleanup::AUTO_ACTOR.into()),
+    guard,
+  )
+  .await?;
+  task.await.map_err(|e| {
+    ApiError::internal(format!("到期清理任务中断：{e}"))
+  })?;
+  Ok(())
+}
+
+async fn spawn_task(
+  state: Arc<AppState>,
+  title: String,
+  step: Step,
+  actor: Option<String>,
+  guard: OpLockGuard,
+) -> Result<(ApplyResponse, tokio::task::JoinHandle<()>), ApiError> {
   let scope = Some(run_scope::step_services(&step));
   let replayable = !matches!(
     &step,
-    Step::CoreBackup { .. } | Step::CleanupData { .. }
+    Step::CoreBackup { .. }
+      | Step::CleanupData { .. }
+      | Step::CleanupArchive { .. }
   );
   let steps = vec![StepPlan {
     items: vec![],
@@ -849,8 +924,9 @@ pub(crate) async fn start_task_locked(
       )
     })
     .await?;
-  spawn_run(state, run, scope, steps, (None, Some(false)), guard);
-  Ok(ApplyResponse { run_id })
+  let task =
+    spawn_run(state, run, scope, steps, (None, Some(false)), guard);
+  Ok((ApplyResponse { run_id }, task))
 }
 
 pub(crate) async fn run_batch_sync(
@@ -968,7 +1044,7 @@ fn spawn_run(
     Option<bool>,
   ),
   guard: OpLockGuard,
-) {
+) -> tokio::task::JoinHandle<()> {
   let run_id = run.run_id.clone();
   guard.set_run(&run_id);
   silence_steps(&guard, &steps, run.actor.as_deref());
@@ -982,15 +1058,18 @@ fn spawn_run(
       cancel: cancel.clone(),
     },
   );
-  tokio::spawn(execute(
-    state,
-    shared,
-    steps,
-    (0, false, verify, None),
-    actor,
-    cancel,
-    guard,
-  ));
+  tokio::spawn(async move {
+    execute(
+      state,
+      shared,
+      steps,
+      (0, false, verify, None),
+      actor,
+      cancel,
+      guard,
+    )
+    .await;
+  })
 }
 
 async fn execute(
@@ -1064,30 +1143,64 @@ async fn execute(
       )
       .await;
     }
-    let result = if let Step::CleanupData {
-      service,
-      server,
-      instance_id,
-    } = &step.step
-    {
-      crate::jobs::cleanup_data(
-        &state,
-        (service, server, instance_id.as_deref()),
-        progress,
-        &cancel,
-        guard.take().expect("清理任务必须先持有 apply 锁"),
-      )
-      .await
-    } else {
-      run_step_with_dns(
+    let result = match &step.step {
+      Step::CleanupData {
+        service,
+        server,
+        instance_id,
+      } => match crate::jobs::auto_cleanup_enabled(&state).await {
+        Ok(true) => {
+          crate::jobs::cleanup_data(
+            &state,
+            (service, server, instance_id.as_deref()),
+            progress,
+            &cancel,
+            guard.take().expect("清理任务必须先持有 apply 锁"),
+          )
+          .await
+        }
+        Ok(false) => {
+          progress("自动清理已暂停".into());
+          Ok(())
+        }
+        Err(e) => Err(e),
+      },
+      Step::CleanupArchive { server, entry } => {
+        crate::data_cleanup::expire_archive(
+          &state,
+          server,
+          entry.clone(),
+          progress,
+          &cancel,
+        )
+        .await
+      }
+      _ => {
+        run_step_with_dns(
+          &state,
+          &run_id,
+          &step.step,
+          progress,
+          &cancel,
+          (verify, manual_gateway.as_deref()),
+        )
+        .await
+      }
+    };
+    let result = if matches!(
+      step.step,
+      Step::CleanupData { .. } | Step::CleanupArchive { .. }
+    ) {
+      let audit = crate::data_cleanup::audit_auto_cleanup(
         &state,
         &run_id,
-        &step.step,
-        progress,
-        &cancel,
-        (verify, manual_gateway.as_deref()),
+        &step.title,
+        result.is_ok(),
       )
-      .await
+      .await;
+      result.and(audit)
+    } else {
+      result
     };
     let result = match result {
       Ok(()) => crate::pending::finish_step(&state, &step.step).await,
@@ -1730,7 +1843,7 @@ async fn run_step_with_dns(
       )
       .await?;
     }
-    Step::CleanupData { .. } => {
+    Step::CleanupData { .. } | Step::CleanupArchive { .. } => {
       return Err(ApiError::internal("清理只能由定时任务执行"));
     }
     Step::GatewaySync {

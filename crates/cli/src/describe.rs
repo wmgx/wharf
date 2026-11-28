@@ -77,13 +77,21 @@ fn walk(
     if read_when_no_args(&command) {
       entry["read_when_no_args"] = json!(true);
     }
-    if matches!(command.as_str(), "data push" | "import")
-      || cmd.get_arguments().any(|a| a.get_long() == Some("dry-run"))
+    if command == "data cleanup policy" {
+      entry["write_perms"] = json!(["admin"]);
+    }
+    if matches!(
+      command.as_str(),
+      "data push" | "data cleanup" | "import"
+    ) || cmd
+      .get_arguments()
+      .any(|a| a.get_long() == Some("dry-run"))
     {
       entry["dry_run"] = json!(true);
     }
     if cmd.get_arguments().any(|a| a.get_long() == Some("apply")) {
       entry["apply_perms"] = match command.as_str() {
+        "data cleanup" => json!(["apply", "confirm"]),
         "data push" => json!(["exec"]),
         "service env sync" => json!(["plan", "apply"]),
         _ => json!(["apply"]),
@@ -156,6 +164,8 @@ fn read_when_no_args(command: &str) -> bool {
       | "external set"
       | "egress api"
       | "backup core"
+      | "data cleanup"
+      | "data cleanup policy"
       | "backup set"
       | "task set"
   )
@@ -223,6 +233,9 @@ fn effect(
   }
   if command == "egress presets" {
     return ("read", &[]);
+  }
+  if matches!(command, "data cleanup" | "data cleanup policy") {
+    return ("direct", &["read"]);
   }
   if command == "service env sync" {
     return ("read", &["read"]);
@@ -343,6 +356,8 @@ fn returns(command: &str) -> Option<&'static str> {
     "doctor" => "doctor",
     "network" => "network",
     "data" => "data",
+    "data cleanup" => "data_cleanup",
+    "data cleanup policy" => "data_cleanup_policy",
     "server exposure" => "exposure",
     "alert list" => "alerts",
     "task ls" | "task show" => "task",

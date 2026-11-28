@@ -229,6 +229,10 @@ pub enum Step {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     instance_id: Option<String>,
   },
+  CleanupArchive {
+    server: String,
+    entry: wharf_api_types::agent::AgentCleanupEntry,
+  },
   /// 发布边缘应用的代码。
   EdgeDeploy {
     app: String,
@@ -337,6 +341,7 @@ impl Step {
       | Self::CoreBackup { .. }
       | Self::ServiceRestart { .. }
       | Self::CleanupData { .. }
+      | Self::CleanupArchive { .. }
       | Self::EdgeRollback { .. } => 9,
     }
   }

@@ -1,5 +1,5 @@
 use crate::client::{CliError, CliResult, Client, seg};
-use clap::{Args, Subcommand};
+use clap::Args;
 use futures_util::{StreamExt, TryStreamExt};
 use sha2::{Digest, Sha256};
 use std::{
@@ -23,23 +23,6 @@ use tokio_util::{
   io::{ReaderStream, StreamReader},
 };
 use wharf_api_types::{ApiError, ErrorCode, data_sync::*};
-#[derive(Subcommand)]
-pub enum DataCmd {
-  /// 拉取服务数据到本地。
-  Pull {
-    #[command(flatten)]
-    common: TransferArgs,
-    #[arg(long)]
-    sqlite_safe: bool,
-  },
-  /// 比较本地和远端数据，加 --apply 执行。
-  Push {
-    #[command(flatten)]
-    common: TransferArgs,
-    #[arg(long)]
-    apply: bool,
-  },
-}
 #[derive(Args)]
 pub struct TransferArgs {
   service: String,
@@ -384,20 +367,12 @@ fn transfer_plan(
 }
 pub(crate) async fn run(
   c: &Client,
-  cmd: DataCmd,
+  args: TransferArgs,
+  push: Option<bool>,
+  sqlite: bool,
   j: bool,
 ) -> CliResult<()> {
-  let future = async {
-    match cmd {
-      DataCmd::Push { common, apply } => {
-        sync(c, common, Some(apply), false, j).await
-      }
-      DataCmd::Pull {
-        common,
-        sqlite_safe,
-      } => sync(c, common, None, sqlite_safe, j).await,
-    }
-  };
+  let future = sync(c, args, push, sqlite, j);
   tokio::select! {
     result = future => result,
     _ = tokio::signal::ctrl_c() => Err(CliError::Exit(130)),

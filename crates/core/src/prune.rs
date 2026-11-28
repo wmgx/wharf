@@ -90,7 +90,7 @@ pub async fn prune(
       )
       .await?;
     progress(format!(
-      "清理 {} 份恢复保留，释放 {} 字节",
+      "清理 {} 份恢复留底，释放 {} 字节。可用 wharf data cleanup --kind restore_backup 单独查看",
       result.removed, result.bytes
     ));
   }

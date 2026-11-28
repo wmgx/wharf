@@ -85,7 +85,7 @@ impl Ops {
     })
   }
 
-  async fn lock_data(
+  pub(crate) async fn lock_data(
     &self,
     service: &str,
     ctx: &Ctx,
@@ -317,6 +317,12 @@ impl Ops {
         to_value(
           self.docker.stop_running_for_data(&project, ctx).await?,
         )
+      }
+      AgentOp::CleanupScan(req) => {
+        to_value(crate::cleanup::scan(&self.docker, req, ctx).await?)
+      }
+      AgentOp::CleanupDelete(req) => {
+        to_value(crate::cleanup::delete(self, req, ctx).await?)
       }
       AgentOp::PruneRestore { older_than_days } => {
         let ctx = ctx.clone();
@@ -684,6 +690,26 @@ impl Ops {
     ))
   }
 
+  pub(crate) fn cleanup_repo_lock(
+    &self,
+    key: &str,
+  ) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>, ApiError> {
+    self
+      .restic_lock(format!("local:{key}"))
+      .try_write_owned()
+      .map_err(|_| ApiError::new(ErrorCode::Busy, "备份仓库正在使用"))
+  }
+
+  fn restic_lock(&self, key: String) -> Arc<tokio::sync::RwLock<()>> {
+    self
+      .restic_locks
+      .lock()
+      .unwrap_or_else(|p| p.into_inner())
+      .entry(key)
+      .or_default()
+      .clone()
+  }
+
   async fn restic(
     &self,
     job: &wharf_api_types::agent::ResticJob,
@@ -710,14 +736,7 @@ impl Ops {
       ResticRepo::Local => "local",
       ResticRepo::Rest { .. } => "rest",
     };
-    let key = format!("{scope}:{}", job.service);
-    let lock = self
-      .restic_locks
-      .lock()
-      .unwrap_or_else(|p| p.into_inner())
-      .entry(key)
-      .or_default()
-      .clone();
+    let lock = self.restic_lock(format!("{scope}:{}", job.service));
     let busy = || {
       ApiError::new(
         ErrorCode::Busy,

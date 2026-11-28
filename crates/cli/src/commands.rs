@@ -435,9 +435,20 @@ async fn dispatch_command(
       };
       service(c, cmd, j).await
     }
-    Command::Data { cmd: Some(cmd) } => {
-      crate::data_sync::run(c, cmd, j).await
-    }
+    Command::Data { cmd: Some(cmd) } => match cmd {
+      crate::DataCmd::Cleanup(args) => {
+        crate::data_cleanup::run(c, args, j).await
+      }
+      crate::DataCmd::Push { common, apply } => {
+        crate::data_sync::run(c, common, Some(apply), false, j).await
+      }
+      crate::DataCmd::Pull {
+        common,
+        sqlite_safe,
+      } => {
+        crate::data_sync::run(c, common, None, sqlite_safe, j).await
+      }
+    },
     Command::Data { cmd: None } => {
       let v: DataView = c.get("/api/data").await?;
       out(j, &v, print::data);

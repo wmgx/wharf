@@ -38,6 +38,9 @@ pub(super) fn step_services(step: &Step) -> Vec<String> {
     | Step::CleanupData { service, .. }
     | Step::VolumeSync { service, .. } => vec![service.clone()],
     Step::AdoptData { job, .. } => vec![job.service.clone()],
+    Step::CleanupArchive { entry, .. } => {
+      entry.service.iter().cloned().collect()
+    }
     _ => vec![],
   }
 }
@@ -344,6 +347,7 @@ mod tests {
       safe_mode: Default::default(),
       resumed_at: Default::default(),
       edge_syncing: Default::default(),
+      cleanup_cache: Default::default(),
     };
     let mut auth = crate::host_access::tests::auth(
       [wharf_api_types::view::Perm::Apply],
