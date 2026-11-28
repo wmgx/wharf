@@ -282,8 +282,7 @@ mod tests {
   async fn patch(
     state: &Arc<AppState>,
     value: Value,
-  ) -> crate::api::ApiResult<wharf_api_types::view::ConfigItemView>
-  {
+  ) -> Result<wharf_api_types::view::ConfigItemView, ApiError> {
     config_api::set(
       State(state.clone()),
       auth([Perm::Admin], false),
