@@ -731,15 +731,14 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn auto_update_run_checks_latest_during_update_check_cooldown()
-   {
+  async fn auto_update_run_updates_then_skips_same_failed_digest() {
     use serde_json::json;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let state = crate::rules::tests::test_state();
     let image = "fixture:latest";
-    let old = format!("sha256:{}", "a".repeat(64));
-    let new = format!("sha256:{}", "b".repeat(64));
+    let [old, good, bad] =
+      ["a", "b", "c"].map(|c| format!("sha256:{}", c.repeat(64)));
     let pin = old.clone();
     state
       .db
@@ -756,27 +755,74 @@ mod tests {
           name: "app".into(),
           spec: json!({
             "server": "s1", "source": {"image": image}, "auto_update": true,
+            "ports": [{"name": "http", "container": 80}],
           }),
-          meta: json!({"pins": {image: pin}}),
+          meta: json!({
+            "pins": {image: pin}, "host_ports": {"http": 20000}, "instance_id": "svc_app",
+          }),
         })
       })
       .await
       .unwrap();
 
-    let pushed = Arc::new(AtomicBool::new(false));
+    let snap = snapshot::load(&state.db).await.unwrap();
+    let (compose, mut live_hash) = snapshot::service_resolved(
+      &snap.world,
+      &snap.net(&snap.world),
+      "app",
+      &snap.render_values(&snap.world, "app"),
+    )
+    .unwrap();
+    let hash = live_hash.clone();
+    let images = json!([{
+      "image": image, "id": &old, "digest": format!("fixture@{old}"),
+    }])
+    .to_string();
+    state
+      .db
+      .call(move |c| {
+        c.execute(
+          "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at, instance_id)
+           VALUES ('app', 's1', 'r-old', ?1, ?2, ?3, 1, 'svc_app')",
+          rusqlite::params![hash, compose, images],
+        )
+        .map_err(crate::db::sql_err)?;
+        Ok(())
+      })
+      .await
+      .unwrap();
+    let pushed = Arc::new(AtomicUsize::new(0));
     let published = pushed.clone();
-    let latest = new.clone();
-    state.hub.mock_agent("s1", false, move |op| match op {
-      AgentOp::ResolveImages(req) if req.tags => {
-        let digest = if published.load(Ordering::Relaxed) {
-          &latest
-        } else {
-          &old
-        };
-        Ok(json!([{"image": image, "digest": digest}]))
+    let digests = [old.clone(), good.clone(), bad.clone()];
+    let mut live_digest = old;
+    state.hub.mock_agent("s1", false, move |op| {
+      let latest = &digests[published.load(Ordering::Relaxed)];
+      match op {
+        AgentOp::ResolveImages(req) => Ok(json!(
+          req.images.iter().map(|image| json!({
+            "image": image, "digest": latest, "config": latest,
+          })).collect::<Vec<_>>()
+        )),
+        AgentOp::ProjectStatus { .. } => Ok(json!([{
+          "project": "app", "hash": live_hash,
+          "containers": [{"name": "app-1", "service": "app", "state": "running"}],
+        }])),
+        AgentOp::ProjectUp(up) => {
+          assert_eq!(&up.pins[image], latest);
+          if latest == &digests[2] {
+            assert_eq!(live_digest, digests[1]);
+            assert!(up.trial.is_some());
+            return Err(ApiError::new(wharf_api_types::ErrorCode::AgentFailed, "试跑失败"));
+          }
+          live_hash = up.hash;
+          live_digest = latest.clone();
+          Ok(json!({
+            "containers": [{"name": "app-1", "service": "app", "state": "running"}],
+            "images": [{"image": image, "id": latest, "digest": format!("fixture@{latest}")}],
+          }))
+        }
+        _ => panic!("意外的 agent 请求"),
       }
-      AgentOp::ProjectStatus { .. } => Ok(json!([])),
-      _ => Err(ApiError::invalid("测试只检查新版本发现")),
     });
 
     let auth = crate::host_access::tests::auth([Perm::Plan], false);
@@ -786,10 +832,28 @@ mod tests {
       .unwrap();
     assert!(!before.services["app"].newer);
 
-    pushed.store(true, Ordering::Relaxed);
-    let result = crate::auto_update::run(&state).await;
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0].latest.as_deref(), Some(new.as_str()));
+    for (version, status, digest) in [
+      (1, "updated", &good),
+      (2, "failed", &bad),
+      (2, "skipped", &bad),
+    ] {
+      pushed.store(version, Ordering::Relaxed);
+      let result = crate::auto_update::run(&state).await;
+      assert_eq!(
+        result.iter().map(|r| r.status.as_str()).collect::<Vec<_>>(),
+        [status],
+        "{result:?}",
+      );
+      assert_eq!(result[0].latest.as_ref(), Some(digest));
+      if status == "failed" {
+        assert_eq!(result[0].reason.as_deref(), Some("试跑失败"));
+      } else if status == "skipped" {
+        assert_eq!(
+          result[0].reason.as_deref(),
+          Some("这个版本上次自动更新失败过，等下一个版本"),
+        );
+      }
+    }
   }
 
   #[test]
