@@ -2253,20 +2253,20 @@ export interface RouteDiagnosis {
 }
 
 export interface RouteFailoverRequest {
-  force?: boolean;
+  force: boolean;
   reason?: string | null;
   target: FailoverTarget;
-  verify_before_dns?: boolean;
+  verify_before_dns: boolean;
 }
 
 export interface RouteFailoverView {
   backup_gateway: string;
-  changed?: boolean;
+  changed: boolean;
   health?: FailoverHealthSnapshot | null;
   hostname: string;
   on_backup: boolean;
   pending?: FailoverPendingView | null;
-  pinned?: FailoverPinTarget | null;
+  pinned: FailoverPinTarget | null;
   primary_gateway: string;
   run_id?: string | null;
   verification?: string | null;

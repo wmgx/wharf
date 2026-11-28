@@ -353,16 +353,17 @@ mod tests {
       }]),
       AgentOp::GatewayProbe(job) => {
         assert_eq!(job.path, "/healthz");
+        let ok = job.upstream_only || !job.tls;
         serde_json::json!({
-          "ok":job.upstream_only,
+          "ok":ok,
           "stage":"fixture",
-          "detail": if job.upstream_only { "TCP 可达" } else { "HTTP 502" },
+          "detail": if ok { "入口可达" } else { "HTTP 502" },
         })
       }
       _ => panic!("收到意外探测请求"),
     }));
     state.hub.enable_mock_failover_features("s1");
-    let net = snap.net(&snap.world);
+    let mut net = snap.net(&snap.world);
     let cancel = CancellationToken::new();
     let err = verify_before_dns(
       &state,
@@ -388,5 +389,33 @@ mod tests {
       .unwrap()
       .ok
     );
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let http = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let gw = &mut snap.world.gateways.get_mut("gw2").unwrap().spec;
+    gw.tls = GatewayTls::Off;
+    gw.http_port = Some(http.local_addr().unwrap().port());
+    net.core_server = Some("s1".into());
+    route.cf_origin_only = false;
+    let server = tokio::spawn(async move {
+      let (mut stream, _) = http.accept().await.unwrap();
+      let mut request = [0; 4096];
+      assert!(stream.read(&mut request).await.unwrap() > 0);
+      stream
+        .write_all(b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n")
+        .await
+        .unwrap();
+    });
+    let direct = verify_before_dns(
+      &state,
+      &snap,
+      &net,
+      (host, &route, "gw2"),
+      &cancel,
+    )
+    .await;
+    server.abort();
+    assert_eq!(direct.unwrap().status, Some(302));
   }
 }

@@ -5002,6 +5002,30 @@ mod tests {
           .contains("webServer")
       );
     }
+    let legacy = crate::hub::Hub::default();
+    legacy.mock_agent("s1", false, |_| panic!("计划不可下发操作"));
+    let mut b = Builder::default();
+    link_items(
+      &mut b,
+      &snap,
+      &desired,
+      (&net, &net),
+      &running(false),
+      &legacy,
+    )
+    .unwrap();
+    assert!(matches!(
+      b.steps[0].step,
+      Step::LinkUp {
+        hot_reload: false,
+        ..
+      }
+    ));
+    assert!(
+      b.warnings
+        .iter()
+        .any(|w| w.contains("wharf server upgrade s1"))
+    );
   }
 
   #[test]
