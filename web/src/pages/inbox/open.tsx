@@ -50,8 +50,16 @@ function alertPath(rule: string, subject: string, isCustom?: boolean): string {
   if (rule === "expiry_soon" || rule === "expiry_urgent") { const [kind, ...parts] = subject.split(":"); const name = encodeURIComponent(parts.join(":")); return kind === "domain" ? `/domains?q=${name}` : `/servers/${name}?tab=settings`; }
   const name = encodeURIComponent(subject);
   if (["domain_down", "cert_expiring"].includes(rule)) return `/domains?open=${name}`;
-  if (["container_restarting", "monitor_failed", "http_5xx", "oom_killed", "svc_mem_near_limit"].includes(rule)) return `/services/${name}?tab=${rule === "monitor_failed" || rule === "svc_mem_near_limit" ? "metrics" : "logs"}`;
-  if (rule === "link_loss") return "/network";
+  if (["link_cert_expiring", "link_ca_expiring"].includes(rule)) return "/domains?tab=entries";
+  if (["container_restarting", "http_5xx", "oom_killed"].includes(rule)) return `/services/${name}?tab=logs`;
+  if (["monitor_failed", "svc_mem_near_limit", "heartbeat_late"].includes(rule)) return `/services/${name}?tab=metrics`;
+  if (["log_keyword", "port_down"].includes(rule)) return `/services/${encodeURIComponent(subject.split(":")[0])}?tab=metrics`;
+  if (rule === "mem_forecast") {
+    if (subject.startsWith("服务 ")) return `/services/${encodeURIComponent(subject.slice(3))}?tab=metrics`;
+    if (subject.startsWith("服务器 ")) return `/servers/${encodeURIComponent(subject.slice(4))}`;
+  }
+  if (["link_loss", "tailnet_relay", "tailnet_key_expiring", "external_incident"].includes(rule)) return "/network";
+  if (rule === "vendor_token_invalid") return "/settings";
   if (rule === "host_unit_down") return `/servers/${encodeURIComponent(subject.split(":")[0])}?tab=host`;
   return `/servers/${name}${rule === "disk_forecast" ? "?tab=disk" : ""}`;
 }

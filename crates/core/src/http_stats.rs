@@ -6,7 +6,7 @@
 //! 只报低于 [RECOVER_PCT]% 的点（只能恢复，不会触发）。计数只在内存里。
 
 use std::{
-  collections::{BTreeMap, VecDeque},
+  collections::{BTreeMap, BTreeSet, VecDeque},
   sync::{Arc, Mutex},
 };
 
@@ -20,6 +20,22 @@ const RECOVER_PCT: f64 = 2.0;
 
 static WINDOWS: Mutex<BTreeMap<String, VecDeque<(u64, u64)>>> =
   Mutex::new(BTreeMap::new());
+
+pub(crate) fn forget(services: &BTreeSet<String>) {
+  if !services.is_empty() {
+    WINDOWS
+      .lock()
+      .unwrap_or_else(|e| e.into_inner())
+      .retain(|name, _| !services.contains(name));
+  }
+}
+
+pub(crate) fn forget_sample(service: &str) {
+  WINDOWS
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
+    .remove(service);
+}
 
 /// 一个服务这段时间的合计：多个域名指向同一服务时请求相加、延迟按请求数加权。
 #[derive(Debug, Default, PartialEq)]
@@ -66,7 +82,7 @@ pub async fn record_at(
   let Ok(snap) = crate::snapshot::load(&state.db).await else {
     return;
   };
-  let sums = by_service(&hosts, |h| {
+  let mut sums = by_service(&hosts, |h| {
     crate::report_guard::route_owned_by_server(
       &snap.world,
       &server,
@@ -91,6 +107,19 @@ pub async fn record_at(
     }
   }
   crate::metrics::insert_owned_at(&state, at, points).await;
+  let Ok(current) = crate::snapshot::load(&state.db).await else {
+    return;
+  };
+  sums.retain(|name, _| {
+    current.world.services.get(name).is_some_and(|row| {
+      !row.spec.stopped
+        && snap
+          .world
+          .services
+          .get(name)
+          .is_some_and(|old| old.instance_id == row.instance_id)
+    })
+  });
 
   let mut events = Vec::new();
   {

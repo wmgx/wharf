@@ -1,5 +1,5 @@
 use clap::Subcommand;
-use serde_json::{Value, json};
+use serde_json::json;
 use wharf_api_types::{
   ApiError,
   view::{
@@ -169,6 +169,13 @@ fn preview(
   patch: &AlertPatch,
   j: bool,
 ) -> CliResult<()> {
+  let inherited_mute = service.and_then(|_| {
+    now
+      .rules
+      .iter()
+      .find(|r| r.id == id)
+      .and_then(|r| r.muted_until)
+  });
   let (label, before) = if let Some(svc) = service {
     let Some(r) = now.rules.iter().find(|r| r.id == id) else {
       return Err(
@@ -188,7 +195,7 @@ fn preview(
         "level": level_text(o.and_then(|o| o.level).unwrap_or(r.level)),
         "threshold": o.and_then(|o| o.threshold).unwrap_or(r.threshold),
         "for": o.and_then(|o| o.for_n).unwrap_or(r.for_n),
-        "muted_until": o.and_then(|o| o.muted_until).or(r.muted_until).map(fmt_ms),
+        "muted_until": o.and_then(|o| o.muted_until).max(inherited_mute).map(fmt_ms),
       }),
     )
   } else if let Some(r) = now.rules.iter().find(|r| r.id == id) {
@@ -251,14 +258,14 @@ fn preview(
   if let Some(v) = patch.for_n {
     after["for"] = json!(v);
   }
-  match patch.mute_minutes {
-    Some(0) => after["muted_until"] = Value::Null,
-    Some(m) => {
-      after["muted_until"] = json!(fmt_ms(
-        chrono::Utc::now().timestamp_millis() + i64::from(m) * 60_000
-      ))
-    }
-    None => {}
+  if let Some(m) = patch.mute_minutes {
+    let proposed = (m > 0).then(|| {
+      chrono::Utc::now().timestamp_millis() + i64::from(m) * 60_000
+    });
+    after["muted_until"] =
+      json!(proposed.max(inherited_mute).map(fmt_ms));
+  } else if patch.reset {
+    after["muted_until"] = json!(inherited_mute.map(fmt_ms));
   }
   crate::preview::show(j, &label, &before, &after)
 }

@@ -39,10 +39,18 @@ const VERSIONS_EVERY: u32 = 36;
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(120);
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(180);
 
-static LAST: RwLock<Option<UpdatesView>> = RwLock::new(None);
+type ImageDigests = BTreeMap<String, BTreeMap<String, String>>;
 
-pub fn last() -> Option<UpdatesView> {
-  LAST.read().ok().and_then(|l| l.clone())
+#[derive(Default)]
+struct CachedUpdates {
+  view: UpdatesView,
+  image_digests: ImageDigests,
+}
+
+static LAST: RwLock<Option<CachedUpdates>> = RwLock::new(None);
+
+fn last() -> Option<UpdatesView> {
+  LAST.read().ok()?.as_ref().map(|cached| cached.view.clone())
 }
 
 fn effective_ignore(
@@ -102,6 +110,7 @@ pub(crate) fn validate_ignore(
 fn filter_check(
   row: &crate::world::ServiceRow,
   check: &mut VersionCheck,
+  digests: Option<&BTreeMap<String, String>>,
 ) {
   let rules = &row.spec.update_ignore;
   let images = crate::pins::images(&row.spec.source);
@@ -118,44 +127,39 @@ fn filter_check(
       && effective_ignore(rules, image)
         != Some(UpdateIgnoreScope::All)
   };
-  if !check.newer_images.is_empty() {
-    if let [image] = check.newer_images.as_slice()
-      && row.pins.get(image) == check.latest.as_ref()
-    {
-      check.newer = false;
-    }
-    check.newer_images.retain(allowed);
-    check.newer &= !check.newer_images.is_empty();
-  } else if matches!(row.spec.source, Source::Build(_)) {
+  if matches!(row.spec.source, Source::Build(_)) {
     check.newer &= !ignore_all_source(rules)
       && row.commit.as_ref() != check.latest.as_ref();
-  } else if !images.iter().any(allowed)
-    || check
-      .latest
-      .as_ref()
-      .is_some_and(|l| row.pins.values().any(|p| p == l))
-  {
-    check.newer = false;
+  } else {
+    check.newer_images.retain(|image| {
+      allowed(image)
+        && digests
+          .and_then(|d| d.get(image))
+          .is_none_or(|latest| row.pins.get(image) != Some(latest))
+    });
+    check.newer = !check.newer_images.is_empty();
   }
 }
 
 /// 按现在的配置修正上次的结论：检查之后服务已经换了标签或升级过，
 /// 旧镜像的"更高版本"和已经固定下来的"新版本"都不再提示，等下次检查重新算。
 pub fn current(snap: &Snapshot) -> Option<UpdatesView> {
-  let mut view = last()?;
+  let last = LAST.read().ok()?;
+  let cached = last.as_ref()?;
+  let mut view = cached.view.clone();
   view.services.retain(|name, check| {
     let Some(row) = snap.world.services.get(name) else {
       return false;
     };
-    filter_check(row, check);
+    filter_check(row, check, cached.image_digests.get(name));
     true
   });
   Some(view)
 }
 
-fn update(f: impl FnOnce(&mut UpdatesView)) {
+fn update(f: impl FnOnce(&mut CachedUpdates)) {
   if let Ok(mut last) = LAST.write() {
-    f(last.get_or_insert_with(UpdatesView::default));
+    f(last.get_or_insert_with(CachedUpdates::default));
   }
 }
 
@@ -204,7 +208,7 @@ async fn pending(state: &AppState) {
       error: Some(e.message),
     },
   };
-  update(|u| u.pending = Some(check));
+  update(|u| u.view.pending = Some(check));
 }
 
 /// 查一个服务的结果：(查到的版本, 固定的版本) 或者错误。
@@ -218,7 +222,7 @@ pub(crate) async fn versions(state: &AppState) {
       return;
     }
   };
-  let (mut found, tags, mut newer_images) =
+  let (mut found, tags, mut image_digests) =
     images(state, &snap).await;
   found.extend(commits(state, &snap).await);
   let fresh: Vec<(String, String)> = found
@@ -234,7 +238,8 @@ pub(crate) async fn versions(state: &AppState) {
   let names: BTreeSet<String> =
     found.keys().chain(tags.keys()).cloned().collect();
   update(|u| {
-    let old = std::mem::take(&mut u.services);
+    let old = std::mem::take(&mut u.view.services);
+    let mut old_digests = std::mem::take(&mut u.image_digests);
     for name in names {
       let prev = old.get(&name);
       let mut check = match found.remove(&name) {
@@ -270,17 +275,29 @@ pub(crate) async fn versions(state: &AppState) {
         }
         None => vec![],
       };
-      check.newer_images =
-        newer_images.remove(&name).unwrap_or_default();
+      let mut digests =
+        image_digests.remove(&name).unwrap_or_default();
       if check.error.is_some()
-        && let Some(prev) = prev
+        && let Some(previous) = old_digests.remove(&name)
       {
-        check.newer_images.extend(prev.newer_images.iter().cloned());
-        check.newer_images.sort_unstable();
-        check.newer_images.dedup();
+        for (image, digest) in previous {
+          digests.entry(image).or_insert(digest);
+        }
       }
-      check.newer |= !check.newer_images.is_empty();
-      u.services.insert(name, check);
+      let pins = &snap.world.services[&name].pins;
+      check.newer_images = digests
+        .iter()
+        .filter(|(image, digest)| pins.get(*image) != Some(*digest))
+        .map(|(image, _)| image.clone())
+        .collect();
+      u.image_digests.insert(name.clone(), digests);
+      if !matches!(
+        snap.world.services[&name].spec.source,
+        Source::Build(_)
+      ) {
+        check.newer = !check.newer_images.is_empty();
+      }
+      u.view.services.insert(name, check);
     }
   });
   let Ok(snap) = snapshot::load(&state.db).await else {
@@ -387,14 +404,13 @@ type Item<'a> = (&'a str, String, Option<&'a str>);
 
 /// 服务 → 更高版本的标签。
 type Tags = BTreeMap<String, Vec<NewerTag>>;
-type NewerImages = BTreeMap<String, Vec<String>>;
 
 /// image 来源和 compose 里的镜像：按服务器分组，一台 agent 一次查完，顺便列出更高版本的标签。
 /// 固定了版本的镜像比 digest；没固定的（例如查不到版本的私有仓库）只看标签。
 async fn images(
   state: &AppState,
   snap: &Snapshot,
-) -> (BTreeMap<String, Found>, Tags, NewerImages) {
+) -> (BTreeMap<String, Found>, Tags, ImageDigests) {
   // 服务器 → [(服务, 镜像, 固定的版本)]
   let mut by_server: BTreeMap<&str, Vec<Item>> = BTreeMap::new();
   for (name, row) in &snap.world.services {
@@ -413,7 +429,7 @@ async fn images(
   }
   let mut found: BTreeMap<String, Found> = BTreeMap::new();
   let mut tags = Tags::new();
-  let mut newer = NewerImages::new();
+  let mut digests = ImageDigests::new();
   for (server, items) in by_server {
     let Some(row) = snap.world.servers.get(server) else {
       continue;
@@ -466,8 +482,11 @@ async fn images(
         ),
       };
       // 一个服务里有一个镜像变了就是有新版本；查失败的优先报出来。
-      if r.as_ref().is_ok_and(|(latest, pinned)| latest != pinned) {
-        newer.entry(name.to_string()).or_default().push(image);
+      if let Ok((latest, _)) = &r {
+        digests
+          .entry(name.to_string())
+          .or_default()
+          .insert(image, latest.clone());
       }
       let keep = match (found.get(name), &r) {
         (None, _) => true,
@@ -481,7 +500,7 @@ async fn images(
     }
   }
   tags.retain(|_, l| !l.is_empty());
-  (found, tags, newer)
+  (found, tags, digests)
 }
 
 /// 镜像现在写的标签，没写就是 `latest`。
@@ -599,10 +618,41 @@ fn update_ignore_hides_major_and_all_immediately_without_restart() {
     })
     .collect(),
   };
-  filter_check(&row, &mut check);
+  filter_check(&row, &mut check, None);
   assert!(crate::service_monitor::config_only(&old, &row));
   assert!(check.newer);
   assert_eq!(check.newer_images, ["db:15"]);
   assert_eq!(check.tags.len(), 1);
   assert_eq!(check.tags[0].tag, "15.1");
+}
+
+#[test]
+fn pinned_and_ignored_images_clear_cached_updates() {
+  let row = crate::world::ServiceRow {
+    instance_id: "svc_fixture".into(),
+    spec: serde_json::from_value(serde_json::json!({
+      "server":"s1","source":{"compose":{"content":"services: {app: {image: 'app:1.0'}, db: {image: 'db:15'}}"}},
+      "update_ignore":[{"image":"db","scope":"all"}],
+    })).unwrap(),
+    host_ports: BTreeMap::new(),
+    import: None,
+    pins: BTreeMap::from([("app:1.0".into(), "sha256:app-new".into())]),
+    commit: None,
+    version: 1,
+  };
+  let mut check = VersionCheck {
+    at: Utc::now(),
+    latest: Some("sha256:db-new".into()),
+    newer: true,
+    error: None,
+    newer_images: vec!["app:1.0".into(), "db:15".into()],
+    tags: vec![],
+  };
+  let digests = BTreeMap::from([
+    ("app:1.0".into(), "sha256:app-new".into()),
+    ("db:15".into(), "sha256:db-new".into()),
+  ]);
+  filter_check(&row, &mut check, Some(&digests));
+  assert!(!check.newer);
+  assert!(check.newer_images.is_empty());
 }

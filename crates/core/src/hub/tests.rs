@@ -745,23 +745,32 @@ async fn backfill_ingests_without_clock_skew_and_rejects_duplicate_or_foreign_sa
     Ok(())
   }).await.unwrap();
   let (alerts, _rx) = mpsc::channel(32);
-  let samples: Vec<_> = [25, 1, 2, 3, 4, 5]
-    .into_iter()
-    .map(|minutes| BufferedSample {
-      at_ms: now - minutes * 60_000,
-      log_hits: vec![],
-      metrics: Some(wharf_api_types::agent::Metrics {
-        net_rx: 10,
-        projects: std::collections::BTreeMap::from([
-          ("app".into(), Default::default()),
-          ("foreign".into(), Default::default()),
-        ]),
-        oom: (minutes == 5)
-          .then(|| vec!["app".into(), "foreign".into()]),
-        ..Default::default()
-      }),
-    })
-    .collect();
+  let samples: Vec<_> = [
+    25 * 60_000,
+    0,
+    -25_000,
+    60_000,
+    120_000,
+    180_000,
+    240_000,
+    300_000,
+  ]
+  .into_iter()
+  .map(|age| BufferedSample {
+    at_ms: now - age,
+    log_hits: vec![],
+    metrics: Some(wharf_api_types::agent::Metrics {
+      net_rx: 10,
+      projects: std::collections::BTreeMap::from([
+        ("app".into(), Default::default()),
+        ("foreign".into(), Default::default()),
+      ]),
+      oom: (age == 300_000)
+        .then(|| vec!["app".into(), "foreign".into()]),
+      ..Default::default()
+    }),
+  })
+  .collect();
   assert_eq!(
     ingest_backfill(
       &state,

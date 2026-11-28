@@ -74,7 +74,7 @@ pub fn expires_of(host: &str) -> Option<DateTime<Utc>> {
     .find_map(|h| cache.get(h).and_then(|e| e.expires))
 }
 
-pub fn issues() -> Vec<Issue> {
+pub fn issues(world: &crate::world::World) -> Vec<Issue> {
   let mut firing = BTreeMap::new();
   for (rule, urgent) in
     [("expiry_soon", false), ("expiry_urgent", true)]
@@ -89,6 +89,20 @@ pub fn issues() -> Vec<Issue> {
     .filter_map(|(s, (rule, urgent, title))| {
       let (kind, name) = s.split_once(':')?;
       let domain = kind == "domain";
+      let exists = if domain {
+        world
+          .routes
+          .keys()
+          .any(|host| candidates(host).iter().any(|n| n == name))
+      } else {
+        world
+          .servers
+          .get(name)
+          .is_some_and(|row| row.settings.renew_at.is_some())
+      };
+      if !exists {
+        return None;
+      }
       let title =
         days.get(&s).map_or(title, |n| match (domain, *n < 0) {
           (true, true) => format!("域名 {name} 已经到期"),
@@ -256,19 +270,19 @@ async fn round(
     rules::observe(state, "expiry.days", subject, *n as f64, "")
       .await;
   }
+  let active = all
+    .iter()
+    .map(|name| format!("domain:{name}"))
+    .chain(
+      snap
+        .world
+        .servers
+        .keys()
+        .map(|name| format!("server:{name}")),
+    )
+    .collect();
   for rule in ["expiry_soon", "expiry_urgent"] {
-    for (s, _) in rules::firing_subjects(rule) {
-      if let Some((kind, name)) = s.split_once(':')
-        && match kind {
-          "domain" => !all.contains(name),
-          "server" => !snap.world.servers.contains_key(name),
-          _ => false,
-        }
-      {
-        rules::observe(state, "expiry.days", &s, 9999.0, "").await;
-        days.insert(s, 9999);
-      }
-    }
+    rules::retain_subjects(state, rule, &active).await;
   }
   *DAYS.lock().unwrap_or_else(|e| e.into_inner()) = days;
   Ok(())

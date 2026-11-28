@@ -1375,7 +1375,7 @@ async fn handle_socket(
             if std::mem::take(&mut backfill_open) && state.hub.supports_backfill(&server) =>
           {
             samples.truncate(20);
-            reports.push_backfill(samples, dropped);
+            reports.push_backfill(now_ms(), samples, dropped);
           }
           Ok(AgentMsg::Backfill { .. }) => {
             tracing::debug!("忽略服务器 {server} 的重复或不支持的断连补传");
@@ -1414,7 +1414,7 @@ async fn handle_socket(
 #[derive(Default)]
 struct ReportSlot {
   latest: Mutex<Option<(i64, AgentReport)>>,
-  backfill: Mutex<Option<(Vec<BufferedSample>, u32)>>,
+  backfill: Mutex<Option<(i64, Vec<BufferedSample>, u32)>>,
   ready: tokio::sync::Notify,
 }
 
@@ -1426,17 +1426,20 @@ impl ReportSlot {
 
   fn push_backfill(
     &self,
+    received: i64,
     samples: Vec<BufferedSample>,
     dropped: u32,
   ) {
-    *lock(&self.backfill) = Some((samples, dropped));
+    *lock(&self.backfill) = Some((received, samples, dropped));
     self.ready.notify_one();
   }
 
   async fn next(&self) -> IncomingReport {
     loop {
-      if let Some((samples, dropped)) = lock(&self.backfill).take() {
-        return IncomingReport::Backfill(samples, dropped);
+      if let Some((received, samples, dropped)) =
+        lock(&self.backfill).take()
+      {
+        return IncomingReport::Backfill(received, samples, dropped);
       }
       if let Some((at, report)) = lock(&self.latest).take() {
         return IncomingReport::Live(at, Box::new(report));
@@ -1447,7 +1450,7 @@ impl ReportSlot {
 }
 
 enum IncomingReport {
-  Backfill(Vec<BufferedSample>, u32),
+  Backfill(i64, Vec<BufferedSample>, u32),
   Live(i64, Box<AgentReport>),
 }
 
@@ -1473,7 +1476,8 @@ async fn ingest_backfill(
     Ok((world, deployed, last))
   }).await?;
   samples.retain(|s| {
-    (now - 20 * 60_000..=now + 60_000).contains(&s.at_ms)
+    // 后续实时报告可能在同一毫秒收到，补传只能排在它之前。
+    (now - 20 * 60_000..now).contains(&s.at_ms)
   });
   samples.sort_by_key(|s| s.at_ms);
   let settings =
@@ -1531,12 +1535,12 @@ async fn report_worker(
     loop {
       let (received, report) = match reports.next().await {
         IncomingReport::Live(at, report) => (at, *report),
-        IncomingReport::Backfill(samples, dropped) => {
+        IncomingReport::Backfill(received, samples, dropped) => {
           match ingest_backfill(
             &state,
             &server,
             &conn.public_key,
-            now_ms(),
+            received,
             samples,
             &alerts,
           )

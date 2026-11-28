@@ -7,7 +7,6 @@ use wharf_api_types::{
   ApiError,
   service_checks::{HeartbeatSpec, HeartbeatView},
   spec::ServiceSpec,
-  view::OpStatus,
 };
 
 use crate::{
@@ -275,10 +274,10 @@ pub async fn round(state: &AppState) {
     let Some(r) = snap.heartbeats.get(&name) else {
       continue;
     };
-    if snap
-      .ops
-      .get(&name)
-      .is_some_and(|op| op.status == OpStatus::Running)
+    if crate::rules::op_silence::service_busy(state, &name)
+      || snap.ops.get(&name).is_some_and(|op| {
+        op.status == wharf_api_types::view::OpStatus::Running
+      })
     {
       continue;
     }

@@ -963,8 +963,10 @@ async fn remove_server(
     );
   }
   let state = s.clone();
+  let db_name = name.clone();
   s.db
     .call(move |c| {
+      let name = db_name;
       let tx = c.transaction().map_err(sql_err)?;
       tx.execute(
         "DELETE FROM resources WHERE kind = ?1 AND name = ?2",
@@ -977,11 +979,20 @@ async fn remove_server(
       )
       .map_err(sql_err)?;
       crate::core_node::clear_if_server(&tx, &name)?;
+      db::set_setting(&tx, &format!("host_units.{name}"), None)?;
       tx.commit().map_err(sql_err)?;
       state.hub.disconnect(&name);
       Ok(())
     })
     .await?;
+  crate::rules::lifecycle::forget_server(&name);
+  crate::rules::lifecycle::clear_matching(
+    &s,
+    move |rule, subject| {
+      crate::rules::lifecycle::server_alert(rule, subject, &name)
+    },
+  )
+  .await;
   Ok(Json(json!({ "removed": true })))
 }
 
@@ -1705,13 +1716,20 @@ async fn remove_account(
       .into(),
     );
   }
+  let db_name = name.clone();
   let removed = s
     .db
     .call(move |c| {
-      c.execute("DELETE FROM accounts WHERE name = ?1", params![name])
-        .map_err(sql_err)
+      c.execute(
+        "DELETE FROM accounts WHERE name = ?1",
+        params![db_name],
+      )
+      .map_err(sql_err)
     })
     .await?;
+  if removed > 0 {
+    crate::vendor_checks::forget_cloudflare(&s, &name).await;
+  }
   crate::log_redact::refresh(&s.db).await;
   Ok(Json(json!({ "removed": removed > 0 })))
 }
@@ -1994,13 +2012,20 @@ async fn remove_secret(
 ) -> ApiResult<Value> {
   auth.require(Perm::Admin)?;
   refuse_managed(&name)?;
+  let db_name = name.clone();
   let removed = s
     .db
     .call(move |c| {
-      c.execute("DELETE FROM secrets WHERE name = ?1", params![name])
-        .map_err(sql_err)
+      c.execute(
+        "DELETE FROM secrets WHERE name = ?1",
+        params![db_name],
+      )
+      .map_err(sql_err)
     })
     .await?;
+  if removed > 0 && name == "TAILSCALE_OAUTH" {
+    crate::vendor_checks::forget_oauth(&s).await;
+  }
   crate::log_redact::refresh(&s.db).await;
   Ok(Json(json!({ "removed": removed > 0 })))
 }

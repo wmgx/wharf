@@ -293,3 +293,44 @@ fn backfilled_log_hits_keep_the_sample_time_and_reject_other_servers()
   assert_eq!(hits.last, Some(at));
   assert_eq!(hits.batches.len(), 1);
 }
+
+#[tokio::test]
+async fn port_deployment_grace_stays_active_with_operation_silence_off()
+ {
+  let _guard = rules::tests::TEST_LOCK.lock().await;
+  rules::tests::reset_memory();
+  let state = state();
+  let now = now_ms();
+  let mut snap = Snapshot::default();
+  snap.applied.insert(
+    "web".into(),
+    serde_json::from_value(json!({
+      "hash": "fixture",
+      "at": chrono::DateTime::from_timestamp_millis(now).unwrap(),
+    }))
+    .unwrap(),
+  );
+  state
+    .db
+    .call(|c| {
+      crate::db::set_setting(
+        c,
+        "alerts.config",
+        Some(r#"{"suppress_ops":{"enabled":false}}"#),
+      )
+    })
+    .await
+    .unwrap();
+  rules::ensure_loaded(&state).await;
+  let guard = state
+    .locks
+    .acquire(crate::locks::LockSpec::apply(["web".into()]), "部署")
+    .unwrap();
+  guard.silence_alerts(
+    [rules::op_silence::Target::Service("web".into())].into(),
+    "部署".into(),
+  );
+  assert!(!rules::op_silence::service_busy(&state, "web"));
+  assert!(deploying(&snap, "web", now + MINUTE));
+  assert!(!deploying(&snap, "web", now + 2 * MINUTE));
+}

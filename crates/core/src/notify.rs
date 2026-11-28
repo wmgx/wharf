@@ -243,23 +243,30 @@ async fn retry_at(
     state
       .db
       .call(move |c| {
-        let tx = c.unchecked_transaction().map_err(db::sql_err)?;
-        if tx
-          .execute("DELETE FROM notify_retry WHERE id = ?1", [id])
-          .map_err(db::sql_err)?
-          > 0
-        {
-          tx.execute(
-            "UPDATE alert_history SET skipped = ?1 WHERE id = ?2",
-            params![skipped, history_id],
-          )
-          .map_err(db::sql_err)?;
-        }
-        tx.commit().map_err(db::sql_err)
+        finish_retry(c, id, history_id, skipped).map_err(db::sql_err)
       })
       .await?;
   }
   Ok(())
+}
+
+fn finish_retry(
+  c: &rusqlite::Connection,
+  id: i64,
+  history_id: Option<i64>,
+  skipped: Option<String>,
+) -> rusqlite::Result<()> {
+  let tx = c.unchecked_transaction()?;
+  let deleted =
+    tx.execute("DELETE FROM notify_retry WHERE id = ?1", [id])?;
+  // 发送成功时，即使在途条目被队列淘汰，也要更新历史。
+  if deleted > 0 || skipped.is_none() {
+    tx.execute(
+      "UPDATE alert_history SET skipped = ?1 WHERE id = ?2",
+      params![skipped, history_id],
+    )?;
+  }
+  tx.commit()
 }
 
 /// 记下 `key` 这次的结果（存在设置 `notify.state.<key>`），返回状态是不是变了。
@@ -269,21 +276,25 @@ pub async fn transition(
   key: &str,
   ok: bool,
 ) -> bool {
-  let setting = format!("notify.state.{key}");
-  let now = if ok { "ok" } else { "fail" };
-  let prev = state
+  let key = key.to_string();
+  state
     .db
     .call(move |c| {
-      let prev = db::setting(c, &setting)?;
-      db::set_setting(c, &setting, Some(now))?;
-      Ok(prev)
+      transition_row(c, &format!("notify.state.{key}"), ok)
     })
-    .await;
-  match prev.as_ref().map(|p| p.as_deref()) {
-    Ok(Some(p)) => p != now,
-    Ok(None) => !ok,
-    Err(_) => false,
-  }
+    .await
+    .unwrap_or(false)
+}
+
+pub(crate) fn transition_row(
+  c: &rusqlite::Connection,
+  setting: &str,
+  ok: bool,
+) -> Result<bool, ApiError> {
+  let now = if ok { "ok" } else { "fail" };
+  let prev = db::setting(c, setting)?;
+  db::set_setting(c, setting, Some(now))?;
+  Ok(prev.as_deref().map_or(!ok, |prev| prev != now))
 }
 
 /// 发出去，失败只记日志；返回没发出去的原因。
@@ -553,4 +564,25 @@ async fn notify_retries_transient_error_and_enqueues_on_exhaustion() {
     Ok(())
   }).await.unwrap();
   server.abort();
+}
+
+#[tokio::test]
+async fn successful_retry_clears_history_after_queue_eviction() {
+  let state = crate::rules::tests::test_state();
+  state.db.call(|c| {
+    let event = Event { title: "故障".into(), body: String::new() };
+    let mut first = None;
+    for _ in 0..=MAX_RETRY_QUEUE {
+      c.execute("INSERT INTO alert_history (at, source, title, ok, skipped) VALUES (0, 'task', '故障', 0, '重试中')", []).map_err(db::sql_err)?;
+      let history_id = c.last_insert_rowid();
+      enqueue(c, history_id, &event, "连接超时").map_err(db::sql_err)?;
+      first.get_or_insert((c.last_insert_rowid(), history_id));
+    }
+    let (id, history_id) = first.unwrap();
+    let skipped = || c.query_row("SELECT skipped FROM alert_history WHERE id = ?1", [history_id], |r| r.get::<_, Option<String>>(0)).map_err(db::sql_err);
+    assert_eq!(skipped()?.as_deref(), Some("重试后仍失败：通知队列已满"));
+    finish_retry(c, id, Some(history_id), None).map_err(db::sql_err)?;
+    assert_eq!(skipped()?, None);
+    Ok(())
+  }).await.unwrap();
 }

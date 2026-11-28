@@ -19,7 +19,7 @@ pub async fn record_at(
     }
   };
   for (name, row) in &snap.world.services {
-    if row.spec.server != server {
+    if row.spec.server != server || row.spec.stopped {
       continue;
     }
     if oom.contains(name) {
@@ -47,9 +47,10 @@ pub async fn record_at(
   }
 }
 
-pub fn issues() -> Vec<Issue> {
+pub fn issues(world: &crate::world::World) -> Vec<Issue> {
   rules::firing_subjects("oom_killed")
     .into_iter()
+    .filter(|(name, _)| crate::rules::lifecycle::running_service(world, name))
     .map(|(name, title)| {
       let (alert, ack) = rules::issue_alert("oom_killed", &name);
       Issue {

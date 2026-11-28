@@ -1,5 +1,5 @@
 //! 按服务的自定义监控（服务配置 `monitor`）：每分钟让服务所在机器的 agent 从本机请求
-//! `http://127.0.0.1:<宿主机端口><path>`。连续 [FAILS] 次不正常进"需要注意"并推送，恢复再推。
+//! `http://127.0.0.1:<宿主机端口><path>`。连续多次不正常进"需要注意"并推送，恢复再推。
 //! 结果只存在内存里。
 
 use std::{
@@ -18,7 +18,6 @@ use wharf_api_types::{
 use crate::{state::AppState, world::ServiceRow};
 
 const TICK: Duration = Duration::from_secs(10);
-const FAILS: u32 = 3;
 const TIMEOUT_SECS: u64 = 10;
 
 static LAST: Mutex<BTreeMap<String, MonitorView>> =
@@ -32,27 +31,42 @@ pub fn last(service: &str) -> Option<MonitorView> {
   LAST.lock().ok()?.get(service).cloned()
 }
 
-pub fn issues() -> Vec<Issue> {
-  let Ok(m) = LAST.lock() else { return vec![] };
-  m.iter()
-    .filter(|(_, v)| v.fails >= FAILS)
-    .map(|(s, v)| {
+pub fn issues(world: &crate::world::World) -> Vec<Issue> {
+  crate::rules::firing_subjects("monitor_failed")
+    .into_iter()
+    .filter(|(s, _)| {
+      world.services.get(s).is_some_and(|row| {
+        !row.spec.stopped && row.spec.monitor.is_some()
+      })
+    })
+    .map(|(s, title)| {
       let (alert, ack) =
-        crate::rules::issue_alert("monitor_failed", s);
+        crate::rules::issue_alert("monitor_failed", &s);
       Issue {
         code: "monitor_down".into(),
         level: IssueLevel::Fault,
         subject: Some(IssueSubject {
           kind: "service".into(),
-          name: s.clone(),
+          name: s,
         }),
-        title: format!("服务 {s} 的监控不正常：{}", v.detail),
+        title,
         hint: None,
         ack,
         alert,
       }
     })
     .collect()
+}
+
+pub(crate) fn forget(
+  services: &BTreeSet<String>,
+  monitors: &BTreeSet<String>,
+) {
+  if let Ok(mut last) = LAST.lock() {
+    last.retain(|svc, _| {
+      !services.contains(svc) && !monitors.contains(svc)
+    });
+  }
 }
 
 /// 监控的地址；端口找不到时返回原因。
@@ -171,7 +185,14 @@ pub fn build_http_check(
   m: &MonitorSpec,
   secrets: &BTreeMap<String, String>,
 ) -> Result<HttpCheck, String> {
-  let url = url(row, m)?;
+  http_check(url(row, m)?, m, secrets)
+}
+
+fn http_check(
+  url: String,
+  m: &MonitorSpec,
+  secrets: &BTreeMap<String, String>,
+) -> Result<HttpCheck, String> {
   let mut headers = BTreeMap::new();
   for (key, template) in &m.headers {
     let value = crate::render::substitute(template, Some(secrets))
@@ -189,6 +210,23 @@ pub fn build_http_check(
     keyword: m.keyword.clone(),
     timeout_secs: TIMEOUT_SECS,
   })
+}
+
+pub(crate) fn readiness(
+  row: &ServiceRow,
+  m: &MonitorSpec,
+  secrets: &BTreeMap<String, String>,
+) -> Result<Option<wharf_api_types::agent::SettleProbe>, ApiError> {
+  let Ok(url) = url(row, m) else {
+    return Ok(None);
+  };
+  let job = http_check(url, m, secrets).map_err(ApiError::invalid)?;
+  Ok(Some(wharf_api_types::agent::SettleProbe {
+    url: job.url,
+    expect: m.expect,
+    keyword: job.keyword,
+    headers: job.headers,
+  }))
 }
 
 fn due(now: Instant, last: Option<Instant>, m: &MonitorSpec) -> bool {
@@ -225,9 +263,15 @@ async fn round(state: &Arc<AppState>) {
     .world
     .services
     .iter()
-    .filter(|(_, r)| !r.spec.stopped && r.spec.monitor.is_some())
+    .filter(|(n, r)| {
+      !r.spec.stopped
+        && r.spec.monitor.is_some()
+        && snap.applied.contains_key(*n)
+    })
     .map(|(n, _)| n.clone())
     .collect();
+  crate::rules::retain_subjects(state, "monitor_failed", &targets)
+    .await;
   LAST.lock().unwrap().retain(|n, _| targets.contains(n));
   let mut last_run = LAST_RUN.lock().unwrap();
   last_run.retain(|n, _| targets.contains(n));
@@ -255,9 +299,12 @@ async fn round(state: &Arc<AppState>) {
     let job = build_http_check(row, m, &secrets);
     let (state, server, m) =
       (state.clone(), row.spec.server.clone(), m.clone());
+    let checked_row = row.clone();
     tokio::spawn(async move {
       if let Some((ok, detail)) =
         check_one(&state, &server, &m, job).await
+        && let Ok(current) = crate::snapshot::load(&state.db).await
+        && current.world.services.get(&name) == Some(&checked_row)
       {
         let fails = if ok {
           0
@@ -293,13 +340,13 @@ async fn check_one(
   m: &MonitorSpec,
   job: Result<HttpCheck, String>,
 ) -> Option<(bool, String)> {
+  if !state.hub.is_online(server) {
+    return None;
+  }
   let job = match job {
     Ok(job) => job,
     Err(e) => return Some((false, e)),
   };
-  if !state.hub.is_online(server) {
-    return None;
-  }
   let retries = m.retries.unwrap_or_default().min(5);
   let cancel = tokio_util::sync::CancellationToken::new();
   for attempt in 0..=retries {
@@ -466,4 +513,30 @@ async fn monitor_sends_custom_headers_respects_interval_retries_and_redacts_secr
     ..Default::default()
   };
   assert!(crate::secret_policy::validate_world(&world).is_err());
+}
+
+#[test]
+fn readiness_skips_udp_but_rejects_invalid_headers_for_tcp() {
+  let mut row = ServiceRow {
+    instance_id: "svc_fixture".into(),
+    spec: serde_json::from_value(serde_json::json!({
+      "server":"s1","source":{"image":"app:1"},"ports":[{"name":"http","host":20001,"udp":true}],
+      "monitor":{"path":"/health","port":"http","headers":{"Authorization":"Bearer [[API_KEY]]"}}
+    })).unwrap(),
+    host_ports: BTreeMap::new(),
+    import: None,
+    pins: BTreeMap::new(),
+    commit: None,
+    version: 1,
+  };
+  let m = row.spec.monitor.clone().unwrap();
+  let secrets =
+    BTreeMap::from([("API_KEY".into(), "fixture".into())]);
+  assert!(readiness(&row, &m, &secrets).unwrap().is_none());
+  row.spec.ports[0].udp = false;
+  assert_eq!(
+    readiness(&row, &m, &secrets).unwrap().unwrap().headers["Authorization"],
+    "Bearer fixture",
+  );
+  assert!(readiness(&row, &m, &BTreeMap::new()).is_err());
 }
