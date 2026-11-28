@@ -1572,6 +1572,7 @@ mod tests {
       Query(RunsQuery { limit: 10 }),
     )
     .await
+    .map_err(|error| error.0)
     .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].service.as_deref(), Some("notes"));

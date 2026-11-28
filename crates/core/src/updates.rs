@@ -519,7 +519,7 @@ async fn notify_newer(
 }
 
 /// (服务, 镜像, 固定的版本)。
-type Item<'a> = (&'a str, String, Option<&'a str>);
+type Item = (String, String, Option<String>);
 
 /// 服务 → 更高版本的标签。
 type Tags = BTreeMap<String, Vec<NewerTag>>;
@@ -533,7 +533,7 @@ async fn images(
   only: Option<&BTreeSet<String>>,
 ) -> (ImageFindings, Tags) {
   // 服务器 → [(服务, 镜像, 固定的版本)]
-  let mut by_server: BTreeMap<&str, Vec<Item>> = BTreeMap::new();
+  let mut by_server: BTreeMap<String, Vec<Item>> = BTreeMap::new();
   for (name, row) in &snap.world.services {
     if !included(only, name, row) {
       continue;
@@ -549,22 +549,24 @@ async fn images(
       {
         continue;
       }
-      let pinned = row.pins.get(&image).map(String::as_str);
-      by_server
-        .entry(server)
-        .or_default()
-        .push((name, image, pinned));
+      let pinned = row.pins.get(&image).cloned();
+      by_server.entry(server.to_string()).or_default().push((
+        name.clone(),
+        image,
+        pinned,
+      ));
     }
   }
   let mut found = ImageFindings::new();
   let mut tags = Tags::new();
   let jobs = by_server.into_iter().filter_map(|(server, items)| {
-    let row = snap.world.servers.get(server)?;
+    let pull =
+      snapshot::pull_policy(snap.world.servers.get(&server)?);
     Some(async move {
       let result: Result<Vec<ResolvedImage>, ApiError> = state
         .hub
         .call(
-          server,
+          &server,
           AgentOp::ResolveImages(ResolveImages {
             images: items
               .iter()
@@ -572,7 +574,7 @@ async fn images(
               .collect::<BTreeSet<_>>()
               .into_iter()
               .collect(),
-            pull: snapshot::pull_policy(row),
+            pull,
             tags: true,
           }),
           RESOLVE_TIMEOUT,
@@ -590,7 +592,7 @@ async fn images(
         .ok()
         .and_then(|l| l.iter().find(|r| r.image == image));
       if let Some(hit) = hit {
-        let list = tags.entry(name.to_string()).or_default();
+        let list = tags.entry(name.clone()).or_default();
         for tag in &hit.newer_tags {
           list.push(NewerTag {
             image: image.clone(),
@@ -602,14 +604,14 @@ async fn images(
       let Some(pinned) = pinned else { continue };
       let r = match (&result, hit.and_then(|r| r.digest.clone())) {
         (Err(e), _) => Err(e.message.clone()),
-        (Ok(_), Some(d)) => Ok((d, pinned.to_string())),
+        (Ok(_), Some(d)) => Ok((d, pinned)),
         (Ok(_), None) => Err(
           hit
             .and_then(|r| r.error.clone())
             .unwrap_or_else(|| "agent 没有返回结果".into()),
         ),
       };
-      found.entry(name.to_string()).or_default().insert(image, r);
+      found.entry(name).or_default().insert(image, r);
     }
   }
   tags.retain(|_, l| !l.is_empty());
@@ -675,11 +677,11 @@ async fn commits(
       }
     };
     let key = (
-      server,
-      &git.repo,
-      &git.reference,
-      &git.token_secret,
-      &git.user,
+      server.to_string(),
+      git.repo.clone(),
+      git.reference.clone(),
+      git.token_secret.clone(),
+      git.user.clone(),
     );
     let (_, services) = jobs.entry(key).or_insert_with(|| {
       (
@@ -698,7 +700,7 @@ async fn commits(
       let result = state
         .hub
         .call::<String>(
-          server,
+          &server,
           AgentOp::ResolveCommit(job),
           COMMIT_TIMEOUT,
           None,

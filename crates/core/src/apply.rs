@@ -2976,7 +2976,7 @@ async fn service_down(
     })
     .await?;
   if removed_firing {
-    crate::rules::flush_unsuppressed(state, now_ms()).await;
+    crate::rules::schedule_unsuppress(state, now_ms()).await;
   }
   Ok(())
 }

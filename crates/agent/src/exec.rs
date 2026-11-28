@@ -473,12 +473,10 @@ mod tests {
   #[tokio::test]
   async fn watch_lines_discard_bytes_past_four_kib() {
     let input = format!("{}\nnext\n", "x".repeat(100_000));
-    let lines = std::cell::RefCell::new(Vec::new());
-    bounded_lines(input.as_bytes(), &|line| {
-      lines.borrow_mut().push(line.len())
-    })
-    .await;
-    assert_eq!(*lines.borrow(), [4096, 4]);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+    bounded_lines(input.as_bytes(), &tx).await;
+    assert_eq!(rx.recv().await.unwrap().len(), 4096);
+    assert_eq!(rx.recv().await.unwrap(), "next");
   }
 
   #[tokio::test]
