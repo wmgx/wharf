@@ -2804,6 +2804,7 @@ export interface ServiceExecResponse {
   stdout: string;
   truncated: boolean;
 }
+
 export interface ServiceRenderView {
   compose: string;
   init_cmd?: string | null;
@@ -2813,6 +2814,7 @@ export interface ServiceRenderView {
   source: string;
   warnings?: string[];
 }
+
 /**
  * 单个服务的周期指标。
  */
