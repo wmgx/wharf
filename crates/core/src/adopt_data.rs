@@ -650,12 +650,13 @@ fn adopt_data_checks_total_space_and_reports_undeclared_anonymous_volumes()
  {
   use serde_json::json;
   const MIB: u64 = 1 << 20;
+  let entries = ["data", "logs"].map(|volume_name| json!({
+    "volume_name": volume_name, "size_bytes": 100 * MIB, "is_dir": true,
+    "target_exists_nonempty": false, "in_use_by": []
+  }));
   let inspected: AdoptDataInspectResult = serde_json::from_value(json!({
     "srv_avail_bytes": 300 * MIB,
-    "entries": ["data", "logs"].map(|volume_name| json!({
-      "volume_name": volume_name, "size_bytes": 100 * MIB, "is_dir": true,
-      "target_exists_nonempty": false, "in_use_by": []
-    })),
+    "entries": entries,
     "mounts": [{"container": "app-db-1", "service": "db", "kind": "volume",
       "source": "a".repeat(64), "target": "/var/lib/db"}]
   })).unwrap();
