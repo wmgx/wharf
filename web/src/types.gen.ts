@@ -1648,7 +1648,7 @@ export interface ImagesView {
 /**
  * 计划项会造成的影响，一项可以有多个。
  */
-export type Impact = "restart" | "downtime" | "remove" | "data_loss" | "overwrite" | "public" | "privilege";
+export type Impact = "privilege" | "restart" | "downtime" | "remove" | "data_loss" | "overwrite" | "public";
 
 /**
  * 导入预览：用 `upsert_service` 提交即可。
