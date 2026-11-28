@@ -51,6 +51,7 @@ export function importText(r: ImportRecord): string {
 }
 
 export const DATA_KIND: Record<DataKind, string> = {
+  shared: "共享卷",
   managed: "Wharf 管理",
   external_dir: "外部目录",
   named_volume: "docker 卷",
@@ -59,7 +60,7 @@ export const DATA_KIND: Record<DataKind, string> = {
 export function dataSummary(svc: ServiceView): string {
   const data = svc.data ?? [];
   if (data.length === 0) return "没有数据卷";
-  const outside = data.filter((m) => m.kind !== "managed").length;
+  const outside = data.filter((m) => m.kind === "external_dir" || m.kind === "named_volume").length;
   return outside
     ? `${data.length} 处挂载，${outside} 处不在备份范围`
     : `${data.length} 处挂载`;

@@ -70,6 +70,7 @@ fn high_risk_trigger() {
       from: "s1".into(),
       to: "s2".into(),
       instance_id: None,
+      shared_data: false,
     },
     Step::ServiceDown {
       server: "s1".into(),

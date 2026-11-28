@@ -1136,10 +1136,10 @@ pub enum ServiceCmd {
     /// 部署就绪检查和运行中监控用的 HTTP 路径。
     #[arg(long)]
     health_path: Option<String>,
-    /// 数据卷 `名字:/容器内路径`，宿主机目录是 /srv/<服务>/<名字>。可以多次使用。
+    /// 数据卷：名字:/路径[:ro|:rw] 或 [本地名=]服务:卷:/路径[:ro|:rw]。
     #[arg(long)]
     volume: Vec<String>,
-    /// 删除数据卷配置。
+    /// 按本地卷名解除挂载。
     #[arg(long)]
     unset_volume: Vec<String>,
     #[command(flatten)]

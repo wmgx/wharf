@@ -207,6 +207,13 @@ fn complete_migration_steps(
           from: from.clone(),
           to: to.clone(),
           instance_id: m.payload.instance_id.clone(),
+          shared_data: crate::shared_volumes::consumers_on(
+            &snap.world,
+            service,
+            to,
+          )
+          .next()
+          .is_some(),
         },
       });
     }

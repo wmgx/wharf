@@ -184,6 +184,7 @@ async fn handshake(
     core_probe: true,
     backup_isolation: true,
     safe_delete: true,
+    shared_volumes: true,
     safe_gateway: true,
     gateway_probe: true,
     frpc_reload: true,

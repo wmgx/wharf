@@ -18,8 +18,8 @@ use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
-    AgentOp, OneTimeSecret, SYNC_BACKUP, SYNC_READY, SyncPass,
-    SyncPush, SyncServe,
+    AgentOp, BindMountQuery, BindMountUser, OneTimeSecret,
+    SYNC_BACKUP, SYNC_READY, SyncPass, SyncPush, SyncServe,
   },
 };
 
@@ -59,11 +59,52 @@ fn one_time_password() -> OneTimeSecret {
   OneTimeSecret(hex::encode(bytes))
 }
 
+async fn check_writers(
+  state: &AppState,
+  source: (&str, u64),
+  service: &str,
+  exclude_owner: bool,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  let users: Vec<BindMountUser> = state
+    .hub
+    .call_bound(
+      source,
+      AgentOp::BindMountUsers(BindMountQuery {
+        path: format!("/srv/{service}"),
+        running_only: true,
+        writable_only: true,
+        exclude_projects: if exclude_owner {
+          vec![service.to_string()]
+        } else {
+          Vec::new()
+        },
+      }),
+      STOP_TIMEOUT,
+      None,
+      cancel,
+    )
+    .await?;
+  if users.is_empty() {
+    return Ok(());
+  }
+  let users = users
+    .into_iter()
+    .map(|u| u.project.unwrap_or(u.container))
+    .collect::<std::collections::BTreeSet<_>>()
+    .into_iter()
+    .collect::<Vec<_>>()
+    .join("、");
+  Err(ApiError::new(ErrorCode::Conflict, format!(
+    "无法迁移 {service}：仍有活动容器可写挂载 /srv/{service}（{users}）"
+  )).with_hint("先用 wharf service stop 停止共用该目录的服务，或将挂载改为只读（:ro）"))
+}
+
 pub async fn volume_sync(
   state: &AppState,
   net: &Net,
   service: &str,
-  (from, to): (&str, &str),
+  (from, to, shared): (&str, &str, bool),
   source_should_run: bool,
   progress: ProgressFn,
   cancel: &CancellationToken,
@@ -85,6 +126,15 @@ pub async fn volume_sync(
       && m.phase != MigratePhase::Pending
   }) {
     return Ok(());
+  }
+  let mount_conn =
+    if shared || state.hub.supports_shared_volumes(from) {
+      Some(state.hub.shared_volumes_conn_id(from)?)
+    } else {
+      None
+    };
+  if let Some(conn) = mount_conn {
+    check_writers(state, (from, conn), service, true, cancel).await?;
   }
   let preserve_existing = existing.as_ref().is_none_or(|m| {
     !m.payload.target_prepared && m.payload.target_backup.is_none()
@@ -171,22 +221,36 @@ pub async fn volume_sync(
       })
       .await?;
     let push = async |pass| {
-      let result: Pushed = state
-        .hub
-        .call(
-          from,
-          AgentOp::SyncPush(SyncPush {
-            service: service.to_string(),
-            host: target_ip.clone(),
-            port,
-            password: password.clone(),
-            pass,
-          }),
-          PUSH_TIMEOUT,
-          Some(progress.clone()),
-          &work_cancel,
-        )
-        .await?;
+      let op = AgentOp::SyncPush(SyncPush {
+        service: service.to_string(),
+        host: target_ip.clone(),
+        port,
+        password: password.clone(),
+        pass,
+      });
+      let result: Pushed = if let Some(conn) = mount_conn {
+        state
+          .hub
+          .call_bound(
+            (from, conn),
+            op,
+            PUSH_TIMEOUT,
+            Some(progress.clone()),
+            &work_cancel,
+          )
+          .await?
+      } else {
+        state
+          .hub
+          .call(
+            from,
+            op,
+            PUSH_TIMEOUT,
+            Some(progress.clone()),
+            &work_cancel,
+          )
+          .await?
+      };
       if !result.synced {
         return Err(ApiError::new(
           ErrorCode::AgentFailed,
@@ -227,6 +291,16 @@ pub async fn volume_sync(
         ErrorCode::AgentFailed,
         format!("源服务器 {from} 上找不到 {service} 的容器配置"),
       ));
+    }
+    if let Some(conn) = mount_conn {
+      check_writers(
+        state,
+        (from, conn),
+        service,
+        false,
+        &work_cancel,
+      )
+      .await?;
     }
     progress("增量同步（服务已停止）".into());
     push(SyncPass::Final).await
@@ -401,6 +475,59 @@ pub(crate) mod tests {
   }
 
   #[tokio::test]
+  async fn volume_sync_blocks_running_writer_and_restarts_owner_on_final_conflict()
+   {
+    for initially_running in [true, false] {
+      let state = seed_service(false).await;
+      seed_migration(&state, "pending", false).await;
+      if initially_running {
+        state.hub.mock_safe_migrate_agent("s2", |_, _| {
+          panic!("应在目标机写入前拦截")
+        });
+      } else {
+        mock_receiver(&state);
+      }
+      let (restart, mut restarted) = oneshot::channel();
+      let mut restart = Some(restart);
+      state.hub.mock_safe_migrate_agent("s1", move |op, _| Some(Ok(match op {
+        AgentOp::BindMountUsers(q) => {
+          assert!(q.running_only && q.writable_only);
+          if initially_running || q.exclude_projects.is_empty() {
+            json!([{"container":"writer","source":"/srv/notes/data","rw":true}])
+          } else {
+            assert_eq!(q.exclude_projects, ["notes"]);
+            json!([])
+          }
+        }
+        AgentOp::SyncPush(p) if !initially_running && p.pass == SyncPass::Live => json!({"synced":true}),
+        AgentOp::ProjectStop { project } if !initially_running && project == "notes" => json!(true),
+        AgentOp::ProjectStart { project, .. } if !initially_running && project == "notes" => {
+          restart.take().unwrap().send(()).unwrap();
+          json!(true)
+        }
+        _ => panic!("不应停止共享方或发送最终同步"),
+      })));
+      state.hub.mock_shared_volumes_agent("s1");
+      let err = volume_sync(
+        &state,
+        &migration_net(),
+        "notes",
+        ("s1", "s2", true),
+        true,
+        Arc::new(|_| {}),
+        &CancellationToken::new(),
+      )
+      .await
+      .unwrap_err();
+      assert_eq!(err.code, ErrorCode::Conflict);
+      assert!(err.message.contains("writer"));
+      if !initially_running {
+        restarted.try_recv().unwrap();
+      }
+    }
+  }
+
+  #[tokio::test]
   async fn volume_sync_sends_live_then_final_pass() {
     let state = seed_service(false).await;
     seed_migration(&state, "pending", false).await;
@@ -425,7 +552,7 @@ pub(crate) mod tests {
       &state,
       &migration_net(),
       "notes",
-      ("s1", "s2"),
+      ("s1", "s2", false),
       true,
       Arc::new(|_| {}),
       &CancellationToken::new(),
@@ -461,7 +588,7 @@ pub(crate) mod tests {
       &state,
       &migration_net(),
       "notes",
-      ("s1", "s2"),
+      ("s1", "s2", false),
       false,
       progress.clone(),
       &cancel,
@@ -510,7 +637,7 @@ pub(crate) mod tests {
         &state,
         &migration_net(),
         "notes",
-        ("s1", "s2"),
+        ("s1", "s2", false),
         true,
         Arc::new(|_| {}),
         &CancellationToken::new()
@@ -556,7 +683,7 @@ pub(crate) mod tests {
         &state,
         &migration_net(),
         "notes",
-        ("s1", "s2"),
+        ("s1", "s2", false),
         true,
         Arc::new(|_| {}),
         &CancellationToken::new(),
@@ -584,7 +711,7 @@ pub(crate) mod tests {
       &state,
       &migration_net(),
       "notes",
-      ("s1", "s2"),
+      ("s1", "s2", false),
       true,
       Arc::new(|_| {}),
       &CancellationToken::new(),

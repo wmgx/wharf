@@ -78,6 +78,7 @@ struct Conn {
   gateway_extra_files: bool,
   backup_isolation: bool,
   safe_delete: bool,
+  shared_volumes: bool,
   safe_gateway: bool,
   gateway_probe: bool,
   frpc_reload: bool,
@@ -570,6 +571,25 @@ impl Hub {
     Ok(conn.conn_id)
   }
 
+  pub(crate) fn shared_volumes_conn_id(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.shared_volumes {
+      return Err(shared_volumes_required(server));
+    }
+    Ok(conn.conn_id)
+  }
+
+  pub(crate) fn supports_shared_volumes(&self, server: &str) -> bool {
+    self.shared_volumes_conn_id(server).is_ok()
+  }
+
   pub(crate) fn safe_delete_conn_id(
     &self,
     server: &str,
@@ -694,6 +714,14 @@ impl Hub {
       }
       _ => None,
     };
+    if matches!(
+      &op,
+      AgentOp::ProjectDown { purge: true, .. }
+        | AgentOp::BindMountUsers(_)
+    ) && (conn.upgrade_only || !conn.shared_volumes)
+    {
+      return Err(shared_volumes_required(server));
+    }
     let needs_safe_backup = match &op {
       AgentOp::ServiceStopForData { .. }
       | AgentOp::PruneRestore { .. } => true,
@@ -1074,6 +1102,7 @@ async fn handle_socket(
     core_probe,
     backup_isolation,
     safe_delete,
+    shared_volumes,
     safe_gateway,
     gateway_probe,
     frpc_reload,
@@ -1244,6 +1273,7 @@ async fn handle_socket(
     gateway_extra_files,
     backup_isolation,
     safe_delete,
+    shared_volumes,
     safe_gateway,
     gateway_probe,
     frpc_reload,
@@ -1495,6 +1525,17 @@ async fn report_worker(
     _ = conn.closed.cancelled() => {},
     _ = process => {},
   }
+}
+
+fn shared_volumes_required(server: &str) -> ApiError {
+  ApiError::new(
+    ErrorCode::Conflict,
+    format!(
+      "服务器 {server} 的 agent 版本较旧，缺少共享挂载占用检查"
+    ),
+  )
+  .with_hint("请先运行 wharf upgrade 升级 agent，再重试")
+  .suggest("wharf upgrade")
 }
 
 #[cfg(test)]

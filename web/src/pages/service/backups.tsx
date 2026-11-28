@@ -31,7 +31,7 @@ export function Backups({ svc }: { svc: ServiceView }) {
   const actions = useActions();
   const [restoring, setRestoring] = useState<Snapshot | null>(null);
   const target = svc.spec.backup?.to;
-  const hasData = !!svc.spec.volumes?.length || "compose" in svc.spec.source;
+  const hasData = !!svc.spec.volumes?.some((v) => !v.from_service) || "compose" in svc.spec.source;
 
   const runNow = async () => {
     try {
@@ -59,7 +59,7 @@ export function Backups({ svc }: { svc: ServiceView }) {
   if (!hasData) return <Empty>没有数据卷</Empty>;
 
   const last = data?.records.find((record) => record.target === target);
-  const uncovered = svc.data?.filter((m) => m.kind !== "managed") ?? [];
+  const uncovered = svc.data?.filter((m) => m.kind === "external_dir" || m.kind === "named_volume") ?? [];
   return (
     <div className="grid gap-3">
       <Card className="gap-4 py-5 shadow-xs">

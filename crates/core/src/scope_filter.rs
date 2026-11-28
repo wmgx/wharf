@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use wharf_api_types::{
   spec::Fleet,
   view::{
-    AlertsView, DataView, DoctorReport, Issue, SecretView, Status,
+    AlertsView, DataView, DoctorReport, Issue, SecretView,
+    ServiceView, Status,
   },
 };
 
@@ -58,6 +59,14 @@ fn issue_in_scope(
   })
 }
 
+pub(crate) fn filter_service_links(
+  services: &BTreeSet<String>,
+  service: &mut ServiceView,
+) {
+  service.uses.retain(|name| services.contains(name));
+  service.used_by.retain(|name| services.contains(name));
+}
+
 pub fn filter_status(
   services: &BTreeSet<String>,
   world: &World,
@@ -69,6 +78,9 @@ pub fn filter_status(
   status.edge_unmanaged.clear();
   status.bookmarks.clear();
   status.services.retain(|s| services.contains(&s.name));
+  for service in &mut status.services {
+    filter_service_links(services, service);
+  }
   status
     .routes
     .retain(|r| route_spec_in_scope(services, &r.spec));
