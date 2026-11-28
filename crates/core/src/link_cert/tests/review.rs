@@ -38,6 +38,7 @@ async fn offline_gateway_blocks_gateway_sync_but_allows_frpc_recovery()
 
   let recover = Step::LinkUp {
     hot_reload: false,
+    after_dns: false,
     server: "s3".into(),
     project: link::client_project("s1"),
   };

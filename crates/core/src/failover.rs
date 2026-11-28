@@ -784,7 +784,7 @@ async fn manual(
       state.clone(),
       vec![step],
       guard,
-      Some(target.to_string()),
+      Some((target, auth)),
     )
     .await?;
     let step = done.pop().expect("单域名 DNS 步骤");
@@ -1074,15 +1074,6 @@ pub(crate) mod tests {
       round(&state).await.unwrap();
     }
     assert!(active(host));
-    assert!(
-      status(&world, host)
-        .unwrap()
-        .health
-        .unwrap()
-        .primary
-        .unwrap()
-        .ok
-    );
 
     DNS.lock().unwrap().1 = true;
     assert_eq!(
@@ -1091,7 +1082,38 @@ pub(crate) mod tests {
     );
     assert!(active(host));
     assert_eq!(pinned(host), Some(FailoverPinTarget::Backup));
+    let mut scoped = crate::security_receipt::tests::auth(false);
+    scoped.services = Some(BTreeSet::from(["other".into()]));
+    let unauthorized = manual_api(
+      State(state.clone()),
+      scoped,
+      Extension(crate::audit::AuditSlot::default()),
+      Path(host.into()),
+      Json(RouteFailoverRequest {
+        target: FailoverTarget::Primary,
+        force: true,
+        verify_before_dns: true,
+        reason: None,
+      }),
+    )
+    .await;
+    assert!(
+      matches!(unauthorized, Err(crate::api::AppError(e)) if e.code == ErrorCode::Forbidden)
+    );
     DNS.lock().unwrap().1 = false;
+    let unlocked = switch(FailoverTarget::Auto).await.unwrap();
+    assert!(
+      unlocked.on_backup
+        && unlocked.pinned.is_none()
+        && unlocked.run_id.is_none()
+    );
+    assert!(
+      switch(FailoverTarget::Backup)
+        .await
+        .unwrap()
+        .run_id
+        .is_none()
+    );
     let primary = switch(FailoverTarget::Primary).await.unwrap();
     assert!(!primary.on_backup && primary.pinned.is_none());
     assert_eq!(

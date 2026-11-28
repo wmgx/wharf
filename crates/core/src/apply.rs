@@ -814,12 +814,19 @@ pub(crate) async fn run_batch_sync(
   state: Arc<AppState>,
   steps: Vec<StepPlan>,
   guard: OpLockGuard,
-  manual_gateway: Option<String>,
+  manual: Option<(&str, &Auth)>,
 ) -> Result<(String, Vec<RunStep>, OpLockGuard), ApiError> {
+  let scope_services = manual
+    .and_then(|(_, auth)| auth.services.as_ref())
+    .map(|services| services.iter().cloned().collect::<Vec<_>>());
+  let manual_gateway = manual.map(|(gateway, _)| gateway.to_string());
   let run = Run {
     run_id: crate::world::new_id("r"),
     plan_id: String::new(),
-    actor: Some("主备切换".into()),
+    actor: Some(manual.map_or_else(
+      || "主备切换".into(),
+      |(_, auth)| format_actor(auth),
+    )),
     retry_of: None,
     status: RunStatus::Running,
     started_at: Utc::now(),
@@ -828,16 +835,19 @@ pub(crate) async fn run_batch_sync(
   };
   guard.set_run(&run.run_id);
   let stored = run.clone();
+  let scope = scope_services.clone();
   state
     .db
-    .call(move |c| insert_task_run(c, &stored, None, None))
+    .call(move |c| {
+      insert_task_run(c, &stored, scope.as_deref(), None)
+    })
     .await?;
   let cancel = CancellationToken::new();
   let shared = Arc::new(Mutex::new(run));
   lock(&state.runs.active).insert(
     lock(&shared).run_id.clone(),
     ActiveRun {
-      scope_services: None,
+      scope_services,
       run: shared.clone(),
       cancel: cancel.clone(),
     },
@@ -1680,6 +1690,7 @@ async fn run_step_with_dns(
       server,
       project,
       hot_reload,
+      ..
     } => {
       if *hot_reload && !state.hub.supports_frpc_reload(server) {
         return Err(
@@ -3837,6 +3848,115 @@ mod tests {
       (&*pending.gateway, &*pending.server, pending.keep_tunnel),
       ("edge", "s1", true)
     );
+  }
+
+  #[tokio::test]
+  async fn dns_502_skips_removing_old_site_and_explicit_skip_reaches_provider()
+   {
+    let state = crate::rules::tests::test_state();
+    let mut world = crate::world::World::default();
+    world.gateways.insert(
+      "gw2".into(),
+      crate::world::GatewayRow {
+        spec: serde_json::from_str(
+          r#"{"kind":"caddy","server":"s2"}"#,
+        )
+        .unwrap(),
+        version: 1,
+      },
+    );
+    world.routes.insert("a.example.test".into(), crate::world::RouteRow {
+      spec: serde_json::from_str(r#"{"hostname":"a.example.test","upstream":"100.64.0.2:80","gateway":"gw2"}"#).unwrap(),
+      id: "rt_verify".into(),
+      version: 1,
+    });
+    let writes = world.writes_from(&crate::world::World::default());
+    state
+      .db
+      .call(move |c| {
+        for write in writes {
+          db::apply_write(c, &write)?;
+        }
+        Ok(())
+      })
+      .await
+      .unwrap();
+    state.hub.mock_agent("s2", false, |op| Ok(match op {
+      AgentOp::ProjectStatus { .. } => serde_json::json!([{
+        "project":"wharf-gw-gw2","containers":[{"name":"gw2-1","service":"caddy","state":"running"}]
+      }]),
+      AgentOp::GatewayProbe(_) => serde_json::json!({
+        "ok":false,"stage":"gateway_http_bad","status":502,"detail":"HTTP 502"
+      }),
+      _ => panic!("不应同步旧网关"),
+    }));
+    state.hub.enable_mock_failover_features("s2");
+    let dns: Step = serde_json::from_value(serde_json::json!({
+      "kind":"dns_upsert","hostname":"a.example.test","account":"fixture",
+      "expected_gateway":"gw2","verify_target":true,
+      "spec":{"record_type":"A","content":"203.0.113.2","proxied":false},
+      "existing":null,"extra":[]
+    })).unwrap();
+    let steps: Vec<StepPlan> = [
+      dns.clone(),
+      Step::GatewaySync {
+        gateway: "gw1".into(),
+        after_dns: true,
+        expect: None,
+      },
+    ]
+    .into_iter()
+    .map(|step| StepPlan {
+      step,
+      title: "切入口".into(),
+      items: vec![],
+    })
+    .collect();
+    let run = Arc::new(Mutex::new(Run {
+      run_id: "r-verify".into(),
+      plan_id: String::new(),
+      actor: None,
+      retry_of: None,
+      status: RunStatus::Running,
+      started_at: Utc::now(),
+      finished_at: None,
+      steps: steps.iter().map(pending_run_step).collect(),
+    }));
+    let guard = state
+      .locks
+      .acquire(LockSpec::apply([]), "测试写入 DNS")
+      .unwrap();
+    let cancel = CancellationToken::new();
+    execute(
+      state.clone(),
+      run.clone(),
+      steps,
+      (0, false, None, None),
+      None,
+      cancel.clone(),
+      guard,
+    )
+    .await;
+    {
+      let run = lock(&run);
+      let error = run.steps[0].error.as_ref().unwrap();
+      assert_eq!(error.code, ErrorCode::Conflict);
+      assert!(error.message.contains("HTTP 502"));
+      assert_eq!(run.steps[1].status, StepStatus::Skipped);
+    }
+    let error = run_step_with_dns(
+      &state,
+      "r-skip",
+      &dns,
+      Arc::new(|_| {}),
+      &cancel,
+      (Some(false), None),
+    )
+    .await
+    .unwrap_err();
+    // 未配置测试厂商，进入查账号这一步即证明预验已被跳过。
+    assert_eq!(error.code, ErrorCode::PlanStale);
+    assert!(error.message.contains("账号"));
   }
 
   #[tokio::test]

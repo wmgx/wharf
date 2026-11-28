@@ -297,7 +297,17 @@ async fn verify(
       }
     }
   }
-  Err(conflict(host, gateway, &detail))
+  let mut error = conflict(host, gateway, &detail);
+  if snap.world.servers.get(&gw.server).is_some_and(|row| {
+    row.settings.region
+      == Some(wharf_api_types::spec::Region::Overseas)
+  }) && detail.contains("无法直连")
+  {
+    error = error.with_hint(format!(
+      "检查安全组和防火墙是否放行 {port}；若仅是控制面国际线路波动，可加 --no-verify-before-dns 跳过预验"
+    ));
+  }
+  Err(error)
 }
 
 fn tls_failed(e: &reqwest::Error) -> bool {

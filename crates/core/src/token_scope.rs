@@ -510,6 +510,7 @@ mod tests {
       "/api/services/blog/files/download",
       "/api/routes/blog.example.com/cert",
       "/api/routes/blog.example.com/dns-check",
+      "/api/routes/blog.example.com/failover",
       "/api/metrics",
       "/api/alerts",
       "/api/export",
@@ -534,6 +535,7 @@ mod tests {
       (Method::POST, "/api/alerts/custom"),
       (Method::DELETE, "/api/alerts/custom/slow"),
       (Method::POST, "/api/routes/blog.example.com/cert/retry"),
+      (Method::POST, "/api/routes/blog.example.com/failover"),
       (Method::PUT, "/api/routes/blog.example.com/note"),
     ] {
       assert!(check_service_scope(&scope, &method, path), "{path}");

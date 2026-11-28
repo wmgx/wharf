@@ -330,6 +330,53 @@ fn pick_port(key: &str, taken: &mut BTreeSet<u16>) -> Option<u16> {
   pick_from(TUNNEL_PORTS, key, taken)
 }
 
+// 与当前配置比较，兼容升级前已经占用这段端口的服务和网关。
+pub(crate) fn validate_new_admin_port_bindings(
+  current: &World,
+  desired: &World,
+) -> Result<(), ApiError> {
+  let old = configured_admin_port_bindings(current);
+  if let Some((server, port)) =
+    configured_admin_port_bindings(desired)
+      .difference(&old)
+      .next()
+  {
+    return Err(ApiError::invalid(format!(
+      "服务器 {server} 上的 {port} 是 frpc 管理保留端口"
+    )));
+  }
+  Ok(())
+}
+
+fn configured_admin_port_bindings(
+  world: &World,
+) -> BTreeSet<(&str, u16)> {
+  let mut bindings = BTreeSet::new();
+  for service in world.services.values() {
+    for port in service
+      .host_ports
+      .values()
+      .copied()
+      .filter(|p| FRPC_ADMIN_PORTS.contains(p))
+    {
+      bindings.insert((service.spec.server.as_str(), port));
+    }
+  }
+  for gateway in world.gateways.values() {
+    let spec = &gateway.spec;
+    let ports = spec
+      .layer4
+      .iter()
+      .map(|f| f.listen)
+      .chain(spec.http_port)
+      .chain(spec.https_port);
+    for port in ports.filter(|p| FRPC_ADMIN_PORTS.contains(p)) {
+      bindings.insert((spec.server.as_str(), port));
+    }
+  }
+  bindings
+}
+
 fn pick_admin_port(
   key: &str,
   taken: &mut BTreeSet<u16>,
@@ -454,7 +501,10 @@ pub fn projects_for_servers(
     });
   }
   // 在已配置的承载机上分配端口，增删路由不会推挤同机其他 frpc。
-  let mut taken = BTreeSet::new();
+  let mut taken = configured_admin_port_bindings(world)
+    .into_iter()
+    .map(|(_, p)| p)
+    .collect();
   let admin_ports: BTreeMap<_, _> = world
     .servers
     .keys()
@@ -843,6 +893,26 @@ mod tests {
   }
 
   use super::*;
+
+  #[test]
+  fn existing_admin_port_bindings_are_grandfathered() {
+    let mut world = World::default();
+    world.gateways.insert(
+      "edge".into(),
+      crate::world::GatewayRow {
+        spec: serde_json::from_str(
+          r#"{"kind":"caddy","server":"s1","http_port":47400}"#,
+        )
+        .unwrap(),
+        version: 1,
+      },
+    );
+    assert!(validate_new_admin_port_bindings(&world, &world).is_ok());
+    assert!(
+      validate_new_admin_port_bindings(&World::default(), &world)
+        .is_err()
+    );
+  }
 
   #[test]
   fn frpc_admin_ports_do_not_collide() {

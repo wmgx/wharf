@@ -159,6 +159,8 @@ pub enum Step {
     project: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     hot_reload: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    after_dns: bool,
   },
   LinkDown {
     server: String,
@@ -297,6 +299,9 @@ impl Step {
         after_dns: true, ..
       } => 7,
       Self::GatewaySync { .. } => 4,
+      Self::LinkUp {
+        after_dns: true, ..
+      } => 7,
       Self::LinkUp { .. } => 5,
       Self::DnsUpsert { .. } | Self::EdgeAttach { .. } => 6,
       Self::GatewayDown { .. }
@@ -513,6 +518,7 @@ pub(crate) async fn make_plan_inner(
     &snap.secret_restrictions,
   )?;
   desired.validate()?;
+  crate::link::validate_new_admin_port_bindings(&current, &desired)?;
   validate_changed_templates(&current, &desired)?;
   let mut warnings =
     crate::edge::validate_owners(&current, &desired)?;
@@ -883,7 +889,14 @@ pub(crate) async fn make_plan_inner(
       .map(crate::apply::safe_rollback_warning),
   );
   leftover_items(&mut b, &snap, &current, &desired, &status);
-  link_items(&mut b, &snap, &desired, &net, &status, &state.hub)?;
+  link_items(
+    &mut b,
+    &snap,
+    &desired,
+    (&before_net, &net),
+    &status,
+    &state.hub,
+  )?;
   tailscale_items(&mut b, &snap, &desired, &status);
   egress_items(&mut b, &snap, &current, &desired);
   docker_proxy_items(&mut b, &snap, &current, &desired);
@@ -2327,10 +2340,13 @@ fn link_items(
   b: &mut Builder,
   snap: &Snapshot,
   desired: &World,
-  net: &Net,
+  (before_net, net): (&Net, &Net),
   status: &StatusMap,
   hub: &crate::hub::Hub,
 ) -> Result<(), ApiError> {
+  let before =
+    crate::link::tunnels(&snap.world, before_net).unwrap_or_default();
+  let after = crate::link::tunnels(desired, net)?;
   let want = crate::link::projects_for_servers(
     desired,
     net,
@@ -2421,6 +2437,8 @@ fn link_items(
         server: p.server.clone(),
         project: p.project.clone(),
         hot_reload: p.reload.is_some(),
+        after_dns: action == Action::Update
+          && only_withdraws_tunnels(p, &before, &after),
       },
     );
   }
@@ -2646,6 +2664,25 @@ fn shown(value: &str) -> String {
   } else {
     format!("代理 {value}")
   }
+}
+
+fn only_withdraws_tunnels(
+  project: &crate::link::LinkProject,
+  before: &[crate::link::Tunnel],
+  after: &[crate::link::Tunnel],
+) -> bool {
+  let Some(gateway_server) =
+    project.project.strip_prefix("wharf-link-")
+  else {
+    return false;
+  };
+  let belongs = |t: &&crate::link::Tunnel| {
+    t.service_server == project.server
+      && t.gateway_server == gateway_server
+  };
+  let old: Vec<_> = before.iter().filter(belongs).collect();
+  let new: Vec<_> = after.iter().filter(belongs).collect();
+  new.len() < old.len() && new.iter().all(|t| old.contains(t))
 }
 
 fn tailscale_items(
@@ -2986,8 +3023,7 @@ fn gateway_items(
         format!("在 {server} 上应用网关 {name}"),
         Step::GatewaySync {
           gateway: name.clone(),
-          after_dns: gw.spec.kind == GatewayKind::Caddy
-            && action == Action::Update
+          after_dns: action == Action::Update
             && current.gateways.get(name) == Some(gw)
             && status
               .get(server)
@@ -4897,8 +4933,15 @@ mod tests {
       ..Default::default()
     };
     let mut b = Builder::default();
-    link_items(&mut b, &snap, &current, &net, &running(false), &hub)
-      .unwrap();
+    link_items(
+      &mut b,
+      &snap,
+      &current,
+      (&net, &net),
+      &running(false),
+      &hub,
+    )
+    .unwrap();
     assert!(b.steps.is_empty());
 
     let mut desired = current.clone();
@@ -4914,7 +4957,7 @@ mod tests {
         &mut b,
         &snap,
         &desired,
-        &net,
+        (&net, &net),
         &running(already_migrated),
         &hub,
       )
@@ -4972,7 +5015,7 @@ mod tests {
       &mut b,
       &Snapshot::default(),
       &world,
-      &Net::default(),
+      (&Net::default(), &Net::default()),
       &status,
       &crate::hub::Hub::default(),
     )

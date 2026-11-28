@@ -206,6 +206,56 @@ pub(super) async fn run(
 mod tests {
   use super::*;
 
+  #[tokio::test]
+  async fn pending_certificate_requires_a_working_http_upstream() {
+    use tokio::{
+      io::{AsyncReadExt, AsyncWriteExt},
+      net::TcpListener,
+    };
+
+    let bind = || TcpListener::bind(("127.0.0.1", 0));
+    let tls = bind().await.unwrap();
+    let http = bind().await.unwrap();
+    let upstream = bind().await.unwrap();
+    let job = GatewayProbeJob {
+      hostname: "probe.example.test".into(),
+      path: "/".into(),
+      tls: true,
+      http_port: http.local_addr().unwrap().port(),
+      https_port: tls.local_addr().unwrap().port(),
+      upstream: Some(upstream.local_addr().unwrap().to_string()),
+      upstream_only: false,
+      timeout_secs: 5,
+    };
+    let tls_fail = async move {
+      let (mut conn, _) = tls.accept().await.unwrap();
+      let mut hello = [0; 4096];
+      assert!(conn.read(&mut hello).await.unwrap() > 0);
+      conn.shutdown().await.unwrap();
+    };
+    async fn respond(listener: TcpListener, response: &[u8]) {
+      loop {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        if stream.read(&mut request).await.unwrap() > 0 {
+          stream.write_all(response).await.unwrap();
+          break;
+        }
+      }
+    }
+    let fixtures = tokio::spawn(async move {
+      tokio::join!(
+        tls_fail,
+        respond(http, b"HTTP/1.1 308 Permanent Redirect\r\nContent-Length: 0\r\n\r\n"),
+        respond(upstream, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"),
+      );
+    });
+    let result = run(&job, &Ctx::detached()).await.unwrap();
+    fixtures.abort();
+    assert!(result.ok && result.cert_pending, "{result:?}");
+    assert_eq!(result.status, Some(308));
+  }
+
   #[test]
   fn upstream_accepts_only_authority() {
     assert!(upstream_addr("100.64.0.2:80").is_ok());

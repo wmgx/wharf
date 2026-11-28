@@ -1893,7 +1893,6 @@ pub(crate) fn is_reserved_host_port(port: u16) -> bool {
   ]
   .contains(&port)
     || (30000..=39999).contains(&port)
-    || crate::link::FRPC_ADMIN_PORTS.contains(&port)
 }
 
 fn validate_deploy_options(
