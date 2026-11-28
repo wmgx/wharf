@@ -81,6 +81,9 @@ struct Conn {
   gateway_extra_files: bool,
   backup_isolation: bool,
   safe_delete: bool,
+  service_runtime_opts: bool,
+  live_limits_update: bool,
+  task_resource_limits: bool,
   data_cleanup: bool,
   exec_v2: bool,
   files_v2: bool,
@@ -495,6 +498,28 @@ impl Hub {
     })
   }
 
+  pub(crate) fn task_limits_conn_id(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|c| !c.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.task_resource_limits {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 不支持任务资源上限"),
+        )
+        .with_hint("运行 wharf upgrade 后重新运行任务")
+        .suggest("wharf upgrade"),
+      );
+    }
+    Ok(conn.conn_id)
+  }
+
   pub(crate) fn task_artifacts_conn_id(
     &self,
     server: &str,
@@ -796,6 +821,50 @@ impl Hub {
     } else {
       self.call(server, op, timeout, progress, cancel).await
     }
+  }
+
+  pub(crate) fn live_limits_conn_id(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.live_limits_update {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 不支持原地更新资源上限"),
+        )
+        .with_hint("运行 wharf upgrade 后重新 plan")
+        .suggest("wharf upgrade"),
+      );
+    }
+    Ok(conn.conn_id)
+  }
+
+  pub(crate) fn runtime_options_conn_id(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.service_runtime_opts {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 不支持运行参数"),
+        )
+        .with_hint("运行 wharf upgrade 后重新 plan")
+        .suggest("wharf upgrade"),
+      );
+    }
+    Ok(conn.conn_id)
   }
 
   pub(crate) fn safe_delete_conn_id(
@@ -1420,6 +1489,9 @@ async fn handle_socket(
     core_probe,
     backup_isolation,
     safe_delete,
+    service_runtime_opts,
+    live_limits_update,
+    task_resource_limits,
     data_cleanup,
     exec_v2,
     files_v2,
@@ -1603,6 +1675,9 @@ async fn handle_socket(
     gateway_extra_files,
     backup_isolation,
     safe_delete,
+    service_runtime_opts,
+    live_limits_update,
+    task_resource_limits,
     data_cleanup,
     exec_v2,
     files_v2,

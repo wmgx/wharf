@@ -48,6 +48,7 @@ fn compose(
         network_mode: Some("host"),
         entrypoint: Some(vec![bin.into(), "-c".into(), config_path]),
         command: None,
+        runtime: BTreeMap::new(),
         environment: BTreeMap::new(),
         ports: vec![],
         volumes: vec![],
@@ -150,9 +151,12 @@ pub fn frpc_render(
           "/etc/frp/frpc.toml".into(),
         ]),
         command: None,
+        runtime: BTreeMap::new(),
         environment: BTreeMap::new(),
         ports: vec![],
-        volumes: vec!["./conf:/etc/frp:ro".into()],
+        volumes: vec![serde_yaml_ng::Value::String(
+          "./conf:/etc/frp:ro".into(),
+        )],
         configs: vec![],
         labels: BTreeMap::from([
           ("wharf.link".into(), "frpc".into()),

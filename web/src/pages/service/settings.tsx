@@ -15,7 +15,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { editableServiceSpec } from "@/lib/draft";
 import { useStatus } from "@/status";
-import type { PortSpec, ServiceSpec, ServiceView } from "@/types";
+import type { Limits, PortSpec, ServiceSpec, ServiceView, UsageRow } from "@/types";
 import { ConfigFiles, filePathOk } from "./config-files";
 import { importText } from "./status-text";
 
@@ -31,8 +31,8 @@ export function Settings({ svc, active }: { svc: ServiceView; active: boolean })
       if (location.hash === "#backup") document.getElementById("service-backup")?.focus();
     }
   }, [active, location.hash]);
-  const changed = ([['来源', 'source'], ['端口', 'ports'], ['目标容器', 'container'], ['环境变量', 'env'], ['配置文件', 'files'], ['资源上限', 'limits'], ['自动更新', 'auto_update']] as [string, keyof ServiceSpec][]).filter(([, field]) => dirty([field])).map(([label]) => label);
-  return <SettingsFields key={key} svc={svc} draft={draft} set={set} dirty={dirty} changed={changed} onReset={() => { reset(); setKey((n) => n + 1); }} onSubmit={() => {
+  const changed = ([['来源', 'source'], ['端口', 'ports'], ['目标容器', 'container'], ['环境变量', 'env'], ['配置文件', 'files'], ['资源上限', 'limits'], ['组件资源上限', 'container_limits'], ['自动更新', 'auto_update']] as [string, keyof ServiceSpec][]).filter(([, field]) => dirty([field])).map(([label]) => label);
+  return <SettingsFields key={key} svc={svc} active={active} draft={draft} set={set} dirty={dirty} changed={changed} onReset={() => { reset(); setKey((n) => n + 1); }} onSubmit={() => {
     const spec = mergeInto(svc.spec);
     if ("build" in spec.source && "build" in svc.spec.source) {
       spec.source = { build: { ...spec.source.build, upload: svc.spec.source.build.upload } };
@@ -41,7 +41,7 @@ export function Settings({ svc, active }: { svc: ServiceView; active: boolean })
   }} />;
 }
 
-function SettingsFields({ svc, draft, set, dirty, changed, onReset, onSubmit }: { svc: ServiceView; draft: ServiceSpec; set: (p: Partial<ServiceSpec>) => void; dirty: (keys: (keyof ServiceSpec)[]) => boolean; changed: string[]; onReset: () => void; onSubmit: () => void }) {
+function SettingsFields({ svc, active, draft, set, dirty, changed, onReset, onSubmit }: { svc: ServiceView; active: boolean; draft: ServiceSpec; set: (p: Partial<ServiceSpec>) => void; dirty: (keys: (keyof ServiceSpec)[]) => boolean; changed: string[]; onReset: () => void; onSubmit: () => void }) {
   const actions = useActions();
   const { status } = useStatus();
   const [params, setParams] = useSearchParams();
@@ -52,20 +52,15 @@ function SettingsFields({ svc, draft, set, dirty, changed, onReset, onSubmit }: 
   const [env, setEnv] = useState(formatEnv(draft.env));
   const [ports, setPorts] = useState<PortSpec[]>(() => isCompose && !draft.ports?.length ? composePorts(parseCompose(source.compose.content ?? "")) : (draft.ports ?? []));
   const [how, setHow] = useState<BuildHow>(howOf(build));
-  const [memory, setMemory] = useState(draft.limits?.memory_mb?.toString() ?? "");
-  const [cpus, setCpus] = useState(draft.limits?.cpu_milli ? String(draft.limits.cpu_milli / 1000) : "");
   const envDirty = dirty(["env"]);
   const portsDirty = dirty(["ports"]);
   const sourceDirty = dirty(["source"]);
-  const limitsDirty = dirty(["limits"]);
   const compose = isCompose ? source.compose.content ?? "" : "";
   const composeInfo = useMemo(() => parseCompose(compose), [compose]);
   const saved = svc.spec;
   const savedEnv = formatEnv(saved.env);
   const savedPorts = JSON.stringify(saved.ports ?? []);
   const savedHow = JSON.stringify(howOf("build" in saved.source ? saved.source.build : null));
-  const savedMemory = saved.limits?.memory_mb?.toString() ?? "";
-  const savedCpus = saved.limits?.cpu_milli ? String(saved.limits.cpu_milli / 1000) : "";
   useEffect(() => { if (!envDirty) setEnv(savedEnv); }, [savedEnv]);
   useEffect(() => {
     if (!portsDirty) {
@@ -74,23 +69,53 @@ function SettingsFields({ svc, draft, set, dirty, changed, onReset, onSubmit }: 
     }
   }, [portsDirty, savedPorts, isCompose, composeInfo]);
   useEffect(() => { if (!sourceDirty) setHow(JSON.parse(savedHow)); }, [savedHow]);
-  useEffect(() => {
-    if (!limitsDirty) {
-      setMemory(savedMemory);
-      setCpus(savedCpus);
-    }
-  }, [savedMemory, savedCpus]);
+  const [selectedComponent, setSelectedComponent] = useState("");
+  const initialComponent = draft.container && composeInfo.services.includes(draft.container) ? draft.container : (composeInfo.services[0] ?? "");
+  const component = composeInfo.services.includes(selectedComponent) ? selectedComponent : initialComponent;
+  const legacyTarget = draft.container ?? (composeInfo.services.length === 1 ? component : "");
+  const declared = isCompose ? (draft.container_limits?.[component] ?? (component === legacyTarget ? draft.limits : undefined)) : draft.limits;
+  const base = {
+    memory: declared?.memory_mb?.toString() ?? "",
+    cpu: declared?.cpu_milli ? String(declared.cpu_milli / 1000) : "",
+    pids: declared?.pids?.toString() ?? "",
+  };
+  const [limitText, setLimitText] = useState<{ target: string; memory: string; cpu: string; pids: string } | null>(null);
+  const target = isCompose ? component : "";
+  const inputs = limitText?.target === target ? limitText : base;
   const { data } = usePoll<{ series: Record<string, [number, number][]> }>(isCompose ? null : `/api/metrics?subject=${encodeURIComponent(svc.name)}&range=7d`, 60000);
+  const { data: componentUsage } = usePoll<UsageRow[]>(isCompose && active ? `/api/metrics/top?service=${encodeURIComponent(svc.name)}&containers=true` : null, 60000);
+  const usage = componentUsage?.[0]?.components?.find((entry) => entry.name === component);
   const points = data?.series["svc.mem"] ?? [];
   const peak = points.reduce((max, [, value]) => Math.max(max, value), 0);
-  const memoryNum = memory.trim() ? Number(memory) : undefined;
-  const cpuNum = cpus.trim() ? Number(cpus) : undefined;
-  const limitsValid = (memoryNum === undefined || (Number.isInteger(memoryNum) && memoryNum >= 32 && memoryNum <= 4294967295)) && (cpuNum === undefined || (Number.isFinite(cpuNum) && cpuNum >= 0.01 && cpuNum * 1000 <= 4294967295));
+  const parsed = (value: string) => value.trim() ? Number(value) : undefined;
+  const memoryNum = parsed(inputs.memory);
+  const cpuNum = parsed(inputs.cpu);
+  const pidsNum = parsed(inputs.pids);
+  const limitsValid = (memoryNum === undefined || (Number.isInteger(memoryNum) && memoryNum >= 32 && memoryNum <= 4294967295))
+    && (cpuNum === undefined || (Number.isFinite(cpuNum) && cpuNum >= 0.01 && cpuNum * 1000 <= 4294967295))
+    && (pidsNum === undefined || (Number.isInteger(pidsNum) && pidsNum >= 1 && pidsNum <= 4294967295));
   const needsContainer = isCompose && composeInfo.services.length > 1 && !draft.container && (Object.keys(draft.env ?? {}).length > 0 || !!draft.limits || !!draft.files?.length || Boolean(svc.spec.heartbeat));
   const files = draft.files ?? [];
   const filesValid = files.every((f) => filePathOk(f.path)) && new Set(files.map((f) => f.path)).size === files.length;
   const disabled = needsContainer ? "compose 里有多个容器，先选环境变量、配置文件和资源上限加在哪个容器上" : !filesValid ? "配置文件的路径不正确或重复" : !limitsValid ? "资源上限不正确" : build && !howReady(how) ? "来源的 Dockerfile 不能为空" : undefined;
-  const updateLimits = (m: string, c: string) => { const mn = m.trim() ? Number(m) : undefined; const cn = c.trim() ? Number(c) : undefined; set({ limits: mn === undefined && cn === undefined ? undefined : { memory_mb: mn, cpu_milli: cn === undefined ? undefined : Math.round(cn * 1000) } }); };
+  const updateLimits = (field: "memory" | "cpu" | "pids", value: string) => {
+    const next = { ...inputs, target, [field]: value };
+    setLimitText(next);
+    const memory_mb = parsed(next.memory);
+    const cpu = parsed(next.cpu);
+    const pids = parsed(next.pids);
+    const limits: Limits | undefined = memory_mb === undefined && cpu === undefined && pids === undefined
+      ? undefined : { memory_mb, cpu_milli: cpu === undefined ? undefined : Math.round(cpu * 1000), pids };
+    if (!isCompose) {
+      set({ limits });
+    } else if (component) {
+      const container_limits = { ...draft.container_limits };
+      if (limits) container_limits[component] = limits;
+      else delete container_limits[component];
+      set({ container_limits: Object.keys(container_limits).length ? container_limits : undefined,
+        ...(component === legacyTarget ? { limits: undefined } : {}) });
+    }
+  };
   return <div className="max-w-5xl">
     <SectionTitle>来源</SectionTitle>
     <Panel className="grid gap-3 p-4">
@@ -131,7 +156,7 @@ function SettingsFields({ svc, draft, set, dirty, changed, onReset, onSubmit }: 
           <option value="">选择容器</option>
           {composeInfo.services.map((c) => <option key={c} value={c}>{c}</option>)}
         </select>
-        <span className="text-xs text-muted-foreground">下面的环境变量、配置文件和资源上限加在这个容器上，compose 文件本身不改。</span>
+        <span className="text-xs text-muted-foreground">下面的环境变量和配置文件加在这个容器上，compose 文件本身不改。</span>
       </Panel>
     </>}
     {<>
@@ -150,19 +175,28 @@ function SettingsFields({ svc, draft, set, dirty, changed, onReset, onSubmit }: 
       <SectionTitle>健康检查</SectionTitle>
     </div>
     <Button variant="outline" onClick={() => setParams({ tab: "metrics" })}>到监控页设置健康检查</Button>
-    {<>
-      <SectionTitle>资源上限</SectionTitle>
-      <Panel className="grid gap-3 p-4 sm:grid-cols-2">
-        <Field label="内存（MB）" htmlFor="service-memory">
-          <Input id="service-memory" type="number" min={32} step={1} value={memory} onChange={(e) => { setMemory(e.target.value); updateLimits(e.target.value, cpus); }} />
-          {points.length > 0 && <span className="text-xs text-muted-foreground">近 7 天最高 {bytes(peak)}
-          </span>}
-        </Field>
-        <Field label="CPU（核）" htmlFor="service-cpu">
-          <Input id="service-cpu" type="number" min={0.01} step={0.01} value={cpus} onChange={(e) => { setCpus(e.target.value); updateLimits(memory, e.target.value); }} />
-        </Field>
-      </Panel>
-    </>}
+    <SectionTitle>资源上限</SectionTitle>
+    <Panel className="grid gap-3 p-4 sm:grid-cols-2">
+      {isCompose && <Field label="容器" htmlFor="limits-component">
+        <select id="limits-component" className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+          value={component} disabled={!limitsValid} onChange={(e) => { setSelectedComponent(e.target.value); setLimitText(null); }}>
+          {composeInfo.services.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+      </Field>}
+      <Field label="内存（MB）" htmlFor="service-memory">
+        <Input id="service-memory" type="number" min={32} step={1} value={inputs.memory} disabled={isCompose && !component} onChange={(e) => updateLimits("memory", e.target.value)} />
+        {isCompose ? <span className="text-xs text-muted-foreground">生效 {usage?.memory_limit == null ? "—" : bytes(usage.memory_limit)} · 近 7 天最高 {usage?.memory_peak == null ? "—" : bytes(usage.memory_peak)}</span>
+          : points.length > 0 && <span className="text-xs text-muted-foreground">近 7 天最高 {bytes(peak)}</span>}
+      </Field>
+      <Field label="CPU（核）" htmlFor="service-cpu">
+        <Input id="service-cpu" type="number" min={0.01} step={0.01} value={inputs.cpu} disabled={isCompose && !component} onChange={(e) => updateLimits("cpu", e.target.value)} />
+        {isCompose && <span className="text-xs text-muted-foreground">生效 {usage?.cpu_limit_milli == null ? "—" : usage.cpu_limit_milli / 1000} · 近 7 天最高 {usage?.cpu_peak == null ? "—" : `${usage.cpu_peak.toFixed(1)}%`}</span>}
+      </Field>
+      <Field label="PID" htmlFor="service-pids">
+        <Input id="service-pids" type="number" min={1} step={1} value={inputs.pids} disabled={isCompose && !component} onChange={(e) => updateLimits("pids", e.target.value)} />
+        {isCompose && <span className="text-xs text-muted-foreground">生效 {usage?.pids_limit ?? "—"}</span>}
+      </Field>
+    </Panel>
     {((isImage && !source.image.includes("@")) || !!build?.git || (isCompose && composeInfo.images.some((i) => !i.includes("@") && !i.includes("$")) && composeInfo.volumes.length === 0)) && !draft.volumes?.length && <>
       <SectionTitle>自动更新</SectionTitle>
       <Panel className="grid gap-3 p-4">

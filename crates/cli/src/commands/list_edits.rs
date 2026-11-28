@@ -4,7 +4,7 @@ use super::{
 };
 use wharf_api_types::spec::SsoSpec;
 
-pub(super) fn remove_named<T>(
+pub(crate) fn remove_named<T>(
   items: &mut Vec<T>,
   name: &str,
   label: &str,

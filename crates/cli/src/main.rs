@@ -41,6 +41,7 @@ mod preview;
 mod print;
 mod probe;
 mod report;
+mod runtime_options;
 mod schema;
 mod secret_import;
 mod selfcmd;
@@ -538,6 +539,8 @@ pub enum CoreSnapshotCmd {
 
 #[derive(Args)]
 pub struct DeployOps {
+  #[command(flatten)]
+  pub runtime: Box<runtime_options::RuntimeOptions>,
   /// 优雅停机等待秒数（1 到 600），0 恢复 Docker 默认。
   #[arg(long)]
   pub stop_grace: Option<u32>,
@@ -846,6 +849,8 @@ pub enum ServerCmd {
   },
   /// 修改服务器设置。
   Set {
+    #[command(flatten)]
+    task_limits: runtime_options::ServerTaskLimitEdits,
     name: String,
     #[arg(long, value_parser = ["cn", "overseas"])]
     region: Option<String>,
@@ -1492,19 +1497,11 @@ pub enum ServiceCmd {
     /// 目标 Compose 容器。
     #[arg(long)]
     container: Option<String>,
-    /// 内存上限，单位 MB；给 0 去掉这一项。
-    #[arg(long)]
-    memory: Option<u32>,
-    /// CPU 上限，单位核，可以是小数；给 0 去掉这一项。
-    #[arg(long)]
-    cpus: Option<f64>,
-    /// 去掉全部上限。
-    #[arg(long)]
+    #[command(flatten)]
+    limits: runtime_options::LimitEdits,
+    /// 去掉选中容器的全部上限。
+    #[arg(long, conflicts_with_all = ["memory", "cpus", "pids", "unset_memory", "unset_cpus", "unset_pids"])]
     off: bool,
-    #[arg(long, conflicts_with_all = ["memory", "off"])]
-    unset_memory: bool,
-    #[arg(long, conflicts_with_all = ["cpus", "off"])]
-    unset_cpus: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },

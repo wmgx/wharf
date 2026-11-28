@@ -19,6 +19,7 @@ fn fixture() -> Snapshot {
   for (name, server) in [("app", "s1"), ("db", "s1"), ("other", "s2")]
   {
     snap.world.services.insert(name.into(), ServiceRow {
+      host_groups: Default::default(),
       instance_id: format!("svc_{name}"),
       spec: serde_json::from_value(json!({
         "server": server, "source": {"image": "nginx:1"},

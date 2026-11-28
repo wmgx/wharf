@@ -494,6 +494,8 @@ pub(crate) async fn deploy_server(
     .call(
       &w.target,
       AgentOp::ProjectUp(ProjectUp {
+        image_pull_mode: None,
+        local_images: Default::default(),
         project: project.to_string(),
         compose,
         hash,

@@ -158,6 +158,12 @@ pub enum AgentMsg {
     #[serde(default)]
     safe_delete: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    service_runtime_opts: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    live_limits_update: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    task_resource_limits: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     data_cleanup: bool,
     #[serde(default)]
     exec_v2: bool,
@@ -388,7 +394,17 @@ pub struct HostTraffic {
 #[derive(
   Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
+pub struct ComponentMetrics {
+  pub cpu: f32,
+  pub mem: u64,
+}
+
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
 pub struct ProjectMetrics {
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub components: BTreeMap<String, ComponentMetrics>,
   /// 占整机 CPU 的百分比，0 到 100。
   pub cpu: f32,
   pub mem: u64,
@@ -422,6 +438,12 @@ pub enum AgentOp {
   Report,
   /// 结果是 `Vec<ResolvedImage>`。
   ResolveImages(ResolveImages),
+  ReadHostGroups {
+    groups: Vec<String>,
+  },
+  InspectLocalImages {
+    images: Vec<String>,
+  },
   /// 查 git 分支或标签现在指向的 commit（`git ls-remote`，不下载代码），结果是 40 位 commit。
   ResolveCommit(ResolveCommit),
   /// 读取若干 compose project 的现状，结果是 `Vec<ProjectState>`。
@@ -441,6 +463,8 @@ pub enum AgentOp {
   },
   /// 写入 compose、拉镜像、`up -d`。结果是 [ProjectUpResult]。
   ProjectUp(ProjectUp),
+  ProjectCheckLimits(ProjectLimitsJob),
+  ProjectUpdateLimits(ProjectLimitsJob),
   GatewayProbe(GatewayProbeJob),
   LinkApply(LinkApply),
   ProjectMounts {
