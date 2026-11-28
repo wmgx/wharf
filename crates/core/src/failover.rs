@@ -145,14 +145,20 @@ fn observe(
   memory: &mut Memory,
   world: &World,
   online: impl Fn(&str) -> bool,
+  managed_dns: impl Fn(&str) -> bool,
 ) -> bool {
   let before = memory.active.clone();
   let pending_count = memory.pending.len();
-  memory.streak.retain(|h, _| world.routes.contains_key(h));
-  memory.active.retain(|h| world.routes.contains_key(h));
-  memory.pending.retain(|h, _| world.routes.contains_key(h));
+  let eligible =
+    |host: &str| world.routes.contains_key(host) && managed_dns(host);
+  memory.streak.retain(|h, _| eligible(h));
+  memory.active.retain(|h| eligible(h));
+  memory.pending.retain(|h, _| eligible(h));
   let mut changed = false;
   for (host, route) in &world.routes {
+    if !managed_dns(host) {
+      continue;
+    }
     let on_backup = memory.active.contains(host);
     let Some(primary) = world
       .route_gateway(&route.spec)
@@ -222,7 +228,12 @@ async fn round(state: &Arc<AppState>) -> Result<(), ApiError> {
   };
   let snap = crate::snapshot::load(&state.db).await?;
   let mut memory = with(|m| m.clone());
-  if observe(&mut memory, &snap.world, |s| state.hub.is_online(s)) {
+  if observe(
+    &mut memory,
+    &snap.world,
+    |s| state.hub.is_online(s),
+    |host| snap.account_for(host).is_some(),
+  ) {
     persist(state, &memory).await?;
   } else {
     with(|m| m.streak.clone_from(&memory.streak));
@@ -295,7 +306,7 @@ async fn round(state: &Arc<AppState>) -> Result<(), ApiError> {
           );
           let wait =
             reloads.entry(p.backup_gateway.clone()).or_default();
-          *wait = (*wait).max(ttl.saturating_add(5).clamp(30, 120));
+          *wait = (*wait).max(caddy_reload_delay(ttl));
         }
         notices.push((
           host.clone(),
@@ -351,6 +362,14 @@ async fn round(state: &Arc<AppState>) -> Result<(), ApiError> {
     }
   }
   Ok(())
+}
+
+fn caddy_reload_delay(ttl: u32) -> u32 {
+  if ttl == 1 {
+    120
+  } else {
+    ttl.saturating_add(5).clamp(30, 120)
+  }
 }
 
 fn schedule_caddy_reload(
@@ -432,6 +451,61 @@ mod tests {
     assert!(recv.try_recv().is_err());
   }
 
+  #[test]
+  fn external_dns_does_not_enter_or_keep_failover() {
+    let host = "external.example.net";
+    let mut world = World::default();
+    for (name, server) in [("edge", "s1"), ("backup", "s2")] {
+      world.gateways.insert(
+        name.into(),
+        crate::world::GatewayRow {
+          spec: serde_json::from_value(
+            serde_json::json!({"kind":"caddy","server":server}),
+          )
+          .unwrap(),
+          version: 1,
+        },
+      );
+    }
+    world.routes.insert(host.into(), crate::world::RouteRow {
+      spec: serde_json::from_value(serde_json::json!({
+        "hostname": host, "gateway":"edge", "backup_gateway":"backup", "upstream":"127.0.0.1:8080"
+      })).unwrap(),
+      id: "rt_fixture".into(),
+      version: 1,
+    });
+    let mut memory = Memory::default();
+    for _ in 0..SWITCH_MINUTES {
+      assert!(!observe(
+        &mut memory,
+        &world,
+        |server| server == "s2",
+        |_| false
+      ));
+    }
+    assert!(memory.active.is_empty() && memory.pending.is_empty());
+    for _ in 0..SWITCH_MINUTES {
+      observe(&mut memory, &world, |server| server == "s2", |_| true);
+    }
+    assert!(
+      memory.active.contains(host)
+        && memory.pending.contains_key(host)
+    );
+    assert!(observe(
+      &mut memory,
+      &world,
+      |server| server == "s2",
+      |_| false
+    ));
+    assert!(memory.active.is_empty() && memory.pending.is_empty());
+  }
+
+  #[test]
+  fn automatic_dns_ttl_uses_maximum_reload_delay() {
+    assert_eq!(caddy_reload_delay(1), 120);
+    assert_eq!(caddy_reload_delay(60), 65);
+  }
+
   #[tokio::test]
   async fn removing_backup_persists_active_cleanup_and_retry() {
     let state = crate::rules::tests::test_state();
@@ -458,7 +532,7 @@ mod tests {
       spec: serde_json::from_str(r#"{"hostname":"removed-backup.example.test","gateway":"edge","upstream":"127.0.0.1:8080"}"#).unwrap(),
       id: "rt_fixture".into(), version: 1,
     });
-    assert!(observe(&mut memory, &world, |_| true));
+    assert!(observe(&mut memory, &world, |_| true, |_| true));
     persist(&state, &memory).await.unwrap();
     state
       .db

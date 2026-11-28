@@ -215,10 +215,9 @@ fn compose_port_bind(
       _ if ip == "localhost" => PortBind::LoopbackV4Only,
       _ => return PortBind::DirectableOrUnknown,
     };
-    if binding.is_some_and(|old| old != current) {
-      return PortBind::DirectableOrUnknown;
+    if binding != Some(PortBind::LoopbackV4Only) {
+      binding = Some(current);
     }
-    binding = Some(current);
   }
   binding.unwrap_or(PortBind::DirectableOrUnknown)
 }
@@ -907,6 +906,32 @@ services:
         false
       ),
       PortBind::DirectableOrUnknown
+    );
+  }
+
+  #[test]
+  fn dual_stack_compose_loopback_selects_tunnel() {
+    let mut world = world();
+    let row = world.services.get_mut("app").unwrap();
+    row.spec.source =
+      serde_json::from_value(json!({"compose":{"content": r#"
+services:
+  web:
+    ports: ["127.0.0.1:18080:80", "[::1]:18080:80"]
+"#}}))
+      .unwrap();
+    row.host_ports.insert("http".into(), 18080);
+    assert_eq!(
+      choose(
+        &world,
+        &net(Some(true)),
+        &world.gateways["edge"].spec,
+        "app",
+        "http",
+        LinkMode::Auto
+      )
+      .unwrap(),
+      Choice::Tunnel
     );
   }
 

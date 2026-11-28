@@ -356,6 +356,17 @@ impl Snapshot {
     }
   }
 
+  pub(crate) fn gateway_has_external_dns(
+    &self,
+    world: &World,
+    gateway: &str,
+  ) -> bool {
+    world.routes.iter().any(|(host, r)| {
+      world.route_gateways(&r.spec).contains(&gateway)
+        && self.account_for(host).is_none()
+    })
+  }
+
   /// hostname 所属的厂商账号和 zone，取最长匹配。
   pub fn account_for(
     &self,
@@ -637,9 +648,6 @@ pub(crate) fn gateway_config_matches(
   applied: Option<&str>,
   observed_acme_dns: Option<&str>,
 ) -> bool {
-  if applied == Some(rendered.config_hash.as_str()) {
-    return true;
-  }
   if let (Some(observed), Some(expected)) =
     (observed_acme_dns, &net.acme_dns_url)
     && rendered.needs_acme_dns
@@ -651,16 +659,17 @@ pub(crate) fn gateway_config_matches(
   {
     return false;
   }
-  // 旧 agent 只有原配置指纹，下一次网关变更时补写新指纹。
+  if applied == Some(rendered.config_hash.as_str()) {
+    return true;
+  }
+  // 旧指纹只忽略回调地址占位符，保留门禁回源等实际配置差异。
   if world.gateways[name].spec.kind != GatewayKind::Caddy
-    || (!rendered.needs_acme_dns
-      && !rendered.sites.iter().any(|s| s.gate.is_some()))
+    || !rendered.needs_acme_dns
   {
     return false;
   }
   let legacy = Net {
     acme_dns_url: None,
-    core_listener: None,
     ..net.clone()
   };
   gateway_render(world, &legacy, name)
@@ -1022,6 +1031,52 @@ pub(crate) async fn project_status_with_links(
     )
     .await?;
   Ok(states.into_iter().map(|s| (s.project.clone(), s)).collect())
+}
+
+pub(crate) async fn read_legacy_acme_dns_hash(
+  hub: &crate::hub::Hub,
+  server: &str,
+  project: &str,
+) -> Option<String> {
+  use wharf_api_types::agent::{
+    AgentOp, TaskHow, TaskRunJob, TaskRunResult,
+  };
+  // 只在 Caddy 容器内读取回调地址的指纹，避免传输完整配置。
+  let result: TaskRunResult = hub
+    .call(
+      server,
+      AgentOp::TaskRun(TaskRunJob {
+        name: "gateway-acme-hash".into(),
+        how: TaskHow::Exec {
+          project: project.into(),
+          service: Some("caddy".into()),
+          command: r#"url=$(awk '$1 == "server_url" && $2 ~ /\/agent\/acme-dns$/ {print $2; exit}' /etc/caddy/Caddyfile) && [ -n "$url" ] && printf '%s' "$url" | sha256sum"#.into(),
+        },
+        input: None,
+        network_host: false,
+        out_dir: false,
+        wait_for_deps: false,
+        timeout_secs: 5,
+        pull: PullPolicy {
+          mirrors: BTreeMap::new(),
+          mirrors_only: false,
+          attempt_timeout_secs: PULL_ATTEMPT_SECS,
+          git_proxy: None,
+          github_mirror: None,
+          registry_proxy: None,
+        },
+      }),
+      Duration::from_secs(10),
+      None,
+      &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .ok()?;
+  let hash = result.output.split_whitespace().next()?;
+  (result.exit_code == Some(0)
+    && hash.len() == 64
+    && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+  .then(|| hash.to_string())
 }
 
 pub fn provider_error(e: ProviderError) -> ApiError {

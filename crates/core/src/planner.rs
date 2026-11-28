@@ -1309,7 +1309,7 @@ async fn gather_status(
   }
   let futures =
     projects.into_iter().map(|(server, projects)| async move {
-      let result = snapshot::project_status_with_links(
+      let mut result = snapshot::project_status_with_links(
         &state.hub,
         &server,
         projects.into_iter().collect(),
@@ -1317,6 +1317,40 @@ async fn gather_status(
         state.hub.supports_safe_gateway(&server),
       )
       .await;
+      if let Ok(states) = &mut result {
+        let server = &server;
+        futures_util::future::join_all(
+          states
+            .values_mut()
+            .filter_map(|status| {
+              let name = status.project.strip_prefix("wharf-gw-")?;
+              (status.acme_dns_url_hash.is_none()
+                && status.config_hash.is_some()
+                && status.all_running()
+                && [(current, before_net), (desired, net)]
+                  .into_iter()
+                  .any(|(world, net)| {
+                    world
+                      .gateways
+                      .get(name)
+                      .is_some_and(|g| g.spec.server == *server)
+                      && snapshot::gateway_render(world, net, name)
+                        .is_ok_and(|r| r.needs_acme_dns)
+                  }))
+              .then_some(status)
+            })
+            .map(|status| async move {
+              status.acme_dns_url_hash =
+                snapshot::read_legacy_acme_dns_hash(
+                  &state.hub,
+                  server,
+                  &status.project,
+                )
+                .await;
+            }),
+        )
+        .await;
+      }
       (server, result)
     });
   let mut out = StatusMap::new();
@@ -2698,25 +2732,11 @@ fn gateway_items(
       "sites": r.sites.iter().map(|s| json!({ "hostname": s.hostname, "upstream": s.upstream })).collect::<Vec<_>>(),
       "config": snapshot::redacted_config(&r.config, net),
     }));
-    let tunnel_mismatch = gw.spec.kind
-      == GatewayKind::CloudflareTunnel
-      && snap.tunnels.get(name).is_none_or(|t| {
-        Some(t.account.as_str()) != gw.spec.account.as_deref()
-      });
-    let pending_tunnel = snap
-      .pending
-      .tunnel_deletes
-      .iter()
-      .any(|p| p.gateway == *name);
     let tunnel_not_ready = gw.spec.kind
       == GatewayKind::CloudflareTunnel
-      && pending_tunnel
-      && snap
-        .tunnels
-        .get(name)
-        .is_some_and(|t| t.config_hash.is_empty());
+      && crate::tunnel::ready(snap, name, &gw.spec).is_none();
     let decision = match status.get(server).and_then(|s| s.as_ref()) {
-      _ if tunnel_mismatch || tunnel_not_ready => Some((
+      _ if tunnel_not_ready => Some((
         Action::Update,
         vec![Impact::Restart],
         "在当前厂商账号下创建隧道并部署连接器".into(),
@@ -2881,14 +2901,13 @@ fn gateway_items(
         && action == Action::Update
         && risk.is_empty()
         && current.gateways.get(name) == Some(gw)
-        && let Some(hash) = status
+        && let Some(applied) = status
           .get(server)
           .and_then(Option::as_ref)
           .and_then(|p| p.get(&project))
-          .and_then(|s| s.config_hash.as_deref())
       {
         crate::token_scope::gateway_routes(
-          &b.items, current, desired, net, name, hash,
+          &b.items, current, desired, net, name, applied,
         )
       } else {
         vec![]
@@ -2934,9 +2953,9 @@ fn gateway_cleanup_items(
       .get(&p.gateway)
       .map(|g| g.spec.server.as_str());
     if current_server != Some(p.server.as_str())
-      && desired.servers.contains_key(&p.server)
       && (!p.keep_tunnel
-        || status.get(&p.server).is_some_and(Option::is_some))
+        || (desired.servers.contains_key(&p.server)
+          && status.get(&p.server).is_some_and(Option::is_some)))
     {
       downs.insert((&p.gateway, &p.server), p.keep_tunnel);
     }
@@ -2999,10 +3018,7 @@ fn gateway_cleanup_items(
     }
   }
   for p in old_tunnels.into_values() {
-    if desired.routes.iter().any(|(host, r)| {
-      desired.live_gateway(host, &r.spec) == Some(p.gateway.as_str())
-        && snap.account_for(host).is_none()
-    }) {
+    if snap.gateway_has_external_dns(desired, &p.gateway) {
       b.warnings.push(format!(
         "入口 {} 还有域名的 DNS 由外部管理，暂缓清理旧隧道",
         p.gateway
@@ -3067,10 +3083,7 @@ pub(crate) fn desired_record(
   if gw.kind == GatewayKind::CloudflareTunnel {
     return Ok(DnsSpec {
       record_type: "CNAME".into(),
-      content: snap
-        .tunnels
-        .get(gateway)
-        .filter(|t| Some(t.account.as_str()) == gw.account.as_deref())
+      content: crate::tunnel::ready(snap, gateway, gw)
         .map(|t| tunnel_target(&t.tunnel_id))
         .unwrap_or_else(|| TUNNEL_PENDING.into()),
       proxied: true,
@@ -3161,6 +3174,23 @@ fn classify_dns_records<'a>(
   (ours, foreign, handover)
 }
 
+fn prefer_dns_record(
+  records: &mut [&RemoteRecord],
+  canonical: &serde_json::Value,
+) {
+  let target = &canonical["type"];
+  if let Some((index, _)) =
+    records.iter().enumerate().max_by_key(|(index, r)| {
+      let same_type = &r.canonical["type"] == target;
+      let same_content =
+        same_type && r.canonical["content"] == canonical["content"];
+      (same_content, same_type, std::cmp::Reverse(*index))
+    })
+  {
+    records.swap(0, index);
+  }
+}
+
 /// 要写 DNS 的域名、记录所有者，Pages 域名还带上边缘应用。
 type DnsTarget<'a> =
   (String, String, Option<(&'a str, &'a EdgeAppSpec)>);
@@ -3234,6 +3264,17 @@ pub(crate) async fn plan_dns_for_hosts(
           return Err(ApiError::invalid(format!(
             "没有厂商账号管理 {host} 的 DNS"
           )));
+        }
+        if desired_record(snap, &snap.world, net, host)?.content
+          == TUNNEL_PENDING
+        {
+          return Err(
+            ApiError::new(
+              ErrorCode::PlanStale,
+              format!("{host} 的目标隧道尚未就绪"),
+            )
+            .suggest("wharf plan"),
+          );
         }
         let mut b = Builder::default();
         let hosts = BTreeSet::from([host.clone()]);
@@ -3386,7 +3427,7 @@ async fn dns_items(
         .await?
       }
     };
-    let (ours, foreign, handover) = classify_dns_records(
+    let (mut ours, foreign, handover) = classify_dns_records(
       &records,
       &account.name,
       &owner_id,
@@ -3414,6 +3455,7 @@ async fn dns_items(
     if !foreign.is_empty() {
       let mut targets: Vec<&RemoteRecord> = ours.clone();
       targets.extend(foreign.iter().copied());
+      prefer_dns_record(&mut targets, &canonical);
       let existing = targets[0];
       let extra =
         targets[1..].iter().map(|r| remote_ref(r)).collect();
@@ -3442,6 +3484,7 @@ async fn dns_items(
       b.step(vec![id], title, upsert(Some(existing), extra));
       continue;
     }
+    prefer_dns_record(&mut ours, &canonical);
     match ours.as_slice() {
       [] => {
         let id = b.item(
@@ -4241,6 +4284,349 @@ mod tests {
     )));
     assert!(b.steps.iter().any(|s| matches!(&s.step, Step::GatewaySync { gateway, .. } if gateway == "edge")));
     assert!(b.steps.iter().any(|s| matches!(&s.step, Step::TunnelDelete { tunnel_id, .. } if tunnel_id == "old")));
+  }
+
+  fn applied_gateway(
+    rendered: snapshot::GatewayRender,
+  ) -> ProjectState {
+    ProjectState {
+      project: gateway_project("edge"),
+      hash: Some(rendered.compose_hash),
+      config_hash: Some(rendered.config_hash),
+      acme_dns_url_hash: None,
+      containers: vec![container("running")],
+    }
+  }
+
+  #[test]
+  fn restored_gate_core_reach_plans_reload_and_marks_drift() {
+    let mut snap = Snapshot {
+      world: world(),
+      ..Default::default()
+    };
+    snap
+      .world
+      .gateways
+      .insert("edge".into(), gateway_fixture("caddy", "s1"));
+    let mut route = route_fixture();
+    route.spec.sso =
+      Some(serde_json::from_value(json!({"mode":"gate"})).unwrap());
+    snap.world.routes.insert("a.example.com".into(), route);
+    let world = &snap.world;
+    let mut net = Net {
+      core_server: Some("s2".into()),
+      core_listener: Some((7700, false)),
+      gate_login: Some("https://core.example.net".into()),
+      gate_public: Some("public".into()),
+      ..Default::default()
+    };
+    net.private.insert(
+      "s2".into(),
+      serde_json::from_value(json!({
+        "ip":"100.64.0.2", "network":"tailscale"
+      }))
+      .unwrap(),
+    );
+    let project = gateway_project("edge");
+    let applied = applied_gateway(
+      snapshot::gateway_render(world, &net, "edge").unwrap(),
+    );
+    let states = BTreeMap::from([(project, applied)]);
+    let status =
+      StatusMap::from([("s1".into(), Some(states.clone()))]);
+    let live = BTreeMap::from([("s1".into(), Ok(states))]);
+    let before = net.clone();
+    for reachable in [false, true] {
+      net.reach.insert(("s1".into(), "s2".into()), reachable);
+      let mut b = Builder::default();
+      gateway_items(
+        &mut b,
+        &snap,
+        (world, &before),
+        (world, &net),
+        &status,
+        &crate::hub::Hub::default(),
+      )
+      .unwrap();
+      assert_eq!(b.steps.len(), usize::from(reachable));
+      let view =
+        crate::views::gateway_view(&snap, &net, "edge", Some(&live))
+          .unwrap();
+      assert_eq!(view.live.unwrap().in_sync, Some(!reachable));
+    }
+  }
+
+  #[test]
+  fn dns_prefers_existing_target_address_over_provider_order() {
+    let canonical =
+      json!({"type":"A", "content":"203.0.113.10", "ttl":60});
+    let records = [
+      RemoteRecord {
+        remote_id: "R1".into(),
+        scope: "zone".into(),
+        canonical: json!({"type":"AAAA", "content":"2001:db8::1"}),
+        marker: None,
+      },
+      RemoteRecord {
+        remote_id: "R2".into(),
+        scope: "zone".into(),
+        canonical: json!({"type":"A", "content":"203.0.113.10", "ttl":1}),
+        marker: None,
+      },
+    ];
+    let mut targets: Vec<_> = records.iter().collect();
+    prefer_dns_record(&mut targets, &canonical);
+    assert_eq!(targets[0].remote_id, "R2");
+    assert_eq!(targets[1].remote_id, "R1");
+  }
+
+  #[tokio::test]
+  async fn unready_tunnel_is_rescheduled_and_cannot_receive_dns() {
+    let mut snap = Snapshot {
+      world: world(),
+      ..Default::default()
+    };
+    snap.world.gateways.insert(
+      "edge".into(),
+      gateway_fixture("cloudflare_tunnel", "s1"),
+    );
+    let host = "a.example.com";
+    snap.world.routes.insert(host.into(), route_fixture());
+    snap.accounts.push(db::AccountRow {
+      name: "cf1".into(),
+      kind: "cloudflare".into(),
+      token: String::new(),
+      zones: vec!["example.com".into()],
+      warnings: vec![],
+      updated_at: 0,
+    });
+    snap.tunnels.insert(
+      "edge".into(),
+      db::TunnelRow {
+        account: "cf1".into(),
+        scope: "zone".into(),
+        tunnel_id: "new".into(),
+        config_hash: String::new(),
+      },
+    );
+    let world = &snap.world;
+    let net = Net::default();
+    let mut b = Builder::default();
+    gateway_items(
+      &mut b,
+      &snap,
+      (world, &net),
+      (world, &net),
+      &StatusMap::new(),
+      &crate::hub::Hub::default(),
+    )
+    .unwrap();
+    assert!(
+      matches!(&b.steps[0].step, Step::GatewaySync { gateway, .. } if gateway == "edge")
+    );
+    let dns = desired_record(&snap, world, &net, host).unwrap();
+    assert_eq!(dns.content, TUNNEL_PENDING);
+    assert_eq!(
+      crate::apply::resolve_dns_tunnel(&snap, &dns)
+        .unwrap_err()
+        .code,
+      ErrorCode::PlanStale
+    );
+    let plans =
+      plan_dns_for_hosts(&snap, &BTreeSet::from([host.into()])).await;
+    assert_eq!(
+      plans[0].1.as_ref().unwrap_err().code,
+      ErrorCode::PlanStale
+    );
+    snap.tunnels.get_mut("edge").unwrap().config_hash =
+      "ready".into();
+    assert_eq!(
+      crate::apply::resolve_dns_tunnel(&snap, &dns)
+        .unwrap()
+        .content,
+      "new.cfargotunnel.com"
+    );
+  }
+
+  #[test]
+  fn own_route_change_can_reload_legacy_dns_gateway() {
+    let mut current = world();
+    let mut edge = gateway_fixture("caddy", "s1");
+    edge.spec.wildcard.push("example.com".into());
+    current.gateways.insert("edge".into(), edge);
+    let host = "a.example.com";
+    current.routes.insert(host.into(), route_fixture());
+    let applied = applied_gateway(
+      snapshot::gateway_render(&current, &Net::default(), "edge")
+        .unwrap(),
+    );
+    let mut desired = current.clone();
+    desired.routes.remove(host);
+    let net = Net {
+      acme_dns_url: Some("https://core.example.net".into()),
+      ..Default::default()
+    };
+    let mut b = Builder::default();
+    config_items(
+      &mut b,
+      &current,
+      &desired,
+      &[Write::Delete {
+        kind: KIND_ROUTE.into(),
+        name: host.into(),
+      }],
+    );
+    let status = StatusMap::from([(
+      "s1".into(),
+      Some(BTreeMap::from([(applied.project.clone(), applied)])),
+    )]);
+    let snap = Snapshot {
+      accounts: vec![db::AccountRow {
+        name: "cf1".into(),
+        kind: "cloudflare".into(),
+        token: String::new(),
+        zones: vec!["example.com".into()],
+        warnings: vec![],
+        updated_at: 0,
+      }],
+      ..Default::default()
+    };
+    gateway_items(
+      &mut b,
+      &snap,
+      (&current, &net),
+      (&desired, &net),
+      &status,
+      &crate::hub::Hub::default(),
+    )
+    .unwrap();
+    let item = b
+      .items
+      .iter()
+      .find(|item| item.layer == Layer::Gateway)
+      .unwrap();
+    assert_eq!(b.route_effects[&item.id], [format!("route/{host}")]);
+  }
+
+  #[test]
+  fn external_dns_keeps_old_tunnel_on_account_change() {
+    let mut current = world();
+    current.gateways.insert(
+      "edge".into(),
+      gateway_fixture("cloudflare_tunnel", "s1"),
+    );
+    current
+      .gateways
+      .insert("backup".into(), gateway_fixture("caddy", "s2"));
+    let mut route = route_fixture();
+    route.spec.gateway = Some("backup".into());
+    route.spec.backup_gateway = Some("edge".into());
+    current.routes.insert("external.example.net".into(), route);
+    let mut desired = current.clone();
+    desired.gateways.get_mut("edge").unwrap().spec.account =
+      Some("cf2".into());
+    let mut snap = Snapshot::default();
+    snap.tunnels.insert(
+      "edge".into(),
+      db::TunnelRow {
+        account: "cf1".into(),
+        scope: "zone".into(),
+        tunnel_id: "old".into(),
+        config_hash: "ready".into(),
+      },
+    );
+    let mut b = Builder::default();
+    gateway_cleanup_items(
+      &mut b,
+      &snap,
+      &current,
+      &desired,
+      &StatusMap::new(),
+    );
+    assert!(b.steps.is_empty());
+    assert!(b.warnings[0].contains("外部管理"));
+  }
+
+  #[test]
+  fn deleted_server_does_not_block_pending_tunnel_cleanup() {
+    let mut snap = Snapshot::default();
+    snap.pending.gateway_downs.push(
+      crate::pending::GatewayDownPayload {
+        gateway: "edge".into(),
+        server: "s1".into(),
+        keep_tunnel: false,
+      },
+    );
+    snap.tunnels.insert(
+      "edge".into(),
+      db::TunnelRow {
+        account: "cf1".into(),
+        scope: "zone".into(),
+        tunnel_id: "old".into(),
+        config_hash: "ready".into(),
+      },
+    );
+    let world = &snap.world;
+    let mut b = Builder::default();
+    gateway_cleanup_items(
+      &mut b,
+      &snap,
+      world,
+      world,
+      &StatusMap::new(),
+    );
+    assert!(
+      matches!(&b.steps[0].step, Step::GatewayDown { gateway, server, keep_tunnel: false } if gateway == "edge" && server == "s1")
+    );
+  }
+
+  #[tokio::test]
+  async fn old_agent_callback_probe_keeps_unchanged_gateway_and_detects_url_change()
+   {
+    use wharf_api_types::agent::{AgentOp, TaskHow};
+    let state = crate::rules::tests::test_state();
+    let mut world = world();
+    let mut edge = gateway_fixture("caddy", "s1");
+    edge.spec.wildcard.push("example.com".into());
+    world.gateways.insert("edge".into(), edge);
+    let snap = Snapshot::default();
+    let mut net = Net::default();
+    let applied = applied_gateway(
+      snapshot::gateway_render(&world, &net, "edge").unwrap(),
+    );
+    let url = "https://old.example.net";
+    state.hub.mock_agent("s1", false, move |op| {
+      Ok(match op {
+        AgentOp::ProjectStatus { .. } => json!([applied]),
+        AgentOp::TaskRun(task) => {
+          assert!(matches!(task.how, TaskHow::Exec { project, service: Some(service), .. } if project == "wharf-gw-edge" && service == "caddy"));
+          json!({"output":format!("{}  -", render::hash(&format!("{url}/agent/acme-dns"))), "exit_code":0, "timed_out":false, "duration_ms":0})
+        }
+        _ => panic!("计划期发了意外请求"),
+      })
+    });
+    for (url, changes) in [(url, 0), ("https://new.example.net", 1)] {
+      net.acme_dns_url = Some(url.into());
+      let mut b = Builder::default();
+      let status = gather_status(
+        &state,
+        &snap,
+        (&world, &net),
+        (&world, &net),
+        &mut b,
+      )
+      .await;
+      gateway_items(
+        &mut b,
+        &snap,
+        (&world, &net),
+        (&world, &net),
+        &status,
+        &state.hub,
+      )
+      .unwrap();
+      assert_eq!(b.steps.len(), changes);
+    }
   }
 
   #[test]

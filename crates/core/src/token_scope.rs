@@ -27,7 +27,7 @@ pub fn gateway_routes(
   desired: &World,
   net: &Net,
   gateway: &str,
-  applied_hash: &str,
+  applied: &wharf_api_types::agent::ProjectState,
 ) -> Vec<String> {
   let changed: Vec<_> = items
     .iter()
@@ -53,7 +53,16 @@ pub fn gateway_routes(
     }
   }
   if crate::snapshot::gateway_render(&reverted, net, gateway)
-    .is_ok_and(|rendered| rendered.config_hash == applied_hash)
+    .is_ok_and(|rendered| {
+      crate::snapshot::gateway_config_matches(
+        &reverted,
+        net,
+        gateway,
+        &rendered,
+        applied.config_hash.as_deref(),
+        applied.acme_dns_url_hash.as_deref(),
+      )
+    })
   {
     changed
       .into_iter()

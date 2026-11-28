@@ -1827,6 +1827,12 @@ pub(crate) async fn run_step(
           .suggest("wharf plan"),
         );
       }
+      if snap.gateway_has_external_dns(world, gateway) {
+        return Err(ApiError::new(
+          ErrorCode::PlanStale,
+          format!("入口 {gateway} 仍有外部 DNS，暂缓删除旧隧道"),
+        ));
+      }
       crate::tunnel::destroy_ref(
         &snap, account, scope, tunnel_id, cancel,
       )
@@ -1868,33 +1874,10 @@ pub(crate) async fn run_step(
           format!("域名 {hostname} 已经没有路由或边缘应用使用"),
         )
       })?;
+      let spec = resolve_dns_tunnel(&snap, spec)?;
       let account_row = find_account(&snap, account)?;
       let provider = snapshot::dns_provider(account_row)?;
       let owner = Owner { id: owner_id };
-      let spec = match &spec.tunnel {
-        Some(gateway) => {
-          let t = snap
-            .tunnels
-            .get(gateway)
-            .filter(|t| {
-              world.gateways.get(gateway).is_some_and(|g| {
-                g.spec.account.as_deref() == Some(t.account.as_str())
-              })
-            })
-            .ok_or_else(|| {
-              ApiError::new(
-                ErrorCode::PlanStale,
-                format!("网关 {gateway} 的隧道还没有创建"),
-              )
-              .suggest("wharf plan")
-            })?;
-          crate::planner::DnsSpec {
-            content: crate::planner::tunnel_target(&t.tunnel_id),
-            ..spec.clone()
-          }
-        }
-        None => spec.clone(),
-      };
       progress(format!(
         "{hostname} → {} {}",
         spec.record_type, spec.content
@@ -2201,6 +2184,31 @@ fn check_dns_gateway(
   )
 }
 
+pub(crate) fn resolve_dns_tunnel(
+  snap: &snapshot::Snapshot,
+  spec: &crate::planner::DnsSpec,
+) -> Result<crate::planner::DnsSpec, ApiError> {
+  let Some(gateway) = &spec.tunnel else {
+    return Ok(spec.clone());
+  };
+  let tunnel = snap
+    .world
+    .gateways
+    .get(gateway)
+    .and_then(|g| crate::tunnel::ready(snap, gateway, &g.spec))
+    .ok_or_else(|| {
+      ApiError::new(
+        ErrorCode::PlanStale,
+        format!("网关 {gateway} 的隧道尚未就绪"),
+      )
+      .suggest("wharf plan")
+    })?;
+  Ok(crate::planner::DnsSpec {
+    content: crate::planner::tunnel_target(&tunnel.tunnel_id),
+    ..spec.clone()
+  })
+}
+
 async fn upsert_dns(
   state: &AppState,
   provider: &dyn wharf_providers::DnsProvider,
@@ -2210,22 +2218,22 @@ async fn upsert_dns(
   (existing, extra): (Option<&RemoteRef>, &[RemoteRef]),
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
-  let (pre_delete, type_changed) =
-    dns_replace_order(want, existing, extra);
-  if pre_delete {
-    delete_dns_records(state, account, provider, extra, cancel)
-      .await?;
-  }
-  if let Some(r) = existing.filter(|_| type_changed) {
-    delete_dns_records(
-      state,
-      account,
-      provider,
-      std::slice::from_ref(r),
-      cancel,
-    )
-    .await?;
-  }
+  let target = want.record_type.as_str();
+  let type_changed = existing
+    .and_then(|r| r.record_type.as_deref())
+    .is_some_and(|t| t != target);
+  let conflicts = |r: &&RemoteRef| {
+    target == "CNAME" || r.record_type.as_deref() == Some("CNAME")
+  };
+  let replaced = existing.filter(|_| type_changed);
+  delete_dns_records(
+    state,
+    account,
+    provider,
+    extra.iter().chain(replaced).filter(conflicts),
+    cancel,
+  )
+  .await?;
   let existing_record =
     existing.filter(|_| !type_changed).map(|r| RemoteRecord {
       remote_id: r.remote_id.clone(),
@@ -2255,34 +2263,21 @@ async fn upsert_dns(
     &record.remote_id,
   )
   .await?;
-  if !pre_delete {
-    delete_dns_records(state, account, provider, extra, cancel)
-      .await?;
-  }
-  Ok(())
+  delete_dns_records(
+    state,
+    account,
+    provider,
+    extra.iter().chain(replaced).filter(|r| !conflicts(r)),
+    cancel,
+  )
+  .await
 }
 
-fn dns_replace_order(
-  want: &wharf_providers::DnsRecordSpec,
-  existing: Option<&RemoteRef>,
-  extra: &[RemoteRef],
-) -> (bool, bool) {
-  let existing_type = existing.and_then(|r| r.record_type.as_deref());
-  let target = want.record_type.as_str();
-  let pre_delete = target == "CNAME"
-    || existing_type == Some("CNAME")
-    || extra
-      .iter()
-      .any(|r| r.record_type.as_deref() != Some(target));
-  let type_changed = existing_type.is_some_and(|t| t != target);
-  (pre_delete, type_changed)
-}
-
-async fn delete_dns_records(
+async fn delete_dns_records<'a>(
   state: &AppState,
   account: &str,
   provider: &dyn wharf_providers::DnsProvider,
-  records: &[RemoteRef],
+  records: impl Iterator<Item = &'a RemoteRef>,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
   for r in records {
@@ -3661,6 +3656,51 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+  }
+
+  #[tokio::test]
+  async fn dns_writes_a_before_removing_aaaa() {
+    use wharf_providers::{DnsRecordSpec, DnsRecordType};
+    let state = crate::rules::tests::test_state();
+    let want = DnsRecordSpec {
+      record_type: DnsRecordType::A,
+      content: "203.0.113.10".into(),
+      ttl: 60,
+      proxied: false,
+    };
+    let records = [
+      RemoteRef {
+        scope: "zone".into(),
+        remote_id: "R1".into(),
+        record_type: Some("AAAA".into()),
+      },
+      RemoteRef {
+        scope: "zone".into(),
+        remote_id: "R2".into(),
+        record_type: Some("A".into()),
+      },
+    ];
+    let owner = Owner {
+      id: "rt_fixture".into(),
+    };
+    for (existing, extra, expected) in [
+      (&records[0], &records[..0], ["新建", "删除 R1"]),
+      (&records[1], &records[..1], ["更新 R2", "删除 R1"]),
+    ] {
+      let provider = DnsMock::default();
+      upsert_dns(
+        &state,
+        &provider,
+        ("a.example.com", "cf"),
+        &owner,
+        &want,
+        (Some(existing), extra),
+        &CancellationToken::new(),
+      )
+      .await
+      .unwrap();
+      assert_eq!(lock(&provider.0).as_slice(), expected);
     }
   }
 

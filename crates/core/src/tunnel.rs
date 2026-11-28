@@ -31,6 +31,18 @@ pub fn tunnel_name(gateway: &str) -> String {
   format!("wharf-{gateway}")
 }
 
+pub(crate) fn ready<'a>(
+  snap: &'a Snapshot,
+  gateway: &str,
+  spec: &wharf_api_types::spec::GatewaySpec,
+) -> Option<&'a db::TunnelRow> {
+  snap.tunnels.get(gateway).filter(|t| {
+    spec.kind == wharf_api_types::spec::GatewayKind::CloudflareTunnel
+      && spec.account.as_deref() == Some(t.account.as_str())
+      && !t.config_hash.is_empty()
+  })
+}
+
 fn account<'a>(
   snap: &'a Snapshot,
   name: &str,
