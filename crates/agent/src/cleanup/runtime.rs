@@ -194,17 +194,26 @@ pub(super) async fn containers(
 ) -> Result<Runtime, ApiError> {
   let ids =
     docker_output(docker, &["ps", "-aq", "--no-trunc"], ctx).await?;
-  let out = inspect(docker, "container", &ids,
-    r#"{{json .Name}} {{json (index .Config.Labels "wharf.system")}} {{json (index .Config.Labels "com.docker.compose.project")}} {{json .Mounts}}	[{{json .Id}},{{json .Name}},{{json .State.Status}},{{json .Created}},{{json .Image}},{{json .Config.Labels}},{{json .Mounts}},{{json .NetworkSettings.Networks}}]"#, ctx).await?;
+  let out = inspect(
+    docker,
+    "container",
+    &ids,
+    concat!(
+      r#"{{json .Name}} {{json (index .Config.Labels "wharf.system")}} {{json (index .Config.Labels "com.docker.compose.project")}} {{json .Mounts}}"#,
+      "\t",
+      r#"[{{json .Id}},{{json .Name}},{{json .State.Status}},{{json .Created}},{{json .Image}},{{json .Config.Labels}},{{json .Mounts}},{{json .NetworkSettings.Networks}}]"#,
+    ),
+    ctx,
+  )
+  .await?;
   let mut bind_rows = String::new();
   let mut rows = String::new();
   for line in out.lines() {
     let (binds, row) = line
-      .rsplit_once("|[")
+      .split_once('\t')
       .ok_or_else(|| ApiError::internal("Docker 容器清单不完整"))?;
     bind_rows.push_str(binds);
     bind_rows.push('\n');
-    rows.push('[');
     rows.push_str(row);
     rows.push('\n');
   }
