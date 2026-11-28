@@ -411,9 +411,12 @@ pub fn changes(old: &Value, new: &Value) -> Value {
     }
     let (args_added, args_removed, args_changed) =
       args_diff(ov, nv, "args");
+    let meta_changed = ["effect", "perms", "returns", "dry_run"]
+      .iter()
+      .any(|key| ov[*key] != nv[*key]);
     changed.push(json!({
       "command": name,
-      "meta_changed": ["effect", "perms", "returns", "dry_run"].iter().any(|key| ov[*key] != nv[*key]),
+      "meta_changed": meta_changed,
       "about_changed": ov["about"] != nv["about"] || ov["details"] != nv["details"],
       "args_added": args_added,
       "args_removed": args_removed,
