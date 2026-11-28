@@ -416,6 +416,27 @@ impl World {
           server.settings = settings;
         }
         Change::AdoptData { .. } => {}
+        Change::SetCrashGuard { name, enabled } => {
+          self
+            .services
+            .get_mut(name)
+            .ok_or_else(|| crate::api::service_not_found(name))?
+            .spec
+            .crash_guard = *enabled;
+        }
+        Change::EditServiceTags { name, add, remove } => {
+          let row = self
+            .services
+            .get_mut(name)
+            .ok_or_else(|| crate::api::service_not_found(name))?;
+          for tag in remove {
+            row.spec.tags.remove(normalize_service_tag(tag)?);
+          }
+          for tag in add {
+            row.spec.tags.insert(normalize_service_tag(tag)?.into());
+          }
+          validate_tags(&row.spec.tags)?;
+        }
         Change::UpsertService {
           name,
           spec,
@@ -517,6 +538,18 @@ impl World {
           }
           // compose 来源没填端口时按 compose 里映射的端口补上，否则服务没有内网地址。
           let mut spec = spec.clone();
+          if let Some(old) = old
+            && changes.iter().any(|change| {
+              matches!(change, Change::EditServiceTags { name: edited, .. } if edited == name)
+            })
+          {
+            spec.tags.clone_from(&old.spec.tags);
+          }
+          spec.tags = spec
+            .tags
+            .iter()
+            .map(|tag| normalize_service_tag(tag).map(str::to_owned))
+            .collect::<Result<_, _>>()?;
           let mut hosts = BTreeMap::new();
           for (host, ip) in std::mem::take(&mut spec.extra_hosts) {
             let normalized = normalize_hostname(&host)
@@ -2372,6 +2405,34 @@ fn validate_deploy_options(
   Ok(())
 }
 
+pub(crate) fn normalize_service_tag(
+  tag: &str,
+) -> Result<&str, ApiError> {
+  let tag = tag.trim();
+  if !(1..=32).contains(&tag.chars().count())
+    || !tag
+      .chars()
+      .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
+  {
+    Err(
+      ApiError::invalid("标签长度须为 1 到 32 个字符")
+        .with_hint("使用字母、数字、连字符或下划线"),
+    )
+  } else {
+    Ok(tag)
+  }
+}
+
+fn validate_tags(tags: &BTreeSet<String>) -> Result<(), ApiError> {
+  if tags.len() > 32 {
+    return Err(ApiError::invalid("每个服务最多 32 个标签"));
+  }
+  for tag in tags {
+    normalize_service_tag(tag)?;
+  }
+  Ok(())
+}
+
 fn validate_service(
   world: &World,
   name: &str,
@@ -2386,6 +2447,7 @@ fn validate_service(
       "启动等待上限需在 10 到 1800 秒之间",
     ));
   }
+  validate_tags(&spec.tags)?;
   crate::updates::validate_ignore(spec)?;
   crate::compose_env::validate(spec)?;
   if let Some(user) = &spec.user {
@@ -3307,6 +3369,8 @@ mod tests {
       stop_signal: None,
       init_cmd: None,
       init_timeout_secs: None,
+      tags: Default::default(),
+      crash_guard: false,
       lan: None,
       extra_hosts: Default::default(),
       self_refs: false,

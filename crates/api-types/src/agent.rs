@@ -183,6 +183,12 @@ pub enum AgentMsg {
     safe_migrate: bool,
     #[serde(default)]
     migrate_v2: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    service_copy: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    crash_guard: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    service_repair: bool,
     #[serde(default)]
     data_ops: bool,
     #[serde(default)]
@@ -358,6 +364,9 @@ pub struct Metrics {
   pub cpu: f32,
   pub mem_used: u64,
   pub mem_total: u64,
+  /// 本次采样的宿主机逻辑 CPU 数。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cpu_cores: Option<u32>,
   /// 字节每秒，不含回环、docker 网桥和组网网卡。
   pub net_rx: u64,
   pub net_tx: u64,
@@ -413,6 +422,8 @@ pub struct ComponentMetrics {
   Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 pub struct ProjectMetrics {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub containers: Option<u32>,
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub components: BTreeMap<String, ComponentMetrics>,
   /// 占整机 CPU 的百分比，0 到 100。
@@ -563,6 +574,9 @@ pub enum AgentOp {
   SyncServe(SyncServe),
   /// 迁移的发送端：把本机 `/srv/<service>/` 推送到另一台机器的 [AgentOp::SyncServe]。
   SyncPush(SyncPush),
+  ServiceCopy(ServiceCopy),
+  CrashGuard(CrashGuardOp),
+  ServiceRepair(ServiceRepairOp),
   DirSpace {
     service: String,
     #[serde(default)]

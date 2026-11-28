@@ -26,7 +26,9 @@ const OP: Record<NonNullable<ServiceStatus["last_op"]>["status"], string> = {
 export function statusLayers(s: ServiceStatus): string[] {
   const short = (h?: string) => h?.slice(0, 8) ?? "-";
   const op = s.last_op;
+  const recovery = s.recovery?.startsWith("repair") ? "修复中" : s.recovery === "protected" ? "保护停机" : undefined;
   return [
+    ...(recovery ? [recovery] : []),
     `期望：${s.want_running ? "运行" : "停止"} · ${short(s.desired_hash)}`,
     `已应用：${s.applied ? `${short(s.applied.hash)} · ${ago(s.applied.at)}` : "没有版本"}`,
     `实际：${ACTUAL[s.actual]}${s.actual_hash ? ` · ${short(s.actual_hash)}` : ""}${s.observed_at ? ` · ${ago(s.observed_at)}看到` : ""}`,

@@ -265,6 +265,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route("/api/metrics", get(crate::metrics::query))
     .route("/api/metrics/usage", get(crate::metrics::usage))
     .route("/api/metrics/top", get(crate::resource_top::usage))
+    .route(
+      "/api/metrics/limits-suggest",
+      get(crate::resource_top::suggest_limits),
+    )
     .route("/api/metrics/images", get(crate::resource_top::images))
     .route("/api/report", get(crate::report::show))
     .route(
@@ -386,6 +390,19 @@ pub fn router(state: Arc<AppState>) -> Router {
     .route(
       "/api/services/{name}/render",
       get(crate::service_render::get),
+    )
+    .route(
+      "/api/services/{name}/repair",
+      get(crate::crash_guard::repair::get)
+        .post(crate::crash_guard::repair::act),
+    )
+    .route(
+      "/api/services/{name}/crash-guard",
+      get(crate::crash_guard::get),
+    )
+    .route(
+      "/api/services/{name}/export-compose",
+      get(crate::service_render::export_compose),
     )
     .route(
       "/api/services/{name}/heartbeat/reports",
@@ -1278,6 +1295,7 @@ async fn remove_server(
 #[serde(default)]
 struct ServiceListQuery {
   server: Option<String>,
+  tag: Option<String>,
   status: Option<String>,
   no_backup: bool,
   has_update: bool,
@@ -1302,6 +1320,10 @@ fn matches_service(q: &ServiceListQuery, v: &ServiceView) -> bool {
   q.server
     .as_ref()
     .is_none_or(|server| v.spec.server == *server)
+    && q
+      .tag
+      .as_deref()
+      .is_none_or(|tag| v.spec.tags.contains(tag.trim()))
     && (!q.no_backup || v.spec.backup.is_none())
     && (!q.has_update || v.has_update)
     && q.status.as_deref().is_none_or(|status| {
@@ -1326,6 +1348,9 @@ async fn list_services(
   Query(q): Query<ServiceListQuery>,
 ) -> ApiResult<Vec<ServiceView>> {
   auth.require(Perm::Read)?;
+  if let Some(tag) = &q.tag {
+    crate::world::normalize_service_tag(tag)?;
+  }
   if let Some(status) = q.status.as_deref()
     && !SERVICE_LIST_STATES.contains(&status)
   {
@@ -1918,7 +1943,7 @@ pub(crate) async fn deployments(
       ).optional().map_err(sql_err)?.ok_or_else(|| service_not_found(&name))?;
       let mut stmt = c
         .prepare(
-          "SELECT id, service, server, run_id, compose, images, created_at, spec, hash, commit_sha, started FROM deployments
+          "SELECT id, service, server, run_id, compose, images, created_at, spec, hash, commit_sha, started, original_service FROM deployments
            WHERE service = ?1 AND instance_id = ?2 ORDER BY id DESC LIMIT 50",
         )
         .map_err(sql_err)?;
@@ -1936,6 +1961,7 @@ pub(crate) async fn deployments(
             r.get::<_, String>(8)?,
             r.get::<_, Option<String>>(9)?,
             r.get::<_, bool>(10)?,
+            r.get::<_, Option<String>>(11)?,
           ))
         })
         .map_err(sql_err)?;
@@ -1955,6 +1981,7 @@ pub(crate) async fn deployments(
     hash,
     commit,
     started,
+    original_service,
   ) in rows
   {
     let mut images: Vec<wharf_api_types::agent::ImageInfo> =
@@ -1962,6 +1989,7 @@ pub(crate) async fn deployments(
     wharf_api_types::agent::normalize_image_digests(&mut images);
     out.push(DeploymentView {
       started,
+      original_service,
       id,
       service,
       server,
@@ -2841,14 +2869,25 @@ async fn make_plan(
         .flatten()
     }));
   }
-  let planned = planner::make_plan_inner(
-    &s,
-    req,
-    snap,
-    true,
-    auth.has(Perm::Admin),
-  )
-  .await
+  let planned = if req.service_action.is_some() {
+    planner::make_service_action_plan(
+      &s,
+      req,
+      snap,
+      auth.services.as_ref(),
+      auth.has(Perm::Admin),
+    )
+    .await
+  } else {
+    planner::make_plan_inner(
+      &s,
+      req,
+      snap,
+      true,
+      auth.has(Perm::Admin),
+    )
+    .await
+  }
   .map_err(|error| {
     crate::missing_refs::scope_error(
       error,
@@ -2885,6 +2924,7 @@ async fn make_plan(
     planned.plan.plan_id
   ));
   let mut plan = planned.plan;
+  crate::token_scope::redact_plan_baseline(&auth, &mut plan);
   if query.brief() {
     planner::compact_plan(&mut plan);
   }
@@ -3187,11 +3227,11 @@ mod tests {
       for (kind, name, spec) in [
         ("server", "s1", json!({})),
         ("service", "photos", json!({
-          "server":"s1", "source":{"image":"nginx:1"},
+          "server":"s1", "source":{"image":"nginx:1"}, "tags":["试验"],
           "volumes":[{"name":"data","target":"/data"}]
         })),
         ("service", "secret-indexer", json!({
-          "server":"s1", "source":{"image":"nginx:1"},
+          "server":"s1", "source":{"image":"nginx:1"}, "tags":["试验"],
           "volumes":[{"name":"data","target":"/data","from_service":"photos:data"}]
         })),
       ] {
@@ -3213,12 +3253,20 @@ mod tests {
       let Json(list) = list_services(
         State(state.clone()),
         scoped(name),
-        Query(ServiceListQuery::default()),
+        Query(ServiceListQuery {
+          tag: Some(" 试验 ".into()),
+          brief: BriefQuery {
+            brief: Some("1".into()),
+            ..Default::default()
+          },
+          ..Default::default()
+        }),
       )
       .await
       .map_err(|e| e.0)
       .unwrap();
       assert_eq!(list.len(), 1);
+      assert!(list[0].spec.tags.contains("试验"));
       let Json(show) = show_service(
         State(state.clone()),
         scoped(name),

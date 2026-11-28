@@ -621,6 +621,15 @@ export type Change = {
   pins?: Record<string, string> | null;
   spec: ServiceSpec;
 } | {
+  enabled: boolean;
+  name: string;
+  op: "set_crash_guard";
+} | {
+  add: string[];
+  name: string;
+  op: "edit_service_tags";
+  remove: string[];
+} | {
   mounts?: AdoptMountSpec[];
   op: "adopt_data";
   service: string;
@@ -697,6 +706,7 @@ export interface ComponentUsage {
 }
 
 export interface ContainerInfo {
+  container_id?: string | null;
   exit_code?: number | null;
   finished_at?: string | null;
   /**
@@ -706,6 +716,8 @@ export interface ContainerInfo {
   health?: string | null;
   image: string;
   name: string;
+  restart_count?: number | null;
+  restart_observed_at?: number | null;
   restart_policy?: string | null;
   /**
    * compose 里的服务名。
@@ -986,6 +998,7 @@ export interface DeploymentView {
   hash: string;
   id: number;
   images: ImageInfo[];
+  original_service?: string | null;
   run_id: string;
   server: string;
   service: string;
@@ -1933,6 +1946,10 @@ export interface Metrics {
    * 整机 CPU 使用率，0 到 100。
    */
   cpu: number;
+  /**
+   * 本次采样的宿主机逻辑 CPU 数。
+   */
+  cpu_cores?: number | null;
   disk_total: number;
   disk_used: number;
   /**
@@ -2284,6 +2301,7 @@ export interface Plan {
    */
   note?: string | null;
   plan_id: string;
+  service_action?: PlannedServiceAction | null;
   status: PlanStatus;
   /**
    * 建议的下一步命令。
@@ -2332,6 +2350,12 @@ export interface PlanSummary {
   note?: string | null;
   plan_id: string;
   status: PlanStatus;
+}
+
+export interface PlannedServiceAction {
+  action: ServiceActionKind;
+  tag?: string | null;
+  targets: string[];
 }
 
 export type PortCheckSpec = {
@@ -2419,6 +2443,7 @@ export interface ProbeView {
 
 export interface ProjectMetrics {
   components?: Record<string, ComponentMetrics>;
+  containers?: number | null;
   /**
    * 占整机 CPU 的百分比，0 到 100。
    */
@@ -2994,6 +3019,8 @@ export interface ServerView {
   version: number;
 }
 
+export type ServiceActionKind = "restart" | "stop" | "update" | "clone" | "rename" | "resume_protected";
+
 /**
  * 按服务的内置告警规则覆盖。
  */
@@ -3123,6 +3150,7 @@ export interface ServiceSpec {
    */
   container?: string | null;
   container_limits?: Record<string, Limits>;
+  crash_guard?: boolean;
   /**
    * 环境变量。值里可以用 `[[SECRET_NAME]]` 引用密钥；compose 来源加到 `container` 指定的容器上，
    * compose 文件内容也会做同样的替换。
@@ -3186,6 +3214,7 @@ export interface ServiceSpec {
    * 停止：容器保留但不运行，部署后也保持停止。不影响 compose，也就不会重建容器。
    */
   stopped?: boolean;
+  tags?: string[];
   timezone?: string | null;
   tmpfs?: Record<string, number>;
   ulimits?: Record<string, Ulimit>;
@@ -3232,6 +3261,7 @@ export interface ServiceStatus {
    * 最后一次成功查到这台服务器现状的时间；服务器离线时就是"多久前看到的"。
    */
   observed_at?: string | null;
+  recovery?: string | null;
   /**
    * 一句话，例如"运行中"、"部署失败"、"服务器离线"。
    */

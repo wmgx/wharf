@@ -47,7 +47,7 @@ fn read_script(reader: impl Read) -> CliResult<String> {
     .map_err(|_| ApiError::invalid("脚本必须使用 UTF-8").into())
 }
 
-fn read_exec_source(
+pub(crate) fn read_exec_source(
   command: Vec<String>,
   script: Option<&str>,
 ) -> CliResult<String> {

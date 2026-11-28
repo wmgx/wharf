@@ -177,6 +177,49 @@ pub struct ServerView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ServiceComposeExport {
+  pub service: String,
+  pub compose: String,
+  pub variables: BTreeMap<String, String>,
+  pub files: BTreeMap<String, String>,
+  pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(
+  tag = "action",
+  rename_all = "snake_case",
+  deny_unknown_fields
+)]
+pub enum ServiceRepairRequest {
+  Start,
+  Exec {
+    command: String,
+    timeout_secs: Option<u64>,
+  },
+  Exit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RepairView {
+  pub service: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub phase: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub expires_ms: Option<i64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub execution: Option<ServiceExecResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CrashGuardView {
+  pub enabled: bool,
+  pub supported: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub phase: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ServiceRenderView {
   pub service: String,
   pub server: String,
@@ -323,6 +366,8 @@ pub struct ServiceView {
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 pub struct ServiceStatus {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub recovery: Option<String>,
   /// 期望：按配置应该在运行（`stopped` 时为 false）。
   pub want_running: bool,
   /// 期望：当前配置生成的 compose 哈希；缺密钥等算不出时为空。
@@ -929,6 +974,8 @@ pub struct DeploymentView {
   pub started: bool,
   pub id: i64,
   pub service: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub original_service: Option<String>,
   pub server: String,
   pub run_id: String,
   /// 渲染后的 compose（密钥未替换）。

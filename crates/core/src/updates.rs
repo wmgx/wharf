@@ -56,7 +56,7 @@ pub fn last() -> Option<UpdatesView> {
   LAST.read().ok().and_then(|l| l.clone())
 }
 
-fn effective_ignore(
+pub(crate) fn effective_ignore(
   rules: &[UpdateIgnoreSpec],
   image: &str,
 ) -> Option<UpdateIgnoreScope> {

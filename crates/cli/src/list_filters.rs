@@ -20,6 +20,8 @@ fn path(base: &str, fields: &[(&str, Option<&str>)]) -> String {
 #[derive(Args)]
 pub struct ServiceFilters {
   #[arg(long)]
+  tag: Option<String>,
+  #[arg(long)]
   server: Option<String>,
   #[arg(long, value_parser = ["running", "stopped", "restarting", "partial", "missing", "offline", "unknown", "unhealthy", "abnormal"])]
   status: Option<String>,
@@ -38,6 +40,7 @@ impl ServiceFilters {
       "/api/services",
       &[
         ("server", self.server.as_deref()),
+        ("tag", self.tag.as_deref()),
         ("status", self.status.as_deref()),
         ("no_backup", self.no_backup.then_some("true")),
         ("has_update", self.has_update.then_some("true")),

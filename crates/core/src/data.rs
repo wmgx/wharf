@@ -418,6 +418,54 @@ fn volume_name(top: Option<&Value>, key: String) -> String {
     .map_or(key, str::to_string)
 }
 
+pub(crate) fn rewrite_clone_mounts(
+  content: &str,
+  from: &str,
+  to: &str,
+) -> Result<String, ApiError> {
+  let mut doc = crate::render::parse_compose_template(content)?;
+  let prefix = format!("/srv/{from}/");
+  for service in doc["services"]
+    .as_mapping_mut()
+    .into_iter()
+    .flat_map(serde_yaml_ng::Mapping::values_mut)
+  {
+    let Some(volumes) = service
+      .get_mut("volumes")
+      .and_then(serde_yaml_ng::Value::as_sequence_mut)
+    else {
+      continue;
+    };
+    for mount in volumes {
+      let source = if mount.is_mapping() {
+        let Some(source) = mount.get_mut("source") else {
+          continue;
+        };
+        source
+      } else {
+        mount
+      };
+      if let Some(path) =
+        source.as_str().and_then(|path| path.strip_prefix(&prefix))
+      {
+        *source =
+          serde_yaml_ng::Value::String(format!("/srv/{to}/{path}"));
+      }
+    }
+  }
+  serde_yaml_ng::to_string(&doc)
+    .map_err(|_| ApiError::invalid("无法读取 Compose 数据挂载"))
+}
+
+#[test]
+fn clone_rewrites_only_managed_mount_sources() {
+  let input = "services:\n  web:\n    image: alpine\n    environment: {DIR: /srv/a/data}\n    volumes: [/srv/a/data:/data]
+";
+  let output = rewrite_clone_mounts(input, "a", "b").unwrap();
+  assert!(output.contains("/srv/b/data:/data"));
+  assert!(output.contains("DIR: /srv/a/data"));
+}
+
 #[cfg(test)]
 mod tests {
   #[test]

@@ -72,6 +72,33 @@ fn scan(
   Ok(out)
 }
 
+pub(crate) fn rename_in(text: &mut String, from: &str, to: &str) {
+  let mut rest = text.as_str();
+  let mut out = String::with_capacity(rest.len());
+  while let Some((start, inner)) =
+    wharf_api_types::references::next_placeholder(rest)
+  {
+    let end = start + inner.len() + 4;
+    if parse_service_ref(inner).is_some_and(|r| r.service == from) {
+      out.push_str(&rest[..start + 3]);
+      out.push_str(to);
+      out.push_str(&rest[start + 3 + from.len()..end]);
+    } else {
+      out.push_str(&rest[..end]);
+    }
+    rest = &rest[end..];
+  }
+  out.push_str(rest);
+  *text = out;
+}
+
+#[test]
+fn rename_keeps_port_and_part_of_service_reference() {
+  let mut input = "[[@a.http:port]] [[@ab]] [[VALUE]] a".to_string();
+  rename_in(&mut input, "a", "b");
+  assert_eq!(input, "[[@b.http:port]] [[@ab]] [[VALUE]] a");
+}
+
 /// 把服务 `me` 的部署内容里的引用换成实际地址。
 pub fn resolve(
   text: &str,

@@ -54,6 +54,7 @@ pub fn service_status(i: Inputs<'_>) -> ServiceStatus {
     &missing_components,
   );
   ServiceStatus {
+    recovery: None,
     want_running: i.want_running,
     desired_hash: i.desired_hash,
     applied: i.applied.cloned(),

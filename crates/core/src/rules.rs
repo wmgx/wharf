@@ -952,3 +952,24 @@ pub fn issue_alert(
 #[cfg(test)]
 #[path = "rules/tests.rs"]
 pub(crate) mod tests;
+
+pub(crate) fn rename_service_cache(from: &str, to: &str) {
+  with(|m| {
+    let mut moved = Vec::new();
+    m.service_overrides.retain(|(rule, service), config| {
+      if service != from {
+        return true;
+      }
+      moved.push(((rule.clone(), to.to_owned()), config.clone()));
+      false
+    });
+    m.service_overrides.extend(moved);
+    for rule in m
+      .custom_rules
+      .values_mut()
+      .filter(|rule| rule.service == from)
+    {
+      rule.service = to.to_owned();
+    }
+  });
+}

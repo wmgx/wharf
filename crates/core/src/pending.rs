@@ -93,6 +93,7 @@ pub struct TunnelDeletePayload {
 
 #[derive(Default)]
 pub struct PendingState {
+  pub clones: BTreeSet<String>,
   pub migrations: BTreeMap<String, Migration>,
   pub adopt_data:
     BTreeMap<String, wharf_api_types::adopt_data::AdoptDataJob>,
@@ -137,6 +138,9 @@ pub fn load(c: &Connection) -> Result<PendingState, ApiError> {
     let phase: String = row.get(2).map_err(sql_err)?;
     let payload: String = row.get(3).map_err(sql_err)?;
     match kind.as_str() {
+      "clone_data" => {
+        pending.clones.insert(key);
+      }
       crate::backup_move::KIND => {
         pending.backup_moves.insert(
           key,
@@ -436,6 +440,46 @@ pub fn stage(
       continue;
     }
     match &step.step {
+      Step::RenameService { job } => {
+        if pending.clones.contains(&job.target)
+          || world.services.contains_key(&job.target)
+        {
+          return Err(
+            ApiError::new(
+              wharf_api_types::ErrorCode::Conflict,
+              "改名目标已存在",
+            )
+            .with_hint("换一个名称"),
+          );
+        }
+        put(
+          c,
+          ("clone_data", &job.target),
+          ids,
+          Some(&job.instance),
+          &job.receipt,
+        )?;
+      }
+      Step::CloneData { job } => {
+        if pending.clones.contains(&job.target)
+          || world.services.contains_key(&job.target)
+        {
+          return Err(
+            ApiError::new(
+              wharf_api_types::ErrorCode::Conflict,
+              "克隆目标已存在",
+            )
+            .with_hint("换一个名称"),
+          );
+        }
+        put(
+          c,
+          ("clone_data", &job.target),
+          ids,
+          Some(&job.target_instance),
+          &job.receipt,
+        )?;
+      }
       Step::GatewayDown {
         server,
         gateway,

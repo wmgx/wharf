@@ -8,6 +8,57 @@ use crate::spec::ServerSettings;
 /// Docker update 的 Memory=0 是忽略更新。用内核页对齐后的最大值表示不限。
 pub const UNLIMITED_MEMORY: u64 = 0x7fff_ffff_ffff_0000;
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LimitEvidence {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub start_ms: Option<i64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub end_ms: Option<i64>,
+  pub points: usize,
+  pub hours: usize,
+  pub resolution_minutes: u32,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub mean: Option<f64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub peak: Option<f64>,
+  pub peak_is_lower_bound: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct LimitSuggestion {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub container: Option<String>,
+  pub name: String,
+  pub server: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub current_memory_mb: Option<f64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub current_cpu_milli: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub memory_source: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cpu_source: Option<String>,
+  /// MiB。
+  pub memory: LimitEvidence,
+  /// 整机 CPU 百分比，沿用旧统计。
+  pub cpu: LimitEvidence,
+  /// 细粒度采样的 millicore。
+  pub fine_cpu: LimitEvidence,
+  /// 按时间键去重后的 OOM 点数。
+  pub oom_points: usize,
+  pub memory_class: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub memory_mb: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cpu_milli: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub skip: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub memory_reason: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub cpu_reason: Option<String>,
+}
+
 #[derive(
   Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
 )]

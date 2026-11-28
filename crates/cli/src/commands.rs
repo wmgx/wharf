@@ -15,6 +15,7 @@ use wharf_api_types::{
   },
   plan::{
     ApplyRequest, ApplyResponse, Plan, PlanRequest, Run, RunStatus,
+    ServiceAction,
   },
   spec::{
     BackupSpec, Change, Fleet, GatewayKind, GatewaySpec, GatewayTls,
@@ -394,6 +395,8 @@ async fn dispatch_command(
       port,
       add_port,
       rm_port,
+      add_tag,
+      rm_tag,
       env,
       unset_env,
       build,
@@ -416,6 +419,8 @@ async fn dispatch_command(
         port,
         add_port,
         rm_port,
+        add_tag,
+        rm_tag,
         clear_ports: false,
         env,
         unset_env,
@@ -1131,27 +1136,24 @@ fn set_network_options(
   Ok(())
 }
 
-async fn deploy_plan(
+async fn plan_batch(
   c: &Client,
-  name: String,
-  spec: ServiceSpec,
+  action: ServiceAction,
   flags: ApplyFlags,
-  j: bool,
-  warnings: Vec<String>,
-  detected: Option<crate::deploy::DetectResult>,
+  json: bool,
 ) -> CliResult<()> {
-  let req = PlanRequest {
-    changes: vec![Change::UpsertService {
-      name,
-      spec,
-      adopt: None,
-      pins: None,
-      commit: None,
-      migrate: None,
-    }],
-    ..Default::default()
-  };
-  plan_output(c, req, flags, j, warnings, detected).await
+  plan_output(
+    c,
+    PlanRequest {
+      service_action: Some(action),
+      ..Default::default()
+    },
+    flags,
+    json,
+    vec![],
+    None,
+  )
+  .await
 }
 
 async fn plan_output(
@@ -2973,6 +2975,67 @@ async fn service(
       )
       .await
     }
+    ServiceCmd::Rename { source, target } => {
+      plan_batch(
+        c,
+        ServiceAction::Rename { source, target },
+        ApplyFlags::default(),
+        j,
+      )
+      .await
+    }
+    ServiceCmd::Clone {
+      source,
+      target,
+      server,
+      copy_data,
+    } => {
+      plan_batch(
+        c,
+        ServiceAction::Clone {
+          source,
+          target,
+          server,
+          copy_data,
+        },
+        ApplyFlags::default(),
+        j,
+      )
+      .await
+    }
+    ServiceCmd::ExportCompose { name, output } => {
+      let view: wharf_api_types::view::ServiceComposeExport = c
+        .get(&format!("/api/services/{}/export-compose", seg(&name)))
+        .await?;
+      if let Some(path) = output {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+          .write(true)
+          .create_new(true)
+          .open(&path)
+          .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+              ApiError::new(ErrorCode::Conflict, "输出文件已存在")
+                .with_hint("更换输出路径")
+            } else {
+              ApiError::invalid(format!("无法创建输出文件：{error}"))
+            }
+          })?;
+        file.write_all(view.compose.as_bytes()).map_err(|error| {
+          ApiError::invalid(format!("写入输出文件失败：{error}"))
+        })?;
+        if j {
+          let mut result = json!(view);
+          result["path"] = json!(path);
+          out(j, &result, |_| {});
+        } else if !print::is_quiet() {
+          println!("{}", path.display());
+        }
+      } else {
+        out(j, &view, |view| print!("{}", view.compose));
+      }
+      Ok(())
+    }
     ServiceCmd::Render { name } => {
       let v: wharf_api_types::view::ServiceRenderView = c
         .get(&format!("/api/services/{}/render", seg(&name)))
@@ -3120,7 +3183,30 @@ async fn service(
         .await?;
       apply_prepared_plan(c, plan, apply, j, context).await
     }
-    ServiceCmd::Update { name, image, apply } => {
+    ServiceCmd::Stop {
+      tag: Some(tag),
+      apply,
+      ..
+    } => plan_batch(c, ServiceAction::Stop { tag }, apply, j).await,
+    ServiceCmd::Update {
+      tag: Some(tag),
+      apply,
+      ..
+    } => plan_batch(c, ServiceAction::Update { tag }, apply, j).await,
+    ServiceCmd::Restart { tag: Some(tag), .. } => {
+      plan_batch(
+        c,
+        ServiceAction::Restart { tag },
+        ApplyFlags::default(),
+        j,
+      )
+      .await
+    }
+    ServiceCmd::Update {
+      name, image, apply, ..
+    } => {
+      let name = name
+        .ok_or_else(|| ApiError::invalid("请指定服务名或 --tag"))?;
       changes(
         c,
         vec![Change::RefreshImages { name, image }],
@@ -3374,14 +3460,94 @@ async fn service(
     ServiceCmd::Upload { name, local, path } => {
       crate::files::upload(c, &name, &local, &path, j).await
     }
+    ServiceCmd::Repair {
+      name,
+      status,
+      exit,
+      timeout,
+      command,
+    } => {
+      use wharf_api_types::view::{RepairView, ServiceRepairRequest};
+      let path = format!("/api/services/{}/repair", seg(&name));
+      let response: RepairView = if status {
+        c.get(&path).await?
+      } else {
+        let request = if exit {
+          ServiceRepairRequest::Exit
+        } else if command.is_empty() {
+          ServiceRepairRequest::Start
+        } else {
+          ServiceRepairRequest::Exec {
+            command: crate::exec_command::read_exec_source(
+              command, None,
+            )?,
+            timeout_secs: timeout,
+          }
+        };
+        c.post(&path, &request).await?
+      };
+      out(j, &response, |view| {
+        if let Some(execution) = &view.execution {
+          print!("{}", execution.stdout);
+          eprint!("{}", execution.stderr);
+        } else {
+          pretty(view);
+        }
+      });
+      if let Some(execution) = response.execution
+        && execution.exit_code != 0
+      {
+        return Err(CliError::Exit(if j {
+          1
+        } else {
+          execution.exit_code
+        }));
+      }
+      Ok(())
+    }
+    ServiceCmd::CrashGuard { name, on, off } => {
+      if on || off {
+        return changes(
+          c,
+          vec![Change::SetCrashGuard { name, enabled: on }],
+          ApplyFlags::default(),
+          j,
+        )
+        .await;
+      }
+      let view: wharf_api_types::view::CrashGuardView = c
+        .get(&format!("/api/services/{}/crash-guard", seg(&name)))
+        .await?;
+      out(j, &view, pretty);
+      Ok(())
+    }
     ServiceCmd::Stop { .. } | ServiceCmd::Start { .. } => {
       let (name, apply, stopped) = match cmd {
-        ServiceCmd::Stop { name, apply } => (name, apply, true),
+        ServiceCmd::Stop { name, apply, .. } => {
+          let name = name.ok_or_else(|| {
+            ApiError::invalid("请指定服务名或 --tag")
+          })?;
+          (name, apply, true)
+        }
         ServiceCmd::Start { name, apply } => (name, apply, false),
         _ => unreachable!(),
       };
       let v: ServiceView =
         c.get(&format!("/api/services/{}", seg(&name))).await?;
+      if !stopped
+        && v
+          .status
+          .as_ref()
+          .is_some_and(|status| status.recovery.is_some())
+      {
+        return plan_batch(
+          c,
+          ServiceAction::ResumeProtected { service: name },
+          apply,
+          j,
+        )
+        .await;
+      }
       let spec = ServiceSpec { stopped, ..v.spec };
       changes(
         c,
@@ -3398,7 +3564,11 @@ async fn service(
       )
       .await
     }
-    ServiceCmd::Restart { name, container } => {
+    ServiceCmd::Restart {
+      name, container, ..
+    } => {
+      let name = name
+        .ok_or_else(|| ApiError::invalid("请指定服务名或 --tag"))?;
       if container.is_some() {
         c.require_exec_v2_core().await?;
       }
@@ -3457,6 +3627,8 @@ async fn service(
       port,
       add_port,
       rm_port,
+      add_tag,
+      rm_tag,
       clear_ports,
       env,
       unset_env,
@@ -3480,6 +3652,14 @@ async fn service(
         }
         Err(e) => return Err(e),
       };
+      let tags =
+        (!add_tag.is_empty() || !rm_tag.is_empty()).then(|| {
+          Change::EditServiceTags {
+            name: name.clone(),
+            add: add_tag,
+            remove: rm_tag,
+          }
+        });
       if let Some(view) = &mut existing
         && !(image.is_some()
           || compose.is_some()
@@ -3528,6 +3708,9 @@ async fn service(
           || ops.no_use_egress
           || ops.runtime.has_edits())
       {
+        if let Some(tags) = tags {
+          return changes(c, vec![tags], apply, j).await;
+        }
         apply.check_read_only()?;
         wharf_api_types::filter_note(
           &mut view.note,
@@ -3641,6 +3824,8 @@ async fn service(
             stop_signal: None,
             init_cmd: None,
             init_timeout_secs: None,
+            tags: Default::default(),
+            crash_guard: false,
             lan: None,
             extra_hosts: Default::default(),
             self_refs: false,
@@ -3801,7 +3986,20 @@ async fn service(
         &ops.add_host_volume,
         &ops.rm_host_volume,
       )?;
-      deploy_plan(c, name, spec, apply, j, warnings, detected).await
+      let req = PlanRequest {
+        changes: std::iter::once(Change::UpsertService {
+          name,
+          spec,
+          adopt: None,
+          pins: None,
+          commit: None,
+          migrate: None,
+        })
+        .chain(tags)
+        .collect(),
+        ..Default::default()
+      };
+      plan_output(c, req, apply, j, warnings, detected).await
     }
     ServiceCmd::AdoptData {
       name,

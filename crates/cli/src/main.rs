@@ -239,6 +239,12 @@ pub enum Command {
       conflicts_with = "port"
     )]
     rm_port: Vec<String>,
+    /// 增加标签，可重复。
+    #[arg(long)]
+    add_tag: Vec<String>,
+    /// 移除标签，可重复。
+    #[arg(long)]
+    rm_tag: Vec<String>,
     #[arg(long, visible_alias = "add-env")]
     env: Vec<String>,
     #[arg(long, visible_alias = "rm-env")]
@@ -1179,6 +1185,27 @@ pub enum ServiceCmd {
   Render {
     name: String,
   },
+  /// 为已停止且依赖可核实的服务生成改名计划。
+  Rename {
+    source: String,
+    target: String,
+  },
+  /// 克隆服务，生成保持停止的计划。
+  Clone {
+    source: String,
+    target: String,
+    #[arg(long)]
+    server: Option<String>,
+    #[arg(long)]
+    copy_data: bool,
+  },
+  /// 导出普通 Compose 和所需变量、文件清单。
+  ExportCompose {
+    name: String,
+    /// 将 YAML 写入新文件。
+    #[arg(short, long)]
+    output: Option<std::path::PathBuf>,
+  },
   /// 看日志。可以给多个服务，按时间合在一起看。支持按时间、关键字筛和用 `--errors` 合并同类报错。
   /// 例：`wharf service logs blog --since 2h --errors`、`wharf service logs blog --grep timeout --tail 50`。
   Logs {
@@ -1253,9 +1280,33 @@ pub enum ServiceCmd {
   },
   /// 停止：容器保留但不运行，之后部署也保持停止。生成计划。
   Stop {
-    name: String,
+    #[arg(required_unless_present = "tag")]
+    name: Option<String>,
+    /// 按标签选服务，只生成计划。
+    #[arg(long, conflicts_with_all = ["name", "apply"])]
+    tag: Option<String>,
     #[command(flatten)]
     apply: ApplyFlags,
+  },
+  /// 进入、查询、执行修复命令或退出修复模式。
+  Repair {
+    name: String,
+    #[arg(long, conflicts_with_all = ["exit", "command", "timeout"])]
+    status: bool,
+    #[arg(long, conflicts_with_all = ["command", "timeout"])]
+    exit: bool,
+    #[arg(long, requires = "command")]
+    timeout: Option<u64>,
+    #[arg(last = true)]
+    command: Vec<String>,
+  },
+  /// 查看或设置重启循环保护。
+  CrashGuard {
+    name: String,
+    #[arg(long, conflicts_with = "off")]
+    on: bool,
+    #[arg(long)]
+    off: bool,
   },
   /// 启动之前停止的服务。生成计划。
   Start {
@@ -1265,7 +1316,11 @@ pub enum ServiceCmd {
   },
   /// 重启容器，不改配置、不重建。
   Restart {
-    name: String,
+    #[arg(required_unless_present = "tag")]
+    name: Option<String>,
+    /// 按标签选服务，只生成计划。
+    #[arg(long, conflicts_with_all = ["name", "container"])]
+    tag: Option<String>,
     /// 仅重启指定 Compose 子容器。
     #[arg(long)]
     container: Option<String>,
@@ -1273,7 +1328,11 @@ pub enum ServiceCmd {
   /// 检查更新：镜像（image 来源和 compose 里的镜像）重新查标签现在的版本，git 构建来源重新查分支现在的 commit，
   /// 有新版本时计划里会更新。平时改配置不会换版本。不会换标签，换标签用 `wharf service retag`。
   Update {
-    name: String,
+    #[arg(required_unless_present = "tag")]
+    name: Option<String>,
+    /// 按标签选服务，只生成计划。
+    #[arg(long, conflicts_with_all = ["name", "image", "apply"])]
+    tag: Option<String>,
     /// 只检查这一个镜像，和 compose 里写的一字不差；不填检查全部镜像。
     /// 例：`wharf service update halo --image mysql:8.0.36`。
     #[arg(long)]
@@ -1390,6 +1449,12 @@ pub enum ServiceCmd {
       conflicts_with = "port"
     )]
     rm_port: Vec<String>,
+    /// 增加标签，可重复。
+    #[arg(long)]
+    add_tag: Vec<String>,
+    /// 移除标签，可重复。
+    #[arg(long)]
+    rm_tag: Vec<String>,
     #[arg(long, conflicts_with_all = ["port", "add_port", "rm_port"])]
     clear_ports: bool,
     /// 环境变量 `KEY=VALUE`，值里可以用 `[[SECRET]]`。可以多次使用。

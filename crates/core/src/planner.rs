@@ -282,6 +282,20 @@ pub enum Step {
   ServiceStop {
     service: String,
   },
+  CloneData {
+    job: Box<service_clone::CloneJob>,
+  },
+  RenameService {
+    job: Box<service_rename::RenameJob>,
+  },
+  CrashStop {
+    service: String,
+    evidence: crate::crash_guard::Evidence,
+  },
+  ResumeProtected {
+    service: String,
+    instance: String,
+  },
   /// 按计划启动配置已一致的容器。
   ServiceStart {
     service: String,
@@ -336,6 +350,7 @@ impl Step {
           1
         }
       }
+      Self::CloneData { .. } | Self::RenameService { .. } => 1,
       Self::VolumeSync { .. } | Self::AdoptData { .. } => 2,
       Self::ServiceUp { .. }
       | Self::ServiceLimitsUpdate { .. }
@@ -370,6 +385,8 @@ impl Step {
       | Self::Prune { .. }
       | Self::CoreBackup { .. }
       | Self::ServiceRestart { .. }
+      | Self::CrashStop { .. }
+      | Self::ResumeProtected { .. }
       | Self::CleanupData { .. }
       | Self::CleanupArchive { .. }
       | Self::EdgeRollback { .. } => 9,
@@ -398,6 +415,7 @@ pub struct Planned {
 
 #[derive(Default)]
 pub(crate) struct Builder {
+  service_targets: Option<BTreeSet<String>>,
   migration_limits: BTreeMap<String, (Option<u32>, bool)>,
   migration_mounts:
     BTreeMap<String, Vec<wharf_api_types::agent::ContainerMount>>,
@@ -555,6 +573,36 @@ pub(crate) async fn require_plan_request(
   Ok(())
 }
 
+async fn select_planned_service_images(
+  state: &AppState,
+  snap: &Snapshot,
+  desired: &World,
+  b: &mut Builder,
+) -> Result<(), ApiError> {
+  for step in &mut b.steps {
+    if let Step::ServiceUp {
+      service, images, ..
+    } = &mut step.step
+      && let Some(row) = desired.services.get(service)
+    {
+      crate::monitor::require_agent(state, &row.spec)?;
+      if row.spec.uses_runtime_options() {
+        let conn =
+          state.hub.runtime_options_conn_id(&row.spec.server)?;
+        *images = crate::pins::select_explicit_images(
+          state,
+          snap,
+          row,
+          conn,
+          &Default::default(),
+        )
+        .await?;
+      }
+    }
+  }
+  Ok(())
+}
+
 fn service_needs_default_timezone(
   previous: Option<&crate::world::ServiceRow>,
   row: &crate::world::ServiceRow,
@@ -575,6 +623,10 @@ pub(crate) async fn make_plan_inner(
   check_migrated_images: bool,
   admin: bool,
 ) -> Result<Planned, ApiError> {
+  if req.service_action.is_some() {
+    return make_service_action_plan(state, req, snap, None, admin)
+      .await;
+  }
   let current = snap.world.clone();
   let mut desired = current.clone();
   let given = usize::from(!req.changes.is_empty())
@@ -591,6 +643,39 @@ pub(crate) async fn make_plan_inner(
     desired.merge_with(fleet)?;
   } else {
     desired.apply_changes(&req.changes)?;
+  }
+  crate::crash_guard::check_plan(state, &snap, &desired)?;
+  if !req.changes.is_empty()
+    && req.changes.iter().all(|change| {
+      matches!(
+        change,
+        wharf_api_types::spec::Change::EditServiceTags { .. }
+          | wharf_api_types::spec::Change::SetCrashGuard { .. }
+      )
+    })
+  {
+    let writes = desired.writes_from(&current);
+    let mut builder = Builder::default();
+    config_items(&mut builder, &current, &desired, &writes);
+    return Ok(finish_plan(
+      &snap,
+      &desired,
+      builder,
+      writes,
+      crate::render::service_account_refs(&desired),
+      req.note.as_deref(),
+    ));
+  }
+  if snap
+    .pending
+    .clones
+    .iter()
+    .any(|name| desired.services.contains_key(name))
+  {
+    return Err(
+      ApiError::new(ErrorCode::Conflict, "克隆目标仍由原执行保留")
+        .with_hint("先重试原执行，完成克隆后再使用该名称"),
+    );
   }
   let mut adoption = snap.pending.adopt_data.clone();
   let mut adoption_warnings = Vec::new();
@@ -866,6 +951,7 @@ pub(crate) async fn make_plan_inner(
     &mut desired,
     &refresh,
     check_migrated_images,
+    None,
   )
   .await?;
   warnings.extend(resolved.warnings);
@@ -901,6 +987,7 @@ pub(crate) async fn make_plan_inner(
     &mut desired,
     &refresh,
     &mut warnings,
+    None,
   )
   .await?;
   mark("定版本");
@@ -1236,27 +1323,8 @@ pub(crate) async fn make_plan_inner(
     &mut b,
   )
   .await?;
-  for step in &mut b.steps {
-    if let Step::ServiceUp {
-      service, images, ..
-    } = &mut step.step
-      && let Some(row) = desired.services.get(service)
-    {
-      crate::monitor::require_agent(state, &row.spec)?;
-      if row.spec.uses_runtime_options() {
-        let conn =
-          state.hub.runtime_options_conn_id(&row.spec.server)?;
-        *images = crate::pins::select_explicit_images(
-          state,
-          &snap,
-          row,
-          conn,
-          &Default::default(),
-        )
-        .await?;
-      }
-    }
-  }
+  select_planned_service_images(state, &snap, &desired, &mut b)
+    .await?;
 
   egress_items(&mut b, &snap, &current, &desired);
   for row in
@@ -1517,6 +1585,7 @@ fn finish_plan(
     created_at: now,
     expires_at: now + chrono::Duration::minutes(PLAN_TTL_MINUTES),
     base_versions: snap.world.versions(),
+    service_action: None,
     inputs: Some(crate::db::inputs_fingerprint(
       &snap.reach,
       &snap.service_values,
@@ -1652,6 +1721,10 @@ fn spec_json(world: &World, kind: &str, name: &str) -> Option<Value> {
 }
 
 mod route_impact;
+mod service_batch;
+pub(crate) mod service_clone;
+pub(crate) mod service_rename;
+pub(crate) use service_batch::make_service_action_plan;
 
 fn config_items(
   b: &mut Builder,
@@ -2023,7 +2096,17 @@ fn service_items(
   writes: &[Write],
 ) -> Result<(), ApiError> {
   for (name, svc) in &desired.services {
+    if b
+      .service_targets
+      .as_ref()
+      .is_some_and(|targets| !targets.contains(name))
+    {
+      continue;
+    }
     let old = current.services.get(name);
+    if snap.recovery.contains_key(name) {
+      continue;
+    }
     if old.is_some_and(|old| {
       crate::service_monitor::config_only(old, svc)
     }) {
@@ -5025,8 +5108,9 @@ mod tests {
         Ok(())
       }
     }).await.unwrap();
+    let legacy_statuses = statuses.clone();
     state.hub.mock_agent("s1", false, move |op| match op {
-      AgentOp::ProjectStatus { .. } => Ok(json!(statuses)),
+      AgentOp::ProjectStatus { .. } => Ok(json!(legacy_statuses)),
       _ => panic!("存量服务的空计划只需要旧 agent 的状态接口"),
     });
     state.hub.disable_mock_runtime_options("s1");
@@ -5054,6 +5138,24 @@ mod tests {
     );
     assert!(planned.steps.is_empty() && planned.writes.is_empty());
 
+    let mut upgraded = statuses;
+    upgraded.iter_mut().find(|p| p["project"] == "raw-app").unwrap()["containers"]
+      .as_array_mut().unwrap().push(json!({
+        "service":"init", "name":"raw-app-init-1", "state":"exited", "exit_code":0, "restart_policy":"no"
+      }));
+    state.hub.mock_agent("s1", false, move |op| match op {
+      AgentOp::ProjectStatus { .. } => Ok(json!(upgraded)),
+      _ => panic!("升级后健康项目不应进入部署"),
+    });
+    let planned =
+      make_plan(&state, PlanRequest::default()).await.unwrap();
+    assert!(
+      planned.plan.items.is_empty(),
+      "{:?}",
+      planned.plan.items
+    );
+    assert!(planned.steps.is_empty() && planned.writes.is_empty());
+
     let tasks = crate::tasks::load(&state).await.unwrap();
     assert_eq!(
       serde_json::to_value(&tasks[0].1).unwrap(),
@@ -5062,6 +5164,326 @@ mod tests {
     let old = crate::apply::load_plan(&state, "p_old").await.unwrap();
     assert_eq!(old.items[0].address, "service/image-app");
     assert_eq!(old.items[0].impacts, [Impact::Restart]);
+  }
+
+  #[tokio::test]
+  async fn clone_plan_reserves_copy_confirmation_and_requires_both_scopes()
+   {
+    use wharf_api_types::{agent::AgentOp, plan::ServiceAction};
+    let state = crate::rules::tests::test_state();
+    let mut world = world();
+    let row = world.services.get_mut("app").unwrap();
+    row.spec.stopped = true;
+    row.spec.volumes = serde_json::from_value(
+      json!([{"name":"data","target":"/data"}]),
+    )
+    .unwrap();
+    let snap = || Snapshot {
+      world: world.clone(),
+      ..Default::default()
+    };
+    let request = || PlanRequest {
+      service_action: Some(ServiceAction::Clone {
+        source: "app".into(),
+        target: "copy".into(),
+        server: None,
+        copy_data: true,
+      }),
+      ..Default::default()
+    };
+    let err = make_service_action_plan(
+      &state,
+      request(),
+      snap(),
+      Some(&["app".into()].into()),
+      false,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(err.code, ErrorCode::Forbidden);
+    state.hub.mock_agent("s1", false, |_| {
+      panic!("旧 agent 不应收到克隆操作")
+    });
+    let err = make_plan_inner(&state, request(), snap(), false, true)
+      .await
+      .err()
+      .unwrap();
+    assert_eq!(err.code, ErrorCode::AgentFailed);
+    state.hub.mock_safe_migrate_agent("s1",|op,_| Some(Ok(match op {
+      AgentOp::ProjectStatus{..}=> json!([{"project":"app","hash":"fixture","containers":[]}]),
+      AgentOp::ProjectMounts{..}=>json!({}),
+      AgentOp::BindMountUsers(_)=>json!([]),
+      AgentOp::ServiceCopy(wharf_api_types::agent::ServiceCopy::Check{..})=>json!({"committed":false}),
+      AgentOp::DirSpace{..}=>json!({"data_bytes":1024,"fs_avail_bytes":1073741824_u64,"fs_total_bytes":2147483648_u64}),
+      _=>panic!("克隆预览不得创建项目、目录或执行搬运"),
+    })));
+    state.hub.enable_mock_service_copy("s1");
+    let planned =
+      make_plan_inner(&state, request(), snap(), false, true)
+        .await
+        .unwrap();
+    assert_eq!(planned.plan.needs_confirm, ["service/copy"]);
+    assert!(planned.writes.is_empty());
+    assert!(matches!(planned.steps[0].step, Step::CloneData { .. }));
+    assert!(
+      planned
+        .steps
+        .iter()
+        .any(|step| matches!(step.step, Step::ServiceUp { .. }))
+    );
+    assert!(planned.plan.items.iter().any(|item| {
+      item.after.as_ref().is_some_and(|v| v["stopped"] == true)
+    }));
+  }
+
+  #[tokio::test]
+  async fn copy_apply_rechecks_capability_before_plan_and_run_writes()
+  {
+    use wharf_api_types::{
+      agent::{AgentOp, ServiceCopy},
+      plan::{ApplyRequest, ServiceAction},
+      view::Perm,
+    };
+    let state = crate::rules::tests::test_state();
+    let mut world = world();
+    let row = world.services.get_mut("app").unwrap();
+    row.spec.stopped = true;
+    row.spec.volumes = serde_json::from_value(
+      json!([{"name":"data","target":"/data"}]),
+    )
+    .unwrap();
+    state
+      .db
+      .call(move |c| {
+        for write in world.writes_from(&World::default()) {
+          db::apply_write(c, &write)?;
+        }
+        Ok(())
+      })
+      .await
+      .unwrap();
+    state.hub.mock_safe_migrate_agent("s1", |op, _| Some(Ok(match op {
+      AgentOp::ProjectStatus { .. } => json!([{"project":"app","hash":"fixture","containers":[]}]),
+      AgentOp::ProjectMounts { .. } => json!({}),
+      AgentOp::BindMountUsers(_) => json!([]),
+      AgentOp::ServiceCopy(ServiceCopy::Check { .. }) => json!({"committed":false}),
+      AgentOp::DirSpace { .. } => json!({"data_bytes":1024,"fs_avail_bytes":1073741824_u64,"fs_total_bytes":2147483648_u64}),
+      _ => panic!("计划中只能读"),
+    })));
+    state.hub.enable_mock_service_copy("s1");
+    let request = PlanRequest {
+      service_action: Some(ServiceAction::Clone {
+        source: "app".into(),
+        target: "copy".into(),
+        server: None,
+        copy_data: true,
+      }),
+      ..Default::default()
+    };
+    let snap = snapshot::load(&state.db).await.unwrap();
+    let planned = make_plan_inner(&state, request, snap, false, true)
+      .await
+      .unwrap();
+    save(&state, &planned).await.unwrap();
+    state.hub.mock_safe_migrate_agent("s1", |_, _| {
+      panic!("旧 agent 不得收到请求")
+    });
+    let result = crate::apply::start(
+      state.clone(),
+      ApplyRequest {
+        plan_id: planned.plan.plan_id.clone(),
+        confirm: vec!["service/copy".into()],
+        skip_snapshot: false,
+        verify_before_dns: None,
+      },
+      &BTreeSet::from([Perm::Admin, Perm::Apply, Perm::Confirm]),
+      None,
+    )
+    .await;
+    assert_eq!(result.err().unwrap().code, ErrorCode::AgentFailed);
+    assert_eq!(
+      crate::apply::load_plan(&state, &planned.plan.plan_id)
+        .await
+        .unwrap()
+        .status,
+      PlanStatus::Pending
+    );
+    state
+      .db
+      .call(|c| {
+        let runs: u64 = c
+          .query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))
+          .map_err(db::sql_err)?;
+        assert_eq!(runs, 0);
+        assert!(crate::pending::load(c)?.clones.is_empty());
+        Ok(())
+      })
+      .await
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn batch_update_refreshes_stopped_project_when_only_pin_changed()
+   {
+    use wharf_api_types::{agent::AgentOp, plan::ServiceAction};
+    let state = crate::rules::tests::test_state();
+    let mut world = world();
+    let before = format!("sha256:{}", "a".repeat(64));
+    let after = format!("sha256:{}", "b".repeat(64));
+    let row = world.services.get_mut("app").unwrap();
+    row.spec.stopped = true;
+    row.spec.tags.insert("test".into());
+    row.spec.source = Source::Image("alpine:3.20".into());
+    row.pins.insert("alpine:3.20".into(), before.clone());
+    let mut snap = Snapshot {
+      world,
+      ..Default::default()
+    };
+    let hash = snapshot::service_hash(
+      &snap.world,
+      &snap.net(&snap.world),
+      "app",
+      &BTreeMap::new(),
+      None,
+    )
+    .unwrap();
+    snap.applied.insert("app".into(), serde_json::from_value(json!({
+      "hash":hash,"at":"2026-01-01T00:00:00Z","digests":{"alpine:3.20":before},
+    })).unwrap());
+    state.hub.mock_agent("s1", false, {
+      let after = after.clone();
+      move |op| Ok(match op {
+        AgentOp::ProjectStatus { .. } => json!([{
+          "project":"app","hash":hash,"containers":[{"service":"app","name":"app-1","state":"exited"}]
+        }]),
+        AgentOp::ResolveImages(_) => json!([{"image":"alpine:3.20","digest":after}]),
+        _ => panic!("批量预览不得部署"),
+      })
+    });
+    let request = PlanRequest {
+      service_action: Some(ServiceAction::Update {
+        tag: "test".into(),
+      }),
+      ..Default::default()
+    };
+    let planned = make_plan_inner(&state, request, snap, false, true)
+      .await
+      .unwrap();
+    assert!(planned.steps.iter().any(|s| matches!(&s.step, Step::ServiceUp { service, .. } if service == "app")));
+    assert!(planned.writes.iter().any(|write| matches!(write, Write::Upsert { name, spec, meta, .. }
+      if name == "app" && spec["stopped"] == true && meta["pins"]["alpine:3.20"].as_str() == Some(after.as_str()))));
+  }
+
+  #[tokio::test]
+  async fn config_clone_uses_legacy_rpcs_and_keeps_runtime_options() {
+    use wharf_api_types::{agent::AgentOp, plan::ServiceAction};
+    let state = crate::rules::tests::test_state();
+    let mut world = world();
+    let row = world.services.get_mut("app").unwrap();
+    row.spec.command = Some(vec!["serve".into()]);
+    row.spec.shm_size = Some(64 << 20);
+    row.spec.volumes.clear();
+    let request = PlanRequest {
+      service_action: Some(ServiceAction::Clone {
+        source: "app".into(),
+        target: "copy".into(),
+        server: None,
+        copy_data: false,
+      }),
+      ..Default::default()
+    };
+    state.hub.mock_safe_migrate_agent("s1", |op, _| {
+      Some(Ok(match op {
+        AgentOp::ProjectStatus { projects, .. } => json!(
+          projects
+            .into_iter()
+            .map(|p| json!({"project":p,"containers":[]}))
+            .collect::<Vec<_>>()
+        ),
+        AgentOp::ProjectMounts { .. } => json!({}),
+        _ => panic!("配置克隆应只用旧 RPC 做预检"),
+      }))
+    });
+    let planned = make_plan_inner(
+      &state,
+      request,
+      Snapshot {
+        world,
+        ..Default::default()
+      },
+      false,
+      true,
+    )
+    .await
+    .unwrap();
+    assert!(planned.plan.items.iter().any(|item| {
+      item.after.as_ref().is_some_and(|spec| {
+        spec["stopped"] == true
+          && spec["command"] == json!(["serve"])
+          && spec["shm_size"].as_u64() == Some(64 << 20)
+      })
+    }));
+  }
+
+  #[test]
+  fn cross_machine_clone_rejects_unverified_external_network() {
+    let mut world = world();
+    let row = world.services.get_mut("app").unwrap();
+    row.spec.volumes.clear();
+    row.spec.source = serde_json::from_value(json!({
+      "compose":{"content":"services: {web: {image: alpine, networks: [shared]}}\nnetworks: {shared: {external: true}}"}
+    })).unwrap();
+    let snap = Snapshot {
+      world,
+      ..Default::default()
+    };
+    let error =
+      service_clone::validate_source(&snap, "app", "s2", false)
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(error.message.contains("外部 Compose 网络"));
+  }
+
+  #[tokio::test]
+  async fn rename_plan_rejects_a_service_with_backup_before_agent_calls()
+   {
+    use wharf_api_types::plan::ServiceAction;
+    let state = crate::rules::tests::test_state();
+    let mut world = world();
+    let row = world.services.get_mut("app").unwrap();
+    row.spec.stopped = true;
+    row.spec.backup =
+      Some(serde_json::from_value(json!({"to":"s1"})).unwrap());
+    state.hub.mock_agent("s1", false, |_| {
+      panic!("有备份的服务不应访问 agent")
+    });
+    let snap = Snapshot {
+      world,
+      applied: [(
+        "app".into(),
+        serde_json::from_value(json!({
+          "hash":"fixture","at":"2025-01-01T00:00:00Z"
+        }))
+        .unwrap(),
+      )]
+      .into(),
+      ..Default::default()
+    };
+    let request = PlanRequest {
+      service_action: Some(ServiceAction::Rename {
+        source: "app".into(),
+        target: "new".into(),
+      }),
+      ..Default::default()
+    };
+    let err = make_plan_inner(&state, request, snap, false, true)
+      .await
+      .err()
+      .unwrap();
+    assert_eq!(err.code, ErrorCode::Conflict);
+    assert!(err.message.contains("备份"));
+    assert!(err.hint.unwrap().contains("克隆"));
   }
 
   #[tokio::test]
@@ -7846,6 +8268,9 @@ mod tests {
       finished_at: None,
       exit_code: None,
       restart_policy: None,
+      container_id: None,
+      restart_count: None,
+      restart_observed_at: None,
     }
   }
 
