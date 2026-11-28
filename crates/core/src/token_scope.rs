@@ -363,7 +363,7 @@ pub fn require_plan_request(
   let submitted = req
     .partial
     .iter()
-    .flat_map(|fleet| fleet.services.iter().map(|(n, s)| (n, s)))
+    .flat_map(|fleet| &fleet.services)
     .chain(req.changes.iter().filter_map(|change| match change {
       Change::UpsertService { name, spec, .. } => Some((name, spec)),
       _ => None,

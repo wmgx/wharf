@@ -219,7 +219,7 @@ async fn execute(
   else {
     return Ok(());
   };
-  if current.key() != key {
+  if current != identity {
     return Ok(());
   }
   let snap = snapshot::load(&state.db).await?;
@@ -360,7 +360,7 @@ pub(crate) async fn ready(
     .await?;
   let Some((_, spec, current, _)) = current
     .first()
-    .filter(|(_, _, current, _)| current.key() == identity.key())
+    .filter(|(_, _, current, _)| current == identity)
   else {
     return Err(ApiError::new(
       ErrorCode::PlanStale,
@@ -452,4 +452,92 @@ fn restart_due_does_not_catch_up_before_revision_or_resume() {
     ),
     None
   );
+}
+
+#[tokio::test]
+async fn scheduled_restart_catches_up_once_and_keeps_stopped_service_stopped()
+ {
+  use std::sync::atomic::{AtomicUsize, Ordering};
+  let state = crate::migrate::tests::seed_service(false).await;
+  let save = |stopped| db::Write::Upsert {
+    kind: "service".into(),
+    name: "notes".into(),
+    meta: serde_json::json!({}),
+    spec: serde_json::json!({"server":"s2","source":{"image":"fixture:1"},"stopped":stopped,
+      "restart_schedule":{"cron":"* * * * *","catch_up_mins":3}}),
+  };
+  let write = save(false);
+  state.db.call(move |c| {
+    db::apply_write(c, &write)?;
+    c.execute("INSERT INTO deployments (service,server,run_id,hash,compose,images,created_at,instance_id)
+      SELECT name,'s2','r_fixture','hash','','[]',0,json_extract(meta,'$.instance_id')
+      FROM resources WHERE kind='service' AND name='notes'", []).map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
+  let before = minute_floor(Utc::now());
+  let due = before + chrono::Duration::minutes(1);
+  let offset = chrono::FixedOffset::east_opt(0).unwrap();
+  let resumed = DateTime::<Utc>::MIN_UTC;
+  tick(&state, before, due, resumed, offset).await.unwrap();
+  let count = Arc::new(AtomicUsize::new(0));
+  let calls = count.clone();
+  state.hub.mock_safe_gateway_agent("s2", move |op| {
+    let containers = serde_json::json!([{"service":"notes","name":"notes-1","state":"running"}]);
+    match op {
+      AgentOp::ProjectStatus { .. } => Ok(serde_json::json!([{"project":"notes","containers":containers}])),
+      AgentOp::ProjectRestart { .. } => {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Ok(serde_json::json!({"containers":containers,"images":[],"warnings":[],"retired":[]}))
+      }
+      _ => panic!("额外的 agent 操作"),
+    }
+  });
+  let key = state
+    .db
+    .call(|c| {
+      Ok(candidates(c, Some("notes"))?.pop().unwrap().2.key())
+    })
+    .await
+    .unwrap();
+  let wait_for_runs = |n| {
+    let state = state.clone();
+    let key = key.clone();
+    async move {
+      tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+          let rows = state.db.call(|c| {
+            let mut stmt = c.prepare("SELECT status, trigger FROM task_runs WHERE task LIKE '@restart/%' ORDER BY id").map_err(sql_err)?;
+            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+              .and_then(Iterator::collect::<Result<Vec<_>, _>>).map_err(sql_err)
+          }).await.unwrap();
+          let active = RUNNING.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&key);
+          if !active && rows.len() >= n && rows.iter().all(|(status, _)| status != "running") { return rows; }
+          tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+      }).await.unwrap()
+    }
+  };
+  tick(&state, due, due, resumed, offset).await.unwrap();
+  assert_eq!(
+    wait_for_runs(1).await,
+    [("succeeded".into(), "catch_up".into())]
+  );
+  tick(&state, due, due, resumed, offset).await.unwrap();
+  let write = save(true);
+  state
+    .db
+    .call(move |c| db::apply_write(c, &write))
+    .await
+    .unwrap();
+  tick(
+    &state,
+    due,
+    due + chrono::Duration::minutes(1),
+    resumed,
+    offset,
+  )
+  .await
+  .unwrap();
+  assert_eq!(wait_for_runs(2).await[1].0, "skipped");
+  assert_eq!(count.load(Ordering::SeqCst), 1);
 }

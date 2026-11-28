@@ -194,7 +194,7 @@ pub enum AgentMsg {
     /// 支持扩展文件操作和日志截止时间。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     files_v2: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     extra_logs_v1: bool,
   },
   KeyReady {

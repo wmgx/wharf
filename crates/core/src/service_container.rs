@@ -46,6 +46,51 @@ mod tests {
   use wharf_api_types::{ErrorCode, agent::AgentOp, view::Perm};
 
   #[tokio::test]
+  async fn extra_logs_reject_undeclared_paths_and_old_agents() {
+    let state = crate::rules::tests::test_state();
+    state.db.call(|c| db::apply_write(c, &Write::Upsert {
+      kind: "service".into(), name: "stack".into(), meta: json!({}),
+      spec: json!({"server":"s1","source":{"image":"fixture:1"},
+        "volumes":[{"name":"logs","target":"/logs"}],"extra_logs":["logs/error.log"]}),
+    })).await.unwrap();
+    state.hub.mock_agent("s1", false, |op| {
+      assert!(matches!(
+        op,
+        AgentOp::Files(
+          wharf_api_types::agent::FilesOp::ExtraLog { .. }
+        )
+      ));
+      Ok(json!({"path":"logs/error.log","size":19,"lines":3,
+        "content":"before\nERROR\nafter\n","truncated":false}))
+    });
+    let request = |file: &str| {
+      api::service_logs(
+        State(state.clone()),
+        auth([Perm::Read], false),
+        Path("stack".into()),
+        Query(
+          serde_json::from_value(json!({"file":file,"grep":"ERROR"}))
+            .unwrap(),
+        ),
+        RawQuery(Some("context=1".into())),
+        axum::Extension(crate::audit::AuditSlot::default()),
+      )
+    };
+    assert_eq!(
+      request("logs/other.log").await.unwrap_err().0.code,
+      ErrorCode::InvalidInput
+    );
+    assert_eq!(
+      request("logs/error.log").await.unwrap_err().0.code,
+      ErrorCode::Conflict
+    );
+    state.hub.enable_mock_extra_logs("s1");
+    let result = request("logs/error.log").await.unwrap().0;
+    assert_eq!(result["logs"], "before\nERROR\nafter\n");
+    assert_eq!(result["file"], "logs/error.log");
+  }
+
+  #[tokio::test]
   async fn child_logs_validate_name_and_bind_to_capable_agent() {
     let state = crate::rules::tests::test_state();
     state.db.call(|c| db::apply_write(c, &Write::Upsert {
