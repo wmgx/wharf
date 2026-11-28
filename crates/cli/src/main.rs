@@ -1429,6 +1429,16 @@ pub enum RouteCmd {
     /// 传空字符串清除。
     #[arg(long)]
     backup_gateway: Option<String>,
+    /// DNS TTL（秒），1 表示自动。
+    #[arg(
+      long,
+      conflicts_with = "no_dns_ttl",
+      value_name = "SECONDS"
+    )]
+    dns_ttl: Option<u32>,
+    /// 恢复默认的 DNS TTL 策略。
+    #[arg(long)]
+    no_dns_ttl: bool,
     /// 登录保护：访问时要输入账号密码。账号用 `wharf secret set BASIC_AUTH_<域名，. 换成 _>` 设置。
     #[arg(long, conflicts_with = "no_auth")]
     auth: bool,

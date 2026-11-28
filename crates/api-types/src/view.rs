@@ -497,6 +497,8 @@ pub struct LiveState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct GatewayView {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub gate_core: Option<String>,
   pub name: String,
   pub spec: GatewaySpec,
   /// 承载的路由 hostname。
@@ -507,7 +509,17 @@ pub struct GatewayView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FailoverPendingView {
+  pub target_backup: bool,
+  pub attempts: u32,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RouteView {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub failover_pending: Option<FailoverPendingView>,
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub core: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -75,9 +75,27 @@ pub struct EnsureDirsPayload {
   pub instance_id: Option<String>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct GatewayDownPayload {
+  pub gateway: String,
+  pub server: String,
+  #[serde(default)]
+  pub keep_tunnel: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TunnelDeletePayload {
+  pub gateway: String,
+  pub account: String,
+  pub scope: String,
+  pub tunnel_id: String,
+}
+
 #[derive(Default)]
 pub struct PendingState {
   pub migrations: BTreeMap<String, Migration>,
+  pub gateway_downs: Vec<GatewayDownPayload>,
+  pub tunnel_deletes: Vec<TunnelDeletePayload>,
   pub service_deletes: Vec<ServiceDeletePayload>,
   pub edge_deploys: BTreeSet<String>,
   pub docker_proxies: BTreeSet<String>,
@@ -112,6 +130,12 @@ pub fn load(c: &Connection) -> Result<PendingState, ApiError> {
           },
         );
       }
+      "gateway_down" => pending
+        .gateway_downs
+        .push(serde_json::from_str(&payload).map_err(json_err)?),
+      "tunnel_delete" => pending
+        .tunnel_deletes
+        .push(serde_json::from_str(&payload).map_err(json_err)?),
       "service_delete" => pending
         .service_deletes
         .push(serde_json::from_str(&payload).map_err(json_err)?),
@@ -155,6 +179,34 @@ fn put(
     params![kind,target,run_id,plan_id,instance,payload,db::now_ms()],
   ).map_err(sql_err)?;
   Ok(())
+}
+
+pub fn put_gateway_down(
+  c: &Connection,
+  ids: (&str, &str),
+  p: &GatewayDownPayload,
+) -> Result<(), ApiError> {
+  put(
+    c,
+    ("gateway_down", &format!("{}@{}", p.gateway, p.server)),
+    ids,
+    None,
+    p,
+  )
+}
+
+pub fn put_tunnel_delete(
+  c: &Connection,
+  ids: (&str, &str),
+  p: &TunnelDeletePayload,
+) -> Result<(), ApiError> {
+  put(
+    c,
+    ("tunnel_delete", &format!("{}:{}", p.account, p.tunnel_id)),
+    ids,
+    None,
+    p,
+  )
 }
 
 pub fn clear(
@@ -292,6 +344,38 @@ pub fn stage(
       continue;
     }
     match &step.step {
+      Step::GatewayDown {
+        server,
+        gateway,
+        keep_tunnel,
+      } => {
+        put_gateway_down(
+          c,
+          ids,
+          &GatewayDownPayload {
+            server: server.clone(),
+            gateway: gateway.clone(),
+            keep_tunnel: *keep_tunnel,
+          },
+        )?;
+      }
+      Step::TunnelDelete {
+        gateway,
+        account,
+        scope,
+        tunnel_id,
+      } => {
+        put_tunnel_delete(
+          c,
+          ids,
+          &TunnelDeletePayload {
+            gateway: gateway.clone(),
+            account: account.clone(),
+            scope: scope.clone(),
+            tunnel_id: tunnel_id.clone(),
+          },
+        )?;
+      }
       Step::EnsureDirs { server, dirs, .. } => {
         if let Some(service) = step.items.iter().find_map(|id| {
           plan

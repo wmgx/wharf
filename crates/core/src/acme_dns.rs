@@ -34,7 +34,7 @@ pub fn allowed(world: &World, gateway: &str) -> Vec<String> {
       .iter()
       .filter(|(_, r)| {
         r.spec.internal
-          && world.route_gateway(&r.spec) == Some(gateway)
+          && world.route_gateways(&r.spec).contains(&gateway)
       })
       .map(|(host, _)| host.clone()),
   );
@@ -212,6 +212,15 @@ mod tests {
     assert!(
       !allowed(&world, "other").contains(&"i.example.com".into())
     );
+    world
+      .routes
+      .get_mut("i.example.com")
+      .unwrap()
+      .spec
+      .backup_gateway = Some("other".into());
+    assert!(
+      allowed(&world, "other").contains(&"i.example.com".into())
+    );
   }
 
   #[test]
@@ -251,6 +260,7 @@ mod tests {
         None,
         &[],
         CaddyFill {
+          acme_dns_url: None,
           acme_dns: fill,
           ..Default::default()
         },

@@ -66,6 +66,7 @@ pub fn choose(
   net: &Net,
   gateway: &GatewaySpec,
   service: &str,
+  port: &str,
   mode: LinkMode,
 ) -> Result<Choice, ApiError> {
   let row = world.services.get(service).ok_or_else(|| {
@@ -73,6 +74,12 @@ pub fn choose(
   })?;
   let server = &row.spec.server;
   let gateway_server = &gateway.server;
+  let bind = service_port_bind(row, port);
+  if bind == PortBind::LoopbackV6Only {
+    return Err(ApiError::invalid(format!(
+      "服务 {service} 的端口 {port} 只绑定了 IPv6 回环地址 [::1]，网关无法转发"
+    )).with_hint("把 Compose 端口改为绑定 127.0.0.1 或内网地址"));
+  }
   if server == gateway_server {
     return Ok(Choice::Local);
   }
@@ -82,7 +89,9 @@ pub fn choose(
     .copied();
   let choice = match net.private.get(server) {
     Some(addr)
-      if mode != LinkMode::Tunnel && reach != Some(false) =>
+      if mode != LinkMode::Tunnel
+        && reach != Some(false)
+        && bind != PortBind::LoopbackV4Only =>
     {
       Choice::Direct(addr.ip.clone())
     }
@@ -91,6 +100,11 @@ pub fn choose(
   if choice == Choice::Tunnel
     && gateway.kind == GatewayKind::CloudflareTunnel
   {
+    if bind == PortBind::LoopbackV4Only {
+      return Err(ApiError::invalid(format!(
+        "服务 {service} 的端口 {port} 只绑定了本机回环地址 127.0.0.1，跨机 cloudflare_tunnel 网关连不到它"
+      )));
+    }
     return Err(ApiError::invalid(format!(
       "服务 {service} 在 {server} 上，cloudflare_tunnel 网关所在的 {gateway_server} 连不到它"
     ))
@@ -98,28 +112,119 @@ pub fn choose(
       "在 {server} 上建一个 cloudflare_tunnel 网关，路由改用它，不需要开端口"
     )));
   }
-  if choice == Choice::Tunnel {
-    let carrier = link_gateway(world, gateway_server);
-    let disabled = if gateway.tls == GatewayTls::Off {
-      world.gateways.iter().find_map(|(name, row)| {
-        (&row.spec == gateway).then_some(name.as_str())
-      })
-    } else {
-      carrier
-        .filter(|(_, spec)| spec.tls == GatewayTls::Off)
-        .map(|(name, _)| name)
-    };
-    if gateway.tls == GatewayTls::Off || disabled.is_some() {
-      let name = disabled.unwrap_or(gateway_server);
-      return Err(ApiError::invalid(format!(
-        "服务 {service} 在 {server} 上，网关 {name} 关闭了 TLS（tls=off），无法建立加密反向隧道"
-      ))
-      .with_hint(format!(
-        "把网关 {name} 的 TLS 改为 auto 或 internal，或让两台机器加入同一个组网直连"
-      )));
-    }
+  if choice == Choice::Tunnel
+    && link_gateway(world, gateway_server).is_none()
+  {
+    let name = world
+      .gateways
+      .iter()
+      .find(|(_, g)| &g.spec == gateway)
+      .map_or(gateway_server.as_str(), |(name, _)| name.as_str());
+    return Err(ApiError::invalid(format!(
+      "服务 {service} 在 {server} 上，服务器 {gateway_server} 没有开启 TLS 的 Caddy 网关，无法建立加密反向隧道"
+    )).with_hint(format!("把网关 {name} 的 TLS 改为 auto 或 internal，或让两台机器加入同一个组网直连")));
   }
   Ok(choice)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PortBind {
+  DirectableOrUnknown,
+  LoopbackV4Only,
+  LoopbackV6Only,
+}
+
+pub(crate) fn service_port_bind(
+  row: &crate::world::ServiceRow,
+  port: &str,
+) -> PortBind {
+  if let wharf_api_types::spec::Source::Compose {
+    content: Some(content),
+    ..
+  } = &row.spec.source
+    && let Some(host) = row.host_ports.get(port)
+  {
+    let udp = row.spec.ports.iter().any(|p| p.name == port && p.udp);
+    return compose_port_bind(content, *host, udp);
+  }
+  PortBind::DirectableOrUnknown
+}
+
+fn compose_port_bind(
+  content: &str,
+  host_port: u16,
+  udp: bool,
+) -> PortBind {
+  use serde_yaml_ng::Value;
+  let Ok(mut compose) = serde_yaml_ng::from_str::<Value>(content)
+  else {
+    return PortBind::DirectableOrUnknown;
+  };
+  if compose.apply_merge().is_err() {
+    return PortBind::DirectableOrUnknown;
+  }
+  let protocol = if udp { "udp" } else { "tcp" };
+  let entries = compose["services"]
+    .as_mapping()
+    .into_iter()
+    .flat_map(|s| s.values())
+    .flat_map(|s| s["ports"].as_sequence().into_iter().flatten());
+  let mut binding = None;
+  for entry in entries {
+    let (ip, start, end, proto) = if let Some(short) = entry.as_str()
+    {
+      let (address, proto) =
+        short.split_once('/').unwrap_or((short, "tcp"));
+      let Some((host, _)) = address.rsplit_once(':') else {
+        continue;
+      };
+      let (ip, published) =
+        host.rsplit_once(':').unwrap_or(("", host));
+      let Some((start, end)) = published_range(published) else {
+        continue;
+      };
+      (ip, start, end, proto)
+    } else {
+      let published = &entry["published"];
+      let range =
+        published.as_str().and_then(published_range).or_else(|| {
+          published
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok())
+            .map(|n| (n, n))
+        });
+      let Some((start, end)) = range else { continue };
+      (
+        entry["host_ip"].as_str().unwrap_or(""),
+        start,
+        end,
+        entry["protocol"].as_str().unwrap_or("tcp"),
+      )
+    };
+    if proto != protocol || !(start..=end).contains(&host_port) {
+      continue;
+    }
+    let ip = ip.trim_matches(['[', ']']);
+    let current = match ip.parse::<std::net::IpAddr>() {
+      Ok(std::net::IpAddr::V4(v)) if v.is_loopback() => {
+        PortBind::LoopbackV4Only
+      }
+      Ok(std::net::IpAddr::V6(v)) if v.is_loopback() => {
+        PortBind::LoopbackV6Only
+      }
+      _ if ip == "localhost" => PortBind::LoopbackV4Only,
+      _ => return PortBind::DirectableOrUnknown,
+    };
+    if binding != Some(PortBind::LoopbackV4Only) {
+      binding = Some(current);
+    }
+  }
+  binding.unwrap_or(PortBind::DirectableOrUnknown)
+}
+
+fn published_range(value: &str) -> Option<(u16, u16)> {
+  let (start, end) = value.split_once('-').unwrap_or((value, value));
+  Some((start.parse().ok()?, end.parse().ok()?))
 }
 
 /// 路由指向的 Wharf 服务：`(服务, 端口名)`，包括按路径转发的。
@@ -178,7 +283,7 @@ pub fn tunnels(
   let mut wanted = BTreeSet::new();
   for (gateway, route, targets) in routes_by_gateway(world) {
     for (service, port) in targets {
-      if choose(world, net, gateway, &service, route.link)?
+      if choose(world, net, gateway, &service, &port, route.link)?
         == Choice::Tunnel
       {
         wanted.insert((gateway.server.clone(), service, port));
@@ -371,7 +476,9 @@ pub fn link_gateway<'a>(
     .gateways
     .iter()
     .find(|(_, g)| {
-      g.spec.server == server && g.spec.kind == GatewayKind::Caddy
+      g.spec.server == server
+        && g.spec.kind == GatewayKind::Caddy
+        && g.spec.tls != GatewayTls::Off
     })
     .map(|(n, g)| (n.as_str(), &g.spec))
 }
@@ -462,14 +569,54 @@ pub async fn probe(
   let mut pairs = Pairs::new();
   for (gateway, route, targets) in routes_by_gateway(world) {
     let gateway_server = gateway.server.as_str();
+    if gateway.kind == GatewayKind::Caddy
+      && route.sso.is_some()
+      && let Some(core) = &net.core_server
+      && core != gateway_server
+      && net
+        .private
+        .get(core)
+        .is_some_and(|addr| addr.network.encrypted())
+      && net.core_listener.is_some_and(|(_, only)| !only)
+    {
+      pairs
+        .entry(gateway_server.into())
+        .or_default()
+        .insert(core.clone());
+    }
     if route.link == LinkMode::Tunnel {
       continue;
     }
-    for (service, _) in targets {
-      let to = &world.services[&service].spec.server;
-      if to != gateway_server && net.private.contains_key(to) {
+    for (service, port) in targets {
+      let row = &world.services[&service];
+      let to = &row.spec.server;
+      if to != gateway_server
+        && net.private.contains_key(to)
+        && service_port_bind(row, &port)
+          == PortBind::DirectableOrUnknown
+      {
         pairs
           .entry(gateway_server.to_string())
+          .or_default()
+          .insert(to.clone());
+      }
+    }
+  }
+  for gateway in world
+    .gateways
+    .values()
+    .filter(|g| g.spec.kind == GatewayKind::Caddy)
+  {
+    for service in gateway
+      .spec
+      .layer4
+      .iter()
+      .filter_map(|f| world.services.get(f.service.as_deref()?))
+    {
+      let to = &service.spec.server;
+      if to != &gateway.spec.server && net.private.contains_key(to) {
+        pairs
+          .entry(gateway.spec.server.clone())
           .or_default()
           .insert(to.clone());
       }
@@ -487,12 +634,42 @@ pub async fn require_reach(
   what: &str,
   mode: ProbeMode,
 ) -> Result<(), ApiError> {
+  if !net.private.contains_key(to) {
+    return Err(
+      ApiError::invalid(format!(
+        "目标服务器 {to} 没有内网地址，不能{what}"
+      ))
+      .suggest(format!("wharf server set {to} --private-ip <ip>")),
+    );
+  }
+  if !state.hub.is_online(from) {
+    return Err(ApiError::new(
+      wharf_api_types::ErrorCode::AgentOffline,
+      format!(
+        "服务器 {from} 不在线，无法验证到 {to} 的内网连通性，不能{what}"
+      ),
+    ));
+  }
   let pairs = Pairs::from([(
     from.to_string(),
     BTreeSet::from([to.to_string()]),
   )]);
-  let reach = probe_pairs(state, net, pairs, mode).await;
-  if reach.get(&(from.to_string(), to.to_string())) == Some(&false) {
+  let mut fresh = net.clone();
+  let pair = (from.to_string(), to.to_string());
+  fresh.reach.remove(&pair);
+  let reach =
+    probe_pairs(state, &fresh, pairs, ProbeMode::Plan).await;
+  if !reach.contains_key(&pair) {
+    return Err(
+      ApiError::invalid(format!(
+        "探测 {from} 到 {to} 的内网连通性失败，不能{what}"
+      ))
+      .with_hint(
+        "检查两台机器的组网和 agent 状态；wharf network 查看连通性",
+      ),
+    );
+  }
+  if reach.get(&pair) == Some(&false) {
     return Err(
       ApiError::invalid(format!(
         "{from} 连不上 {to} 的内网地址，不能{what}"
@@ -502,6 +679,17 @@ pub async fn require_reach(
       ),
     );
   }
+  mode
+    .record(async || {
+      let (from, to) = pair;
+      let _ = state
+        .db
+        .call(move |c| {
+          db::set_reach(c, &[(from, to, true)], db::now_ms())
+        })
+        .await;
+    })
+    .await;
   Ok(())
 }
 
@@ -667,6 +855,145 @@ mod tests {
       .unwrap(),
       "[fd7a:115c:a1e0::1]:20000"
     );
+  }
+
+  #[test]
+  fn compose_loopback_selects_tunnel_per_port() {
+    let mut w = world();
+    let mut secure = w.gateways["edge"].clone();
+    secure.spec.default = false;
+    w.gateways.insert("z-https".into(), secure);
+    w.gateways.get_mut("edge").unwrap().spec.tls = GatewayTls::Off;
+    assert_eq!(link_gateway(&w, "edge1").unwrap().0, "z-https");
+    let row = w.services.get_mut("app").unwrap();
+    row.spec.source =
+      serde_json::from_value(json!({"compose":{"content": r#"
+services:
+  web:
+    image: fixture:1
+    ports:
+      - "127.0.0.1:18080:80"
+      - {published: 18081, host_ip: "100.64.0.2"}
+      - "[::1]:18082:82"
+"#}}))
+      .unwrap();
+    row.host_ports.extend([
+      ("http".into(), 18080),
+      ("direct".into(), 18081),
+      ("ipv6".into(), 18082),
+    ]);
+    let n = net(Some(true));
+    let choose = |port| {
+      choose(
+        &w,
+        &n,
+        &w.gateways["edge"].spec,
+        "app",
+        port,
+        LinkMode::Auto,
+      )
+    };
+    assert_eq!(choose("http").unwrap(), Choice::Tunnel);
+    assert_eq!(
+      choose("direct").unwrap(),
+      Choice::Direct("100.64.0.2".into())
+    );
+    assert!(choose("ipv6").unwrap_err().message.contains("[::1]"));
+    assert_eq!(
+      compose_port_bind(
+        "services: {web: {network_mode: host}}",
+        18080,
+        false
+      ),
+      PortBind::DirectableOrUnknown
+    );
+  }
+
+  #[test]
+  fn dual_stack_compose_loopback_selects_tunnel() {
+    let mut world = world();
+    let row = world.services.get_mut("app").unwrap();
+    row.spec.source =
+      serde_json::from_value(json!({"compose":{"content": r#"
+services:
+  web:
+    ports: ["127.0.0.1:18080:80", "[::1]:18080:80"]
+"#}}))
+      .unwrap();
+    row.host_ports.insert("http".into(), 18080);
+    assert_eq!(
+      choose(
+        &world,
+        &net(Some(true)),
+        &world.gateways["edge"].spec,
+        "app",
+        "http",
+        LinkMode::Auto
+      )
+      .unwrap(),
+      Choice::Tunnel
+    );
+  }
+
+  #[tokio::test]
+  async fn layer4_backends_probe_and_cached_reach_does_not_authorize_copy()
+   {
+    let mut w = world();
+    w.routes.clear();
+    w.gateways.get_mut("edge").unwrap().spec.layer4 =
+      serde_json::from_value(json!([
+        {"listen":23456,"service":"app","port":"http"}
+      ]))
+      .unwrap();
+    let state = crate::rules::tests::test_state();
+    let mut n = net(Some(false));
+    assert!(
+      require_reach(
+        &state,
+        &n,
+        "edge1",
+        "home1",
+        "迁移",
+        ProbeMode::Plan
+      )
+      .await
+      .is_err()
+    );
+    let mut calls = 0;
+    state.hub.mock_agent("edge1", false, move |op| {
+      assert!(matches!(&op, AgentOp::Probe { targets } if targets[0].server == "home1"));
+      calls += 1;
+      if calls == 1 { Ok(json!([true])) } else { Err(ApiError::internal("探测超时")) }
+    });
+    n.reach = probe(&state, &n, &w).await;
+    assert_eq!(
+      n.reach.get(&("edge1".into(), "home1".into())),
+      Some(&true)
+    );
+    assert!(
+      require_reach(
+        &state,
+        &n,
+        "edge1",
+        "home1",
+        "迁移",
+        ProbeMode::Plan
+      )
+      .await
+      .is_err()
+    );
+    n.private.clear();
+    let err = require_reach(
+      &state,
+      &n,
+      "edge1",
+      "home1",
+      "迁移",
+      ProbeMode::Plan,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.message.contains("没有内网地址"));
   }
 
   #[test]

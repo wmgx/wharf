@@ -441,9 +441,8 @@ fn alert_matches_filter(
   let Some(s) = subject else { return false };
   let server = |name: &str| idx.server == Some(name);
   match source {
-    "domain_down" | "cert_expiring" | "failover" => {
-      idx.routes.contains(s)
-    }
+    "domain_down" | "cert_expiring" | "failover"
+    | "failover_error" => idx.routes.contains(s),
     "expiry_soon" | "expiry_urgent" => {
       s.strip_prefix("server:").is_some_and(server)
         || s

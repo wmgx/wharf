@@ -197,6 +197,7 @@ mod tests {
       project: "app".into(),
       hash: None,
       config_hash: None,
+      acme_dns_url_hash: None,
       containers: vec![container(state, None)],
     };
     service_status(Inputs {
@@ -251,6 +252,7 @@ mod tests {
       hash: Some("a".into()),
       project: "web".into(),
       config_hash: None,
+      acme_dns_url_hash: None,
       containers: vec![container("running", None)],
     };
     let offline = ApiError::new(

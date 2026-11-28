@@ -31,6 +31,18 @@ pub fn tunnel_name(gateway: &str) -> String {
   format!("wharf-{gateway}")
 }
 
+pub(crate) fn ready<'a>(
+  snap: &'a Snapshot,
+  gateway: &str,
+  spec: &wharf_api_types::spec::GatewaySpec,
+) -> Option<&'a db::TunnelRow> {
+  snap.tunnels.get(gateway).filter(|t| {
+    spec.kind == wharf_api_types::spec::GatewayKind::CloudflareTunnel
+      && spec.account.as_deref() == Some(t.account.as_str())
+      && !t.config_hash.is_empty()
+  })
+}
+
 fn account<'a>(
   snap: &'a Snapshot,
   name: &str,
@@ -93,11 +105,27 @@ async fn ensure_tunnel(
     tunnel.scope.clone(),
     tunnel.id.clone(),
   );
+  let previous = snap
+    .tunnels
+    .get(gateway)
+    .filter(|old| {
+      !snap.pending.tunnel_deletes.iter().any(|p| {
+        p.account == old.account && p.tunnel_id == old.tunnel_id
+      })
+    })
+    .cloned();
   state
     .db
     .call(move |c| {
       let (gateway, account, scope, id) = values;
-      c.execute(
+      let tx = c.transaction().map_err(sql_err)?;
+      if let Some(old) = previous.filter(|p| p.account != account) {
+        crate::pending::put_tunnel_delete(&tx, ("", ""), &crate::pending::TunnelDeletePayload {
+          gateway: gateway.clone(), account: old.account, scope: old.scope, tunnel_id: old.tunnel_id,
+        })?;
+      }
+      crate::pending::clear(&tx, "tunnel_delete", &format!("{account}:{id}"))?;
+      tx.execute(
         "INSERT INTO tunnels (gateway, account, scope, tunnel_id, config_hash, created_at)
          VALUES (?1, ?2, ?3, ?4, '', ?5)
          ON CONFLICT (gateway) DO UPDATE SET account = excluded.account, scope = excluded.scope,
@@ -105,7 +133,7 @@ async fn ensure_tunnel(
         params![gateway, account, scope, id, now_ms()],
       )
       .map_err(sql_err)?;
-      Ok(())
+      tx.commit().map_err(sql_err)
     })
     .await?;
   Ok(tunnel)
@@ -150,19 +178,6 @@ pub async fn sync(
     provider.put_rules(&tunnel, &rules),
   )
   .await?;
-  let (g, hash) = (gateway.to_string(), r.config_hash.clone());
-  state
-    .db
-    .call(move |c| {
-      c.execute(
-        "UPDATE tunnels SET config_hash = ?1 WHERE gateway = ?2",
-        params![hash, g],
-      )
-      .map_err(sql_err)?;
-      Ok(())
-    })
-    .await?;
-
   let token =
     call(cancel, "读取隧道连接器 token", provider.token(&tunnel))
       .await?;
@@ -205,7 +220,16 @@ pub async fn sync(
     );
   }
 
-  // 连接器起来后几秒内隧道才会变成 healthy。没等到不算失败，只提醒。
+  let changing_account = snap
+    .pending
+    .tunnel_deletes
+    .iter()
+    .any(|p| p.gateway == gateway)
+    || snap
+      .tunnels
+      .get(gateway)
+      .is_some_and(|t| t.account != account_name);
+  // 换账号时，只有新连接器可用才能切 DNS 并删旧隧道。
   let deadline = tokio::time::Instant::now() + HEALTHY_WAIT;
   loop {
     let status =
@@ -215,6 +239,15 @@ pub async fn sync(
       break;
     }
     if tokio::time::Instant::now() > deadline {
+      if changing_account {
+        return Err(
+          ApiError::new(
+            ErrorCode::AgentFailed,
+            format!("网关 {gateway} 的新隧道尚未连接，暂缓切换 DNS"),
+          )
+          .suggest("wharf plan"),
+        );
+      }
       progress(format!(
         "提醒：隧道状态是 {status}，cloudflared 可能连不上 Cloudflare，查看 wharf gateway logs {gateway}"
       ));
@@ -222,7 +255,36 @@ pub async fn sync(
     }
     tokio::time::sleep(Duration::from_secs(3)).await;
   }
+  let (g, hash) = (gateway.to_string(), r.config_hash.clone());
+  state
+    .db
+    .call(move |c| {
+      c.execute(
+        "UPDATE tunnels SET config_hash = ?1 WHERE gateway = ?2",
+        params![hash, g],
+      )
+      .map_err(sql_err)?;
+      Ok(())
+    })
+    .await?;
+
   Ok(())
+}
+
+pub async fn destroy_ref(
+  snap: &Snapshot,
+  account_name: &str,
+  scope: &str,
+  id: &str,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  let provider =
+    snapshot::tunnel_provider(account(snap, account_name)?)?;
+  let tunnel = TunnelRef {
+    scope: scope.into(),
+    id: id.into(),
+  };
+  call(cancel, "删除隧道", provider.delete(&tunnel)).await
 }
 
 /// 网关删除后删掉它的隧道。控制面没有记录时什么也不做。
@@ -236,14 +298,9 @@ pub async fn destroy(
   let Some(row) = snap.tunnels.get(gateway) else {
     return Ok(());
   };
-  let provider =
-    snapshot::tunnel_provider(account(snap, &row.account)?)?;
   progress(format!("删除隧道 {}", tunnel_name(gateway)));
-  let tunnel = TunnelRef {
-    scope: row.scope.clone(),
-    id: row.tunnel_id.clone(),
-  };
-  call(cancel, "删除隧道", provider.delete(&tunnel)).await?;
+  destroy_ref(snap, &row.account, &row.scope, &row.tunnel_id, cancel)
+    .await?;
   let g = gateway.to_string();
   state
     .db

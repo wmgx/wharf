@@ -1195,7 +1195,7 @@ mod tests {
       true,
       false,
       move |op| match op {
-        AgentOp::ProjectStatus { projects } => {
+        AgentOp::ProjectStatus { projects, .. } => {
           assert_eq!(projects, [render::CORE_BACKUP_PROJECT]);
           Ok(json!([]))
         }

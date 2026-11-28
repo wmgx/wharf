@@ -196,7 +196,10 @@ function DomainDetail({ route, status, onClose, onDirty }: { route: RouteView; s
         {target.kind === "service" && !isRedirect && !tunnel && <label className="flex items-center gap-2 text-sm">
           <Checkbox checked={link === "tunnel"} onCheckedChange={(v) => setLink(v === true ? "tunnel" : undefined)} />总是走反向隧道</label>}
         {(choices.length > 0 || route.spec.backup_gateway) && <Field label="备用入口" htmlFor="backup-gateway" help="入口所在的机器离线 5 分钟后，DNS 自动切到备用入口，恢复 5 分钟后切回。">
-          <Picker id="backup-gateway" value={backupNow} onChange={setBackup} options={[{ value: "", label: "无" }, ...choices.map((g) => ({ value: g.name, label: `${g.name}（${g.spec.server}）`, disabled: g.spec.kind === "cloudflare_tunnel" && (coreMeshOnly || cfOriginOnly) }))]} />
+          <Picker id="backup-gateway" value={backupNow} onChange={setBackup} options={[{ value: "", label: "无" }, ...choices.map((g) => {
+            const off = g.spec.kind === "cloudflare_tunnel" && g.name !== route.spec.backup_gateway && blockers.length > 0;
+            return { value: g.name, label: `${g.name}（${g.spec.server}）`, disabled: off, hint: off ? `不支持：${blockers.join("、")}` : undefined };
+          })]} />
         </Field>}
       </Panel>
       <SectionTitle>访问保护</SectionTitle>

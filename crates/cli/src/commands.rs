@@ -285,7 +285,15 @@ async fn dispatch(
     }
     Command::Status => {
       let s: Status = c.get("/api/status").await?;
-      out(j, &s, print::status);
+      out(j, &s, |s| {
+        print::status(s);
+        for route in &s.routes {
+          if route.failover_pending.is_some() {
+            println!("  {}", route.spec.hostname);
+            print_failover_pending(route);
+          }
+        }
+      });
       Ok(())
     }
     Command::Deploy {
@@ -442,6 +450,7 @@ async fn dispatch(
         upstream: None,
         redirect: None,
         backup_gateway: None,
+        dns_ttl: None,
         auth: false,
         paths: vec![],
         caddy: None,
@@ -3653,6 +3662,20 @@ async fn gateway(
   }
 }
 
+fn print_failover_pending(r: &RouteView) {
+  if let Some(p) = &r.failover_pending {
+    let target = if p.target_backup {
+      "备用入口"
+    } else {
+      "主网关"
+    };
+    println!("    待切换到{target}（已尝试 {} 次）", p.attempts);
+    if let Some(error) = &p.last_error {
+      println!("    {error}");
+    }
+  }
+}
+
 async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
   match cmd {
     RouteCmd::Logs(args) => {
@@ -3719,6 +3742,10 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
           if let Some(note) = &r.note {
             println!("    备注：{note}");
           }
+          print_failover_pending(r);
+          if let Some(ttl) = r.spec.dns_ttl {
+            println!("    DNS TTL：{ttl}");
+          }
           for p in &r.spec.paths {
             println!(
               "    {}  →  {}",
@@ -3741,6 +3768,8 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       port,
       gateway,
       backup_gateway,
+      dns_ttl,
+      no_dns_ttl,
       auth,
       no_auth,
       paths,
@@ -3767,6 +3796,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         port,
         gateway,
         backup_gateway,
+        dns_ttl: dns_ttl.map(Some).or(no_dns_ttl.then_some(None)),
         auth: flag(auth, no_auth),
         paths: if no_paths {
           Some(vec![])
@@ -4157,6 +4187,7 @@ struct RouteAddArgs {
   port: Option<String>,
   gateway: Option<String>,
   backup_gateway: Option<String>,
+  dns_ttl: Option<Option<u32>>,
   auth: Option<bool>,
   paths: Option<Vec<PathRoute>>,
   tunnel: Option<bool>,
@@ -4192,6 +4223,7 @@ fn route_add_spec(
       port: None,
       gateway: None,
       backup_gateway: None,
+      dns_ttl: None,
       sso: None,
       auth: false,
       paths: vec![],
@@ -4234,6 +4266,9 @@ fn route_add_spec(
   }
   if let Some(b) = a.backup_gateway {
     spec.backup_gateway = (!b.is_empty()).then_some(b);
+  }
+  if let Some(ttl) = a.dns_ttl {
+    spec.dns_ttl = ttl;
   }
   if let Some(v) = a.auth {
     spec.auth = v;
@@ -5144,6 +5179,7 @@ mod tests {
         port: None,
         gateway: None,
         backup_gateway: Some("edge2".into()),
+        dns_ttl: Some(Some(120)),
         auth: None,
         paths: None,
         tunnel: None,
@@ -5152,6 +5188,7 @@ mod tests {
     )
     .unwrap_or_else(|_| panic!("应当成功"));
     assert_eq!(spec.backup_gateway.as_deref(), Some("edge2"));
+    assert_eq!(spec.dns_ttl, Some(120));
     assert!(spec.sso.is_some());
     assert_eq!(spec.paths.len(), 1);
     assert_eq!(spec.service, "blog");

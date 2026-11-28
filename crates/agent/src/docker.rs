@@ -15,7 +15,8 @@ use serde::Deserialize;
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
-    ContainerInfo, ImageInfo, InitRun, ProjectState, PullPolicy,
+    ContainerInfo, ImageInfo, InitRun, ProjectState, ProjectUpResult,
+    PullPolicy,
   },
   compose::parse_compose_max_grace_secs,
 };
@@ -165,6 +166,7 @@ impl Docker {
   pub async fn status(
     &self,
     projects: &[String],
+    include_links: bool,
     ctx: &Ctx,
   ) -> Result<Vec<ProjectState>, ApiError> {
     let out = self
@@ -183,6 +185,24 @@ impl Docker {
       .await?
       .check("docker ps")?;
     let mut by_project = parse_ps(&out.stdout);
+    let mut projects = projects.to_vec();
+    if include_links {
+      let discovered: Vec<_> = by_project
+        .iter()
+        .filter(|&(name, containers)| {
+          (name == "wharf-link" || name.starts_with("wharf-link-"))
+            && wharf_api_types::validate_name("project", name).is_ok()
+            && !projects.contains(name)
+            && containers.iter().any(|c| {
+              c.working_dir.as_deref().is_some_and(|dir| {
+                Path::new(dir) == self.project_dir(name)
+              })
+            })
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+      projects.extend(discovered);
+    }
     let stopped: Vec<_> = projects
       .iter()
       .filter_map(|p| by_project.get(p))
@@ -204,6 +224,17 @@ impl Docker {
             config_hash: read_trimmed(
               &dir.join("conf").join(CONFIG_HASH_FILE),
             ),
+            acme_dns_url_hash: project
+              .starts_with("wharf-gw-")
+              .then(|| {
+                std::fs::read_to_string(
+                  dir.join("conf").join("Caddyfile"),
+                )
+                .ok()
+              })
+              .flatten()
+              .as_deref()
+              .and_then(acme_dns_url_hash),
             containers: by_project
               .remove(project)
               .unwrap_or_default()
@@ -236,7 +267,8 @@ impl Docker {
     project: &str,
     ctx: &Ctx,
   ) -> Result<ProjectState, ApiError> {
-    let mut all = self.status(&[project.to_string()], ctx).await?;
+    let mut all =
+      self.status(&[project.to_string()], false, ctx).await?;
     Ok(all.remove(0))
   }
 
@@ -1088,6 +1120,34 @@ impl Docker {
     Ok(())
   }
 
+  pub async fn restart(
+    &self,
+    project: &str,
+    ctx: &Ctx,
+  ) -> Result<ProjectUpResult, ApiError> {
+    self
+      .compose(project)
+      .arg("restart")
+      .timeout(Duration::from_secs(180))
+      .stream(true)
+      .run(ctx)
+      .await?
+      .check("docker compose restart")?;
+    let containers = self.one_status(project, ctx).await?.containers;
+    let images = containers
+      .iter()
+      .map(|c| c.image.clone())
+      .collect::<std::collections::BTreeSet<_>>()
+      .into_iter()
+      .collect::<Vec<_>>();
+    Ok(ProjectUpResult {
+      images: self.image_info(&images, ctx).await,
+      containers,
+      warnings: vec![],
+      retired: vec![],
+    })
+  }
+
   /// `stop` 或 `start`。project 没部署过时什么也不做。
   pub async fn stop_start(
     &self,
@@ -1538,6 +1598,16 @@ pub fn write_private(
   file.write_all(content.as_bytes()).map_err(io_err(&tmp))?;
   file.sync_all().map_err(io_err(&tmp))?;
   std::fs::rename(&tmp, path).map_err(io_err(path))
+}
+
+fn acme_dns_url_hash(config: &str) -> Option<String> {
+  use sha2::{Digest, Sha256};
+  config.lines().find_map(|line| {
+    line
+      .strip_prefix("\t\t\tserver_url ")
+      .filter(|url| url.ends_with("/agent/acme-dns"))
+      .map(|url| hex::encode(Sha256::digest(url.as_bytes())))
+  })
 }
 
 fn read_trimmed(path: &Path) -> Option<String> {

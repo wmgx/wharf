@@ -48,13 +48,31 @@ pub(crate) fn default_url_from(
   s: &AppState,
   snap: &snapshot::Snapshot,
 ) -> Option<String> {
-  let found = candidates(s, snap);
-  found
-    .addresses
-    .iter()
-    .find(|a| a.kind == "route")
-    .map(|a| a.url.clone())
-    .or_else(|| s.public_url.clone())
+  default_url_with(
+    &snap.world,
+    &snap.net(&snap.world),
+    s.listen_port,
+    s.public_url.as_deref(),
+  )
+}
+
+pub(crate) fn default_url_with(
+  world: &World,
+  net: &Net,
+  port: u16,
+  public_url: Option<&str>,
+) -> Option<String> {
+  let own = own_ipv4s();
+  core_routes(world, net, net.core_server.as_deref(), &own, port)
+    .into_iter()
+    .next()
+    .map(|host| {
+      let gw = world
+        .live_gateway(&host, &world.routes[&host].spec)
+        .and_then(|name| world.gateways.get(name));
+      crate::views::route_url(&host, gw.map(|g| &g.spec))
+    })
+    .or_else(|| public_url.map(str::to_string))
 }
 
 fn candidates(

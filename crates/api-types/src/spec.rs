@@ -695,6 +695,8 @@ pub struct RouteSpec {
   /// DNS 自动切到它，主网关恢复后切回。caddy 备用入口在切过去后才申请证书。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub backup_gateway: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub dns_ttl: Option<u32>,
   /// 门禁。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub sso: Option<SsoSpec>,

@@ -629,6 +629,7 @@ fn acme_dns_key_only_in_dns_block() {
     &net,
     "edge",
     render::CaddyFill {
+      acme_dns_url: None,
       acme_dns: Some(render::AcmeDnsFill {
         key: "test-dns-secret",
         url: "https://core.example.test/",

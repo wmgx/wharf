@@ -38,8 +38,13 @@ pub fn alert_in_scope(
     {
       services.contains(service)
     } else {
-      matches!(rule_id, "domain_down" | "cert_expiring" | "failover")
-        && route_in_scope(services, world, subject)
+      matches!(
+        rule_id,
+        "domain_down"
+          | "cert_expiring"
+          | "failover"
+          | "failover_error"
+      ) && route_in_scope(services, world, subject)
     }
   })
 }
