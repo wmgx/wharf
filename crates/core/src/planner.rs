@@ -3676,6 +3676,48 @@ fn plaintext_hop(
 #[cfg(test)]
 mod tests {
   #[tokio::test]
+  async fn monitor_headers_require_upgraded_agent_during_plan() {
+    let state = crate::rules::tests::test_state();
+    let world = world();
+    let mut spec = world.services["app"].spec.clone();
+    spec.monitor = Some(wharf_api_types::spec::MonitorSpec {
+      headers: BTreeMap::from([(
+        "Host".into(),
+        "app.example.test".into(),
+      )]),
+      ..Default::default()
+    });
+    state.hub.mock_agent("s1", false, |_| {
+      panic!("能力不足时不应访问 agent")
+    });
+    let result = make_plan_inner(
+      &state,
+      PlanRequest {
+        changes: vec![wharf_api_types::spec::Change::UpsertService {
+          pins: None,
+          commit: None,
+          name: "app".into(),
+          spec,
+          adopt: None,
+        }],
+        ..Default::default()
+      },
+      Snapshot {
+        world,
+        ..Default::default()
+      },
+      false,
+      true,
+    )
+    .await;
+    let Some(error) = result.err() else {
+      panic!("旧 agent 应被拦下");
+    };
+    assert_eq!(error.code, wharf_api_types::ErrorCode::Conflict);
+    assert!(error.hint.unwrap().contains("wharf upgrade"));
+  }
+
+  #[tokio::test]
   async fn rollback_warning_skips_offline_server_and_new_gateway() {
     use wharf_api_types::spec::Change;
 

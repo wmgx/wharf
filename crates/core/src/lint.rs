@@ -706,6 +706,16 @@ services:
 
   #[test]
   fn plaintext_secret_warnings_never_echo_values() {
+    let spec = serde_json::from_value(json!({
+      "server": "s1",
+      "source": {"image": "app:1"},
+      "monitor": {"headers": {"Authorization": "Bearer fixture-header-value"}},
+    })).unwrap();
+    let warnings = service_warnings(&spec, false, &BTreeMap::new());
+    assert!(warnings.iter().any(|w| w.contains("Authorization")));
+    assert!(
+      !warnings.iter().any(|w| w.contains("fixture-header-value"))
+    );
     let password = concat!("abc", "12345");
     let url_password = concat!("p4ss", "w0rd");
     let url = format!("postgres://u:{url_password}@db/x");

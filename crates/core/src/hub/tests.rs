@@ -752,6 +752,10 @@ async fn backfill_ingests_without_clock_skew_and_rejects_duplicate_or_foreign_sa
       log_hits: vec![],
       metrics: Some(wharf_api_types::agent::Metrics {
         net_rx: 10,
+        projects: std::collections::BTreeMap::from([
+          ("app".into(), Default::default()),
+          ("foreign".into(), Default::default()),
+        ]),
         oom: (minutes == 5)
           .then(|| vec!["app".into(), "foreign".into()]),
         ..Default::default()
@@ -789,6 +793,10 @@ async fn backfill_ingests_without_clock_skew_and_rejects_duplicate_or_foreign_sa
       |r| Ok((r.get(0)?, r.get(1)?)),
     ).map_err(sql_err)?;
     assert_eq!((subject.as_str(), at), ("app", now - 5 * 60_000));
+    let subjects: String = c.query_row(
+      "SELECT group_concat(DISTINCT subject) FROM points WHERE name = 'svc.cpu'", [], |r| r.get(0),
+    ).map_err(sql_err)?;
+    assert_eq!(subjects, "app");
     let stored: Option<String> = c.query_row("SELECT report FROM agents WHERE server = 's1'", [], |r| r.get(0)).map_err(sql_err)?;
     assert!(stored.is_none());
     Ok(())

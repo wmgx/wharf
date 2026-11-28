@@ -1541,6 +1541,7 @@ async fn task_skips_when_service_stopped_and_catches_up_once_after_offline()
   state.db.call(move |c| {
     for (kind, name, spec) in [
       ("server", "s1", serde_json::json!({})),
+      ("server", "s2", serde_json::json!({})),
       ("service", "app", serde_json::json!({"server":"s1","source":{"image":"app:1"},"stopped":true})),
     ] {
       crate::db::apply_write(c, &crate::db::Write::Upsert { kind: kind.into(), name: name.into(), spec, meta: serde_json::json!({}) })?;
@@ -1556,6 +1557,16 @@ async fn task_skips_when_service_stopped_and_catches_up_once_after_offline()
     Ok(())
   }).await.unwrap();
   let expired = now - chrono::Duration::minutes(120);
+  let (_, mut spec, _) = load(&state)
+    .await
+    .unwrap()
+    .into_iter()
+    .find(|(name, ..)| name == "skipped")
+    .unwrap();
+  let world = snapshot::load(&state.db).await.unwrap().world;
+  assert_eq!(should_skip_stopped(&spec, &world), Some("app"));
+  spec.skip_if_stopped = false;
+  assert!(should_skip_stopped(&spec, &world).is_none());
   let local = expired
     .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
   let expired_spec = serde_json::json!({

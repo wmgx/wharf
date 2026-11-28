@@ -102,5 +102,31 @@ mod tests {
     let (samples, dropped) = buffer.peek_all(MAX_AGE_MS + 25);
     assert!(samples.is_empty());
     assert_eq!(dropped, 25);
+
+    buffer.clear();
+    for at_ms in 0..=5 {
+      let bytes = if at_ms == 5 {
+        MAX_SINGLE_BYTES + 1
+      } else {
+        MAX_SINGLE_BYTES - 1024
+      };
+      buffer.push(
+        BufferedSample {
+          at_ms,
+          metrics: None,
+          log_hits: vec![wharf_api_types::service_checks::LogHit {
+            id: "fixture".into(),
+            count: 1,
+            at: at_ms,
+            lines: vec!["x".repeat(bytes)],
+          }],
+        },
+        at_ms,
+      );
+    }
+    let (samples, dropped) = buffer.peek_all(5);
+    assert_eq!((samples[0].at_ms, samples.len(), dropped), (1, 5, 1));
+    assert!(buffer.bytes <= MAX_BYTES);
+    assert!(samples[4].log_hits[0].lines.is_empty());
   }
 }

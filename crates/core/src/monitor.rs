@@ -448,6 +448,10 @@ async fn monitor_sends_custom_headers_respects_interval_retries_and_redacts_secr
   assert!(outcome.0);
   assert_eq!(attempts.load(Ordering::Relaxed), 3);
   assert!(!outcome.1.contains("fixture-value"));
+  let invalid =
+    BTreeMap::from([("API_KEY".into(), "fixture-value\r\n".into())]);
+  let error = build_http_check(&row, m, &invalid).unwrap_err();
+  assert!(!error.contains("fixture-value"));
   spec
     .monitor
     .as_mut()
