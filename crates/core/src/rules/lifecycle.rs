@@ -253,8 +253,11 @@ pub(crate) async fn reconcile_world(
   let now = db::now_ms();
   let host_units =
     crate::host_units::watched_subjects(state, &snap.world).await?;
-  let core_backup_enabled =
-    state.db.call(crate::core_backup::target).await?.is_some();
+  let core_backup_enabled = state
+    .db
+    .call(|c| crate::core_backup::target(c))
+    .await?
+    .is_some();
   let external_pages =
     crate::external_status::enabled_names(state).await?;
   let tailnet = crate::tailnet_probe::addresses(&snap);

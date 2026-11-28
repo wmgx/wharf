@@ -135,7 +135,9 @@ pub fn restic_exclude_patterns(
   )
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(
+  Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
 pub struct BackupRunRequest {
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub keep: bool,

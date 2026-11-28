@@ -366,8 +366,8 @@ impl Hub {
   }
 
   pub fn supports_backup_v2(&self, server: &str) -> bool {
-    self
-      .conn(server)
+    lock(&self.conns)
+      .get(server)
       .is_some_and(|c| !c.upgrade_only && c.backup_v2)
   }
 

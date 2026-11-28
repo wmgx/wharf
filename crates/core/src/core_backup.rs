@@ -186,7 +186,7 @@ pub async fn show(
     crate::data::repo_verified_empty(&s, &snap, target, REPO, last_ok)
   });
   Ok(Json(CoreBackupView {
-    retention: s.db.call(retention).await?,
+    retention: s.db.call(|c| retention(c)).await?,
     user_key_current,
     repo_empty,
     to,
@@ -529,7 +529,7 @@ async fn backup_impl(
   require_standard_dir: bool,
 ) -> Result<(), ApiError> {
   options.validate()?;
-  let policy = state.db.call(retention).await?;
+  let policy = state.db.call(|c| retention(c)).await?;
   let (to, old_target) =
     state.db.call(|c| db::setting(c, TO)).await.map(|old| {
       (target.map(str::to_string).or_else(|| old.clone()), old)
@@ -922,7 +922,7 @@ async fn finish_backup(
   }
   // 清理旧快照失败不影响这次备份的结果。
   let pruned = async {
-    let policy = state.db.call(retention).await?;
+    let policy = state.db.call(|c| retention(c)).await?;
     if let Some(action) = backup::prune_action(
       state, REPO, &w.target, &w.server, policy, progress,
     )
