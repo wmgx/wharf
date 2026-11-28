@@ -1,7 +1,4 @@
-use std::{
-  collections::{BTreeMap, BTreeSet},
-  path::Path,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use wharf_api_types::{
   ApiError,
