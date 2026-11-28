@@ -52,7 +52,10 @@ ENV WHARF_DATA_DIR=/var/lib/wharf
 ENTRYPOINT ["wharf-agent"]
 CMD ["run"]
 
+FROM restic/restic:0.18.1@sha256:39d9072fb5651c80d75c7a811612eb60b4c06b32ffe87c2e9f3c7222e1797e76 AS restic
+
 FROM base AS core
+COPY --from=restic /usr/bin/restic /usr/local/bin/restic
 LABEL wharf.system=core
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git \

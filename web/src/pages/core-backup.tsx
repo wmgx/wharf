@@ -65,6 +65,7 @@ export function CoreBackup() {
               </Button>
             </div>
           </div>
+          {data.to && <p className="text-sm text-muted-foreground">保留 {data.retention?.daily ?? 7} 日 / {data.retention?.weekly ?? 4} 周 / {data.retention?.monthly ?? 6} 月</p>}
           {data.to && !data.user_key_current && <Notice kind="warn">登录密码恢复口令未同步，请点设置重新输入</Notice>}
           {data.restore_command && (
             <details className="text-sm">

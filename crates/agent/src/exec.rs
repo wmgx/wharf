@@ -265,6 +265,53 @@ impl Cmd {
     result.map(|()| bytes)
   }
 
+  pub(crate) async fn stdout_to(
+    self,
+    ctx: &Ctx,
+    limit: u64,
+    dest: &mut (impl tokio::io::AsyncWrite + Unpin),
+  ) -> Result<(Option<i32>, String), ApiError> {
+    let what = self.describe();
+    if ctx.cancel.is_cancelled() {
+      return Err(cancelled(&what));
+    }
+    let mut child = self
+      .command()
+      .spawn()
+      .map_err(|_| ApiError::internal("无法启动读取操作"))?;
+    let pid = child.id();
+    let stderr = child.stderr.take();
+    let mut stdout =
+      child.stdout.take().expect("已接管 stdout").take(limit + 1);
+    let read = async {
+      let bytes = tokio::io::copy(&mut stdout, dest)
+        .await
+        .map_err(|_| ApiError::internal("写入临时输出失败"))?;
+      if bytes > limit {
+        return Err(ApiError::invalid("备份文件或索引超过读取上限"));
+      }
+      child
+        .wait()
+        .await
+        .map(|status| status.code())
+        .map_err(|_| ApiError::internal("读取命令未完成"))
+    };
+    let streams = async {
+      tokio::try_join!(read, async {
+        Ok::<_, ApiError>(capture(stderr, None).await)
+      })
+    };
+    let result = tokio::select! {
+      result = streams => result,
+      _ = tokio::time::sleep(self.timeout) => Err(ApiError::new(ErrorCode::Timeout, "读取备份超时")),
+      _ = ctx.cancel.cancelled() => Err(cancelled(&what)),
+    };
+    if result.is_err() {
+      kill_group(pid, &mut child).await;
+    }
+    result
+  }
+
   pub async fn run(mut self, ctx: &Ctx) -> Result<Output, ApiError> {
     let what = self.describe();
     if ctx.cancel.is_cancelled() {

@@ -77,6 +77,33 @@ pub(super) const RULES: &[Rule] = &[
   service_checks::PORT,
   service_checks::HEARTBEAT,
   Rule {
+    id: "backup_spike",
+    name: "备份体积异常暴涨",
+    metric: "backup.spike_ratio",
+    op: Op::Ge,
+    threshold: 5.0,
+    threshold_editable: true,
+    for_n: 1,
+    mode: Mode::Consecutive,
+    recover: None,
+    every: "每次成功备份",
+    period_secs: 86_400,
+    default_level: AlertLevel::Digest,
+    key: |s| format!("backup.spike.{s}"),
+    fire: |c| {
+      ev(
+        format!("{} 的备份体积异常暴涨", c.subject),
+        c.detail.to_owned(),
+      )
+    },
+    ok: |c| {
+      ev(
+        format!("{} 的备份体积恢复正常", c.subject),
+        c.detail.to_owned(),
+      )
+    },
+  },
+  Rule {
     id: "traffic_quota",
     name: "流量快用完",
     metric: "traffic.used_pct",

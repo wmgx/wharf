@@ -552,6 +552,10 @@ pub struct AdoptSpec {
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 pub struct BackupSpec {
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub exclude: Vec<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub retention: Option<crate::backup::BackupRetention>,
   /// 备份存到哪台服务器，不能是服务所在的服务器。
   pub to: String,
 }

@@ -174,6 +174,8 @@ pub enum AgentMsg {
     #[serde(default)]
     safe_backup: bool,
     #[serde(default)]
+    backup_v2: bool,
+    #[serde(default)]
     build_v2: bool,
     #[serde(default)]
     safe_rollback: bool,
