@@ -164,6 +164,7 @@ pub(crate) struct BackupHistory {
   pub ok: Option<i64>,
   pub failed: Option<i64>,
   pub escaped: Vec<EscapedMount>,
+  pub(crate) moved_at: Option<i64>,
 }
 
 pub(crate) type History = BTreeMap<(String, String), BackupHistory>;
@@ -171,18 +172,32 @@ pub(crate) type History = BTreeMap<(String, String), BackupHistory>;
 pub(crate) async fn history(db: &Db) -> Result<History, ApiError> {
   db.call(|c| {
     let mut stmt = c.prepare(
-      "SELECT service, target, MAX(CASE WHEN ok THEN created_at END),
-              MAX(CASE WHEN NOT ok THEN created_at END),
+      "WITH arrivals(service, target, moved_at, previous_id) AS (
+         SELECT json_extract(value,'$.service'), json_extract(value,'$.target'),
+                json_extract(value,'$.moved_at'), json_extract(value,'$.previous_id')
+         FROM settings WHERE key GLOB 'backup_move.arrived.*'
+       ), repos AS (
+         SELECT service, target FROM backups
+         UNION SELECT service, target FROM arrivals
+       )
+       SELECT repos.service, repos.target, MAX(CASE WHEN b.ok THEN b.created_at END),
+              MAX(CASE WHEN NOT b.ok THEN b.created_at END),
               (SELECT body FROM backups AS latest
-               WHERE latest.service = backups.service AND latest.target = backups.target AND latest.ok
-               ORDER BY latest.id DESC LIMIT 1)
-       FROM backups GROUP BY service, target"
+               WHERE latest.service = repos.service AND latest.target = repos.target
+                 AND latest.ok AND latest.id > COALESCE(a.previous_id,0)
+               ORDER BY latest.id DESC LIMIT 1), a.moved_at
+       FROM repos LEFT JOIN arrivals a USING (service, target)
+       LEFT JOIN backups b ON b.service = repos.service AND b.target = repos.target
+         AND b.id > COALESCE(a.previous_id,0)
+       GROUP BY repos.service, repos.target"
     ).map_err(sql_err)?;
     let rows = stmt.query_map([], |r| {
       let summary: Option<String> = r.get(4)?;
       let escaped = summary.and_then(|s| serde_json::from_str::<BackupSummary>(&s).ok())
         .map(|s| s.escaped_mounts).unwrap_or_default();
-      Ok(((r.get(0)?, r.get(1)?), BackupHistory { ok: r.get(2)?, failed: r.get(3)?, escaped }))
+      Ok(((r.get(0)?, r.get(1)?), BackupHistory {
+        ok: r.get(2)?, failed: r.get(3)?, escaped, moved_at: r.get(5)?,
+      }))
     }).map_err(sql_err)?;
     rows.collect::<Result<_, _>>().map_err(sql_err)
   }).await
@@ -193,12 +208,14 @@ pub(crate) fn repo_verified_empty(
   snap: &Snapshot,
   target: &str,
   service: &str,
-  last_ok: Option<i64>,
+  history: Option<&BackupHistory>,
 ) -> bool {
+  // 迁仓继承原备份时间，给目标机上报单独留宽限。
+  let anchor = history.and_then(|h| h.ok.max(h.moved_at));
   state.hub.is_online(target)
     && snap.agent(target).is_some_and(|agent| {
       agent.last_seen.is_some_and(|seen| {
-        last_ok.is_none_or(|ok| seen >= ok.saturating_add(120_000))
+        anchor.is_none_or(|at| seen >= at.saturating_add(120_000))
       }) && agent
         .report
         .as_ref()
@@ -279,7 +296,7 @@ pub async fn overview(
     let last_failed = from_ms(observed.and_then(|h| h.failed));
     let repo_empty = !mounts.is_empty()
       && target.as_ref().is_some_and(|t| {
-        repo_verified_empty(state, &snap, t, name, ok)
+        repo_verified_empty(state, &snap, t, name, observed)
       });
     let status = if repo_empty {
       DataStatus::Stale

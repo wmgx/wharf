@@ -678,6 +678,12 @@ pub fn backups(v: &BackupsView) {
       }
     }
   }
+  if let Some(p) = &v.pending_move {
+    println!(
+      "仓库迁移待续传：{} → {}（{} 份快照，{}）",
+      p.from, p.to, p.source_snapshots, p.phase
+    );
+  }
   if let Some(e) = &v.snapshots_error {
     println!("读取快照失败：{e}");
   }
@@ -908,6 +914,12 @@ mod link;
 pub use link::rotate_link;
 
 pub fn core_backup(v: &serde_json::Value) {
+  if let (Some(from), Some(to)) = (
+    v["pending_move"]["from"].as_str(),
+    v["pending_move"]["to"].as_str(),
+  ) {
+    println!("控制面仓库迁移待续传：{from} → {to}");
+  }
   if let Some(to) = v["to"].as_str() {
     println!("控制面每天备份到 {to}");
     backup_policy(

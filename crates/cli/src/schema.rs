@@ -125,6 +125,17 @@ fn entries() -> BTreeMap<&'static str, Schema> {
     ("alerts", schema_for!(view::AlertsView)),
     ("task", schema_for!(view::TaskView)),
     ("task_run", schema_for!(view::TaskRunView)),
+    ("apply_response", schema_for!(plan::ApplyResponse)),
+    ("backup_move_preview", schema_for!(view::BackupMovePreview)),
+    ("backup_move_abort", schema_for!(view::BackupMoveAbort)),
+    (
+      "core_backup_verify",
+      schema_for!(view::CoreBackupVerifyView),
+    ),
+    (
+      "core_backup_export",
+      schema_for!(view::CoreBackupExportResult),
+    ),
     ("backup", schema_for!(view::BackupsView)),
     ("backup_ls", schema_for!(backup::BackupLsView)),
     ("backup_extract", schema_for!(backup::BackupExtractResult)),

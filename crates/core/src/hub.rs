@@ -93,6 +93,7 @@ struct Conn {
   migrate_v2: bool,
   data_ops: bool,
   safe_backup: bool,
+  backup_move: bool,
   backup_v2: bool,
   build_v2: bool,
   deploy_v2: bool,
@@ -422,6 +423,12 @@ impl Hub {
       return Err(safe_migrate_required(server));
     }
     Ok(())
+  }
+
+  pub fn supports_backup_move(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|c| !c.upgrade_only && c.backup_move)
   }
 
   pub fn supports_backup_v2(&self, server: &str) -> bool {
@@ -910,12 +917,10 @@ impl Hub {
     {
       return Err(safe_adopt_required(server));
     }
-    if (matches!(
-      &op,
-      AgentOp::SyncServe(_)
-        | AgentOp::SyncPush(_)
-        | AgentOp::ProjectMounts { .. }
-    ) || matches!(&op, AgentOp::ProjectUp(up) if up.no_start && !up.pull_missing_only))
+    if (matches!(&op, AgentOp::SyncServe(job) if job.kind.is_service_data())
+      || matches!(&op, AgentOp::SyncPush(job) if job.kind.is_service_data())
+      || matches!(&op, AgentOp::ProjectMounts { .. })
+      || matches!(&op, AgentOp::ProjectUp(up) if up.no_start && !up.pull_missing_only))
       && (conn.upgrade_only || !conn.safe_migrate)
     {
       return Err(safe_migrate_required(server));
@@ -1012,6 +1017,19 @@ impl Hub {
     ) && (conn.upgrade_only || !conn.shared_volumes)
     {
       return Err(shared_volumes_required(server));
+    }
+    use wharf_api_types::agent::{ResticAction, ResticRepo};
+    let needs_backup_move = match &op {
+      AgentOp::SyncServe(job) => !job.kind.is_service_data(),
+      AgentOp::SyncPush(job) => !job.kind.is_service_data(),
+      AgentOp::Restic(job) => {
+        matches!(job.repo, ResticRepo::LocalCore)
+          || matches!(job.action, ResticAction::RepoNonempty)
+      }
+      _ => false,
+    };
+    if needs_backup_move && (conn.upgrade_only || !conn.backup_move) {
+      return Err(crate::backup_move::old_agent(server));
     }
     if let AgentOp::Restic(job) = &op
       && job.action.needs_backup_v2()
@@ -1414,6 +1432,7 @@ async fn handle_socket(
     migrate_v2,
     data_ops,
     safe_backup,
+    backup_move,
     backup_v2,
     build_v2,
     deploy_v2,
@@ -1596,6 +1615,7 @@ async fn handle_socket(
     migrate_v2,
     data_ops,
     safe_backup,
+    backup_move,
     backup_v2,
     build_v2,
     deploy_v2,

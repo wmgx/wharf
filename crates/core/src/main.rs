@@ -20,6 +20,7 @@ mod audit;
 mod auth;
 mod auto_update;
 mod backup;
+mod backup_move;
 mod baseline;
 mod build;
 mod bundle;
@@ -34,6 +35,7 @@ mod cloudflare_ips;
 mod config_api;
 mod connect;
 mod core_backup;
+mod core_export;
 mod core_node;
 mod core_restore;
 mod cron;
@@ -188,7 +190,7 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-  /// 恢复控制面的异地备份。
+  /// 从异地仓库或离线加密灾备包恢复控制面。
   Restore(core_restore::Args),
   /// 控制面已停止时查看或恢复本机数据库热快照。
   #[command(subcommand)]
@@ -320,6 +322,7 @@ async fn main() -> anyhow::Result<()> {
   cloudflare_ips::spawn(state.db.clone());
   tailnet_ips::spawn(state.db.clone());
   core_backup::cleanup_staged(&state.data_dir);
+  core_export::cleanup_stale(&state.data_dir);
   apply::recover(&state).await?;
   shell::recover(&state).await?;
   tasks::recover(&state).await?;

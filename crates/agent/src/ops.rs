@@ -344,10 +344,22 @@ impl Ops {
       ),
       AgentOp::SyncServe(s) => {
         check_project(&s.service)?;
-        let _guard = self.lock_data(&s.service, ctx).await?;
-        crate::sync::serve(&s, ctx).await
+        if s.kind.is_service_data() {
+          let _guard = self.lock_data(&s.service, ctx).await?;
+          crate::sync::serve(&s, ctx).await
+        } else {
+          let _guard = self.lock_backup_repo(&s.service, ctx).await?;
+          crate::sync::serve(&s, ctx).await
+        }
       }
-      AgentOp::SyncPush(p) => crate::sync::push(&p, ctx).await,
+      AgentOp::SyncPush(p) => {
+        let _guard = if p.kind.is_service_data() {
+          None
+        } else {
+          Some(self.lock_backup_repo(&p.service, ctx).await?)
+        };
+        crate::sync::push(&p, ctx).await
+      }
       AgentOp::AdoptDataInspect(job) => to_value(
         crate::adopt_data::inspect(
           &self.docker,
@@ -690,16 +702,6 @@ impl Ops {
     ))
   }
 
-  pub(crate) fn cleanup_repo_lock(
-    &self,
-    key: &str,
-  ) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>, ApiError> {
-    self
-      .restic_lock(format!("local:{key}"))
-      .try_write_owned()
-      .map_err(|_| ApiError::new(ErrorCode::Busy, "备份仓库正在使用"))
-  }
-
   fn restic_lock(&self, key: String) -> Arc<tokio::sync::RwLock<()>> {
     self
       .restic_locks
@@ -708,6 +710,51 @@ impl Ops {
       .entry(key)
       .or_default()
       .clone()
+  }
+
+  async fn lock_backup_repo(
+    &self,
+    service: &str,
+    ctx: &Ctx,
+  ) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>, ApiError> {
+    check_project(service)?;
+    let busy = || {
+      ApiError::new(
+        ErrorCode::Busy,
+        format!("{service} 的备份仓库正在使用"),
+      )
+    };
+    let guard = self
+      .restic_lock(format!("local:{service}"))
+      .try_write_owned()
+      .map_err(|_| busy())?;
+    let output = self
+      .docker
+      .cmd()
+      .args([
+        "ps",
+        "-q",
+        "--filter",
+        &format!("label=wharf.restic.service={service}"),
+      ])
+      .timeout(Duration::from_secs(30))
+      .run(ctx)
+      .await?
+      .check("docker ps")?;
+    if !output.stdout.trim().is_empty() {
+      return Err(busy());
+    }
+    Ok(guard)
+  }
+
+  pub(crate) fn cleanup_repo_lock(
+    &self,
+    key: &str,
+  ) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>, ApiError> {
+    self
+      .restic_lock(format!("local:{key}"))
+      .try_write_owned()
+      .map_err(|_| ApiError::new(ErrorCode::Busy, "备份仓库正在使用"))
   }
 
   async fn restic(
@@ -733,7 +780,7 @@ impl Ops {
       _ => {}
     }
     let scope = match &job.repo {
-      ResticRepo::Local => "local",
+      ResticRepo::Local | ResticRepo::LocalCore => "local",
       ResticRepo::Rest { .. } => "rest",
     };
     let lock = self.restic_lock(format!("{scope}:{}", job.service));
@@ -750,6 +797,7 @@ impl Ops {
       &job.action,
       ResticAction::Snapshots
         | ResticAction::ListKeys
+        | ResticAction::RepoNonempty
         | ResticAction::Preflight(_)
         | ResticAction::Ls { .. }
         | ResticAction::ExtractPrepare { .. }

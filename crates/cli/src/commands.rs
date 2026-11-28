@@ -1283,11 +1283,41 @@ pub(crate) async fn wait_run(
   j: bool,
   mask: &[String],
 ) -> CliResult<Run> {
-  let mut printed: Vec<(usize, bool)> = Vec::new();
+  wait_run_with_interrupt(c, run_id, j, mask, false).await
+}
+
+async fn wait_run_with_interrupt(
+  c: &Client,
+  run_id: &str,
+  j: bool,
+  mask: &[String],
+  cancel_on_interrupt: bool,
+) -> CliResult<Run> {
   let path = format!("/api/runs/{}", seg(run_id));
+  wait_run_until(
+    run_id,
+    j,
+    mask,
+    cancel_on_interrupt,
+    || c.get(&path),
+    tokio::signal::ctrl_c(),
+  )
+  .await
+}
+
+async fn wait_run_until<F: Future<Output = CliResult<Run>>>(
+  run_id: &str,
+  j: bool,
+  mask: &[String],
+  cancel_on_interrupt: bool,
+  mut fetch: impl FnMut() -> F,
+  interrupt: impl Future,
+) -> CliResult<Run> {
+  let mut printed: Vec<(usize, bool)> = Vec::new();
+  tokio::pin!(interrupt);
   let mut retries = 0;
   let interrupted = || {
-    if !j && !print::is_quiet() {
+    if !j && !print::is_quiet() && !cancel_on_interrupt {
       eprintln!(
         "已停止等待，执行仍在继续。取消：wharf run cancel {run_id}"
       );
@@ -1296,8 +1326,9 @@ pub(crate) async fn wait_run(
   };
   loop {
     let result: CliResult<Run> = tokio::select! {
-      r = c.get(&path) => r,
-      _ = tokio::signal::ctrl_c() => return Err(interrupted()),
+      biased;
+      _ = &mut interrupt => return Err(interrupted()),
+      r = fetch() => r,
     };
     let mut run = match result {
       Ok(run) => {
@@ -1310,7 +1341,7 @@ pub(crate) async fn wait_run(
         retries += 1;
         tokio::select! {
           _ = tokio::time::sleep(Duration::from_secs(retries.min(3))) => {}
-          _ = tokio::signal::ctrl_c() => return Err(interrupted()),
+          _ = &mut interrupt => return Err(interrupted()),
         }
         continue;
       }
@@ -1352,7 +1383,11 @@ pub(crate) async fn wait_run(
     if run.status.finished() {
       return Ok(run);
     }
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    tokio::select! {
+      biased;
+      _ = &mut interrupt => return Err(interrupted()),
+      _ = tokio::time::sleep(Duration::from_millis(800)) => {}
+    }
   }
 }
 
@@ -6102,6 +6137,92 @@ async fn backup(
       });
       Ok(())
     }
+    BackupCmd::Move {
+      service,
+      core,
+      to,
+      from,
+      dry_run,
+      abort,
+      confirm,
+      no_wait,
+    } => {
+      let path = if core {
+        "/api/core-backup/move".into()
+      } else {
+        let name = service
+          .ok_or_else(|| ApiError::invalid("请指定服务或 --core"))?;
+        format!("/api/services/{}/backups/move", seg(&name))
+      };
+      let body = json!({"from": from, "to": to, "dry_run": dry_run, "abort": abort, "confirm": confirm});
+      let timeout = Duration::from_secs(8 * 60);
+      if dry_run {
+        let view: wharf_api_types::view::BackupMovePreview =
+          c.post_timeout(&path, &body, timeout).await?;
+        out(j, &view, |v| {
+          println!(
+            "{}：{} → {}，源快照 {} 份",
+            v.service, v.from, v.to, v.source_snapshots
+          );
+          if v.resuming {
+            println!("将从上次进度续传");
+          }
+          if let Some(confirm) = &v.confirm {
+            println!(
+              "{}，请添加 --confirm {confirm}",
+              v.hint.as_deref().unwrap_or_default()
+            );
+          }
+        });
+      } else if abort {
+        let view: wharf_api_types::view::BackupMoveAbort =
+          c.post(&path, &body).await?;
+        out(j, &view, |v| {
+          println!("已放弃 {} 的续传进度，两端仓库已保留", v.service)
+        });
+      } else {
+        let result: ApplyResponse =
+          c.post_timeout(&path, &body, timeout).await?;
+        if no_wait {
+          finish_task(c, &result.run_id, false, j).await?;
+        } else {
+          let run = match wait_run_with_interrupt(
+            c,
+            &result.run_id,
+            j,
+            &[],
+            true,
+          )
+          .await
+          {
+            Err(CliError::Exit(130)) => {
+              let path =
+                format!("/api/runs/{}/cancel", seg(&result.run_id));
+              c.post_timeout::<_, Value>(
+                &path,
+                &json!({}),
+                Duration::from_secs(15),
+              )
+              .await?;
+              return Err(
+                ApiError::new(
+                  ErrorCode::Cancelled,
+                  "已请求取消备份迁移",
+                )
+                .with_hint("取消结束后重跑原命令续传")
+                .into(),
+              );
+            }
+            result => result?,
+          };
+          out(j, &run, print::run_summary);
+          if run.status != RunStatus::Succeeded {
+            return Err(CliError::Exit(4));
+          }
+        }
+      }
+      Ok(())
+    }
     BackupCmd::Enable {
       service,
       to,
@@ -6339,14 +6460,17 @@ async fn backup(
       ref to,
       run,
       unlock,
+      verify_password,
+      export,
       ..
-    } if retention.edited() && (to.is_some() || run || unlock) => {
-      Err(
-        ApiError::invalid(
-          "修改保留策略需单独执行，不能同时启用、解锁或运行备份",
-        )
-        .into(),
-      )
+    } if retention.edited()
+      && (to.is_some()
+        || run
+        || unlock
+        || verify_password
+        || export) =>
+    {
+      Err(ApiError::invalid("修改保留策略需单独执行").into())
     }
     BackupCmd::Core {
       unlock: true,
@@ -6364,6 +6488,47 @@ async fn backup(
       });
       Ok(())
     }
+    BackupCmd::Core {
+      verify_password: true,
+      ..
+    } => {
+      let password = read_secret("控制面登录密码：")?;
+      let v: wharf_api_types::view::CoreBackupVerifyView = c
+        .post_timeout(
+          "/api/core-backup/verify-password",
+          &json!({"password": password}),
+          Duration::from_secs(390),
+        )
+        .await?;
+      out(j, &v, |v| {
+        let status = |ok| if ok { "✓" } else { "✗" };
+        println!(
+          "{} ({})  登录密码 {}  HTTP 认证 {}  仓库解密 {}  快照 {} 份",
+          v.target,
+          v.username,
+          status(v.login_password_ok),
+          status(v.htpasswd_ok),
+          status(v.repo_decrypt_ok),
+          v.snapshot_count
+        );
+        if let Some(latest) = &v.latest_snapshot {
+          println!("最新快照 {}  {}", latest.short_id, latest.time);
+        }
+        if let Some(error) = &v.error {
+          println!("{error}");
+        }
+        if let Some(hint) = &v.hint {
+          println!("{hint}");
+        }
+      });
+      if v.ok { Ok(()) } else { Err(CliError::Exit(1)) }
+    }
+    BackupCmd::Core {
+      export: true,
+      output,
+      force,
+      ..
+    } => crate::core_export::download(c, output, force, j).await,
     BackupCmd::Core { to: Some(to), .. } => {
       let password = read_secret("登录密码（会成为恢复口令）：")?;
       let r: ApplyResponse = c
@@ -6594,6 +6759,41 @@ fn parse_volume_arg(raw: &str) -> Result<VolumeSpec, ApiError> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn backup_move_wait_is_interruptible_between_polls() {
+    let polls = std::cell::Cell::new(0);
+    let run = Run {
+      run_id: "r1".into(),
+      plan_id: "p1".into(),
+      status: RunStatus::Running,
+      started_at: chrono::Utc::now(),
+      actor: None,
+      retry_of: None,
+      finished_at: None,
+      steps: vec![],
+    };
+    let result = tokio::time::timeout(
+      Duration::from_secs(2),
+      wait_run_until(
+        "r1",
+        true,
+        &[],
+        true,
+        || {
+          polls.set(polls.get() + 1);
+          std::future::ready(Ok(run.clone()))
+        },
+        async {
+          tokio::task::yield_now().await;
+          assert_eq!(polls.get(), 1);
+        },
+      ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(CliError::Exit(130))));
+  }
 
   #[test]
   fn source_switch_refreshes_compose_ports_only_when_requested() {

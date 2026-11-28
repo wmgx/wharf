@@ -309,6 +309,18 @@ async fn require_retry_access(
   }
   for step in steps {
     match &step.step {
+      Step::BackupMove {
+        is_core,
+        replace_target,
+        ..
+      } => {
+        if *is_core {
+          auth.require(Perm::Admin).map_err(|e| e.0)?;
+        }
+        if *replace_target {
+          auth.require(Perm::Confirm).map_err(|e| e.0)?;
+        }
+      }
       Step::CoreBackup { .. }
       | Step::CleanupData { .. }
       | Step::CleanupArchive { .. } => {
