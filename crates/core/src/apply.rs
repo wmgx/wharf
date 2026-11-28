@@ -379,10 +379,15 @@ pub(crate) async fn start_with_actor(
             .map_err(json_err)
         })
         .transpose()?;
+      if let Some(spec) = &next
+        && crate::project_files::exec_changed(previous, spec)
+      {
+        crate::auth::require_perm(perms, Perm::Exec)?;
+      }
       if let Some(spec) = next.as_ref().or(previous)
-        && (spec.volumes.iter().any(|v| v.owner.is_some())
+        && (crate::project_files::needs_agent(spec)
           || previous.is_some_and(|old| {
-            old.volumes.iter().any(|v| v.owner.is_some())
+            crate::project_files::needs_agent(old)
           }))
       {
         state.hub.project_files_conn_id(&spec.server)?;
@@ -1680,6 +1685,7 @@ async fn run_step_with_dns(
       service,
       expect,
       instance_id,
+      refresh_files_from,
     } => {
       check_step_instance(world, service, instance_id.as_deref())?;
       let migration =
@@ -1712,6 +1718,7 @@ async fn run_step_with_dns(
         service,
         false,
         expect.as_deref(),
+        refresh_files_from.as_deref(),
         progress.clone(),
         cancel,
       )
@@ -1750,7 +1757,8 @@ async fn run_step_with_dns(
     Step::Rebuild { service } => {
       crate::build::require_not_migrating(&snap, service)?;
       service_up(
-        state, run_id, &snap, service, true, None, progress, cancel,
+        state, run_id, &snap, service, true, None, None, progress,
+        cancel,
       )
       .await?;
     }
@@ -2015,6 +2023,8 @@ async fn run_step_with_dns(
               project_env: None,
               host_binds: Vec::new(),
               volume_owners: Default::default(),
+              project_files: Vec::new(),
+              refresh_files_from: None,
             },
             caddyfile: r.config,
             caddyfile_hash: r.config_hash,
@@ -2133,6 +2143,8 @@ async fn run_step_with_dns(
         project_env: None,
         host_binds: Vec::new(),
         volume_owners: Default::default(),
+        project_files: Vec::new(),
+        refresh_files_from: None,
       };
       let op = match p.reload {
         Some(r) => {
@@ -2190,6 +2202,8 @@ async fn run_step_with_dns(
             project_env: None,
             host_binds: Vec::new(),
             volume_owners: Default::default(),
+            project_files: Vec::new(),
+            refresh_files_from: None,
           }),
           GATEWAY_TIMEOUT,
           Some(progress),
@@ -2870,6 +2884,7 @@ fn should_trial(
 ) -> bool {
   rollback
     && spec.networks.is_empty()
+    && !crate::project_files::needs_agent(spec)
     && !matches!(spec.source, Source::Compose { .. })
     && !spec.stopped
     && !spec.ports.is_empty()
@@ -2886,6 +2901,7 @@ async fn service_up(
   service: &str,
   force: bool,
   expect: Option<&str>,
+  refresh_files_from: Option<&str>,
   progress: ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
@@ -2898,11 +2914,7 @@ async fn service_up(
     )
   })?;
   let server = &row.spec.server;
-  let files_conn = row
-    .spec
-    .volumes
-    .iter()
-    .any(|v| v.owner.is_some())
+  let files_conn = crate::project_files::needs_agent(&row.spec)
     .then(|| state.hub.project_files_conn_id(server))
     .transpose()?;
   let bind_conn = row
@@ -3061,6 +3073,13 @@ async fn service_up(
       "提醒：服务器 {server} 的 agent 版本较旧，自定义启动上限和就绪探活暂未生效，请运行 wharf upgrade 升级"
     ));
   }
+  let project_files = crate::project_files::resolved(
+    world,
+    &net,
+    service,
+    &compose,
+    &snap.render_values(world, service),
+  )?;
   let op = AgentOp::ProjectUp(ProjectUp {
     project: service.to_string(),
     compose,
@@ -3084,6 +3103,8 @@ async fn service_up(
     trial,
     init,
     networks: row.spec.networks.clone(),
+    project_files,
+    refresh_files_from: refresh_files_from.map(str::to_string),
     volume_owners: row
       .spec
       .volumes
@@ -3958,6 +3979,7 @@ mod tests {
       service: "notes".into(),
       instance_id: None,
       expect: None,
+      refresh_files_from: None,
     };
     assert!(
       run_step(
@@ -4021,6 +4043,7 @@ mod tests {
       Step::ServiceUp {
         service: "notes".into(),
         expect: None,
+        refresh_files_from: None,
         instance_id: None,
       },
     ]
@@ -4098,6 +4121,7 @@ mod tests {
       service: "notes".into(),
       instance_id: None,
       expect: None,
+      refresh_files_from: None,
     };
     let error =
       run_step(&state, "r1", &up, progress.clone(), &cancel)
@@ -4125,6 +4149,7 @@ mod tests {
       service: "notes".into(),
       instance_id: None,
       expect: None,
+      refresh_files_from: None,
     };
     state.hub.mock_agent("s2", false, |_| {
       panic!("不能对旧 agent 部署停机服务")
@@ -4650,12 +4675,14 @@ mod tests {
         instance_id: None,
         service: "web".into(),
         expect: None,
+        refresh_files_from: None,
       }
     );
     let with = serde_json::to_string(&Step::ServiceUp {
       instance_id: None,
       service: "web".into(),
       expect: Some("h".into()),
+      refresh_files_from: None,
     })
     .unwrap();
     assert!(with.contains(r#""expect":"h""#));

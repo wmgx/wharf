@@ -1171,7 +1171,7 @@ impl Hub {
         progress(crate::build::old_agent_warning(server));
       }
     }
-    if matches!(&op, AgentOp::ProjectUp(up) if !up.volume_owners.is_empty())
+    if matches!(&op, AgentOp::ProjectUp(up) if !up.volume_owners.is_empty() || !up.project_files.is_empty())
       && (conn.upgrade_only || !conn.project_files_v1)
     {
       return Err(old_project_files_agent(server));

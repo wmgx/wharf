@@ -535,6 +535,9 @@ fn resolve_service(
     }
     None => render::hash(&resolved),
   };
+  let hash = crate::project_files::fingerprint(
+    world, net, name, secrets, hash,
+  )?;
   let owners: BTreeMap<_, _> = row
     .spec
     .volumes
@@ -648,7 +651,7 @@ pub(crate) fn with_files(
       Ok((f.path.clone(), content))
     })
     .collect::<Result<Vec<_>, ApiError>>()?;
-  render::add_files(
+  let compose = render::add_files(
     name,
     spec,
     compose,
@@ -656,7 +659,8 @@ pub(crate) fn with_files(
     file_secrets,
     mounts,
     secrets,
-  )
+  )?;
+  crate::project_files::compose(name, spec, compose)
 }
 
 pub fn service_template(
@@ -1617,6 +1621,10 @@ mod tests {
       path: "/etc/app/conf.toml".into(),
       content: "pass_file = \"[[FILE:DB_PASS]]\"\n".into(),
       raw: false,
+      init_only: false,
+      mode: None,
+      owner: None,
+      on_change: None,
     });
     let net = Net::default();
     let secrets =

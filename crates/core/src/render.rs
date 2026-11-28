@@ -1546,6 +1546,13 @@ pub fn add_files(
       _ => name.to_string(),
     };
     for (i, (path, content)) in files.iter().enumerate() {
+      if spec
+        .files
+        .iter()
+        .any(|spec| spec.path == *path && spec.managed_dir())
+      {
+        continue;
+      }
       let content = content.replace('$', "$$");
       let id = format!("wharf-file-{i}-{}", &hash(&content)[..12]);
       add(&target, id, path.clone(), content)?;
@@ -1632,7 +1639,24 @@ pub fn add_files(
           )));
         }
       }
-      list.push(serde_yaml_ng::to_value(entry).map_err(|_| bad())?);
+      let file =
+        spec.files.iter().find(|file| file.path == entry.target);
+      let mut value =
+        serde_yaml_ng::to_value(entry).map_err(|_| bad())?;
+      if let Some(file) = file {
+        if let Some((uid, gid)) = file
+          .owner
+          .as_deref()
+          .and_then(wharf_api_types::spec::parse_uid_gid)
+        {
+          value["uid"] = Value::String(uid.to_string());
+          value["gid"] = Value::String(gid.to_string());
+        }
+        if let Some(mode) = &file.mode {
+          value["mode"] = Value::String(mode.clone());
+        }
+      }
+      list.push(value);
     }
   }
   let head = if compose.starts_with('#') {

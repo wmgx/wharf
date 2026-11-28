@@ -28,6 +28,7 @@ mod gateway_probe;
 mod host_binds;
 mod link;
 mod named_networks;
+mod project_files;
 mod validation;
 mod volume_owner;
 use validation::{
@@ -958,10 +959,12 @@ impl Ops {
           .transpose()?
           .as_deref(),
       )?;
+      let verify_files =
+        up.project_files.iter().any(|f| f.directory.is_none());
       self
         .up_with_crash_logs(
           &up.project,
-          up.no_start || !up.host_binds.is_empty(),
+          up.no_start || verify_files || !up.host_binds.is_empty(),
           previous_grace,
           ctx,
         )
@@ -974,9 +977,12 @@ impl Ops {
           ctx,
         )
         .await?;
-        if !up.no_start {
-          self.docker.stop_start(&up.project, true, ctx).await?;
-        }
+      }
+      if verify_files {
+        project_files::verify_metadata(&self.docker, up, ctx).await?;
+      }
+      if !up.no_start && (verify_files || !up.host_binds.is_empty()) {
+        self.docker.stop_start(&up.project, true, ctx).await?;
       }
       let state = if up.no_start {
         let mut state =
@@ -1088,6 +1094,10 @@ impl Ops {
     up: &ProjectUp,
     ctx: &Ctx,
   ) -> Result<ProjectUpResult, ApiError> {
+    if let Some(from) = &up.refresh_files_from {
+      return project_files::refresh(&self.docker, up, from, ctx)
+        .await;
+    }
     host_binds::validate_sources(&self.docker, &up.host_binds, ctx)
       .await?;
     named_networks::ensure(&self.docker, &up.networks, true, ctx)
@@ -1193,6 +1203,7 @@ impl Ops {
         self.restore_before_up(previous.as_ref(), ctx, error).await,
       );
     }
+    let files = project_files::prepare(&self.docker, up, ctx).await?;
     if let Some(init) = &up.init {
       let old_env = self.docker.read_project_env(&up.project)?;
       self.docker.write_compose(&up.project, &up.compose)?;
@@ -1249,7 +1260,10 @@ impl Ops {
       .finish_up(up, &images, warnings, previous, previous_grace, ctx)
       .await
     {
-      Ok(result) => Ok(ProjectUpResult { retired, ..result }),
+      Ok(result) => {
+        files.commit();
+        Ok(ProjectUpResult { retired, ..result })
+      }
       Err(e) if !retired.is_empty() => {
         ctx.say("启动失败，恢复原来的容器");
         let recover = ctx.detached_with_progress();

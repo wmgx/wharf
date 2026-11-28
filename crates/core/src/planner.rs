@@ -132,6 +132,8 @@ pub enum Step {
     /// 计划时渲染出的 compose 指纹，执行前重算比对；没有这个字段的旧计划不校验。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     expect: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refresh_files_from: Option<String>,
   },
   GatewaySync {
     gateway: String,
@@ -1210,9 +1212,9 @@ pub(crate) async fn make_plan_inner(
   for step in &b.steps {
     if let Step::ServiceUp { service, .. } = &step.step
       && let Some(row) = desired.services.get(service)
-      && (row.spec.volumes.iter().any(|v| v.owner.is_some())
+      && (crate::project_files::needs_agent(&row.spec)
         || current.services.get(service).is_some_and(|old| {
-          old.spec.volumes.iter().any(|v| v.owner.is_some())
+          crate::project_files::needs_agent(&old.spec)
         }))
     {
       state.hub.project_files_conn_id(&row.spec.server)?;
@@ -1471,6 +1473,21 @@ fn spec_json(world: &World, kind: &str, name: &str) -> Option<Value> {
     KIND_SERVICE => world.services.get(name).map(|r| {
       let mut v =
         to_json(&crate::service_monitor::heartbeat::redact(&r.spec));
+      if let Some(files) =
+        v.get_mut("files").and_then(Value::as_array_mut)
+      {
+        for file in files {
+          if let Some(command) = file["on_change"]
+            .as_str()
+            .and_then(|value| value.strip_prefix("exec:"))
+          {
+            file["on_change"] = json!(format!(
+              "exec:{}",
+              crate::redact::redact_command(command)
+            ));
+          }
+        }
+      }
       v["host_ports"] = json!(r.host_ports);
       v
     }),
@@ -2018,6 +2035,42 @@ fn service_items(
     let template = snapshot::service_template(desired, net, name)?;
     let after =
       Some(json!({ "server": server, "compose": template }));
+    if moved.is_none()
+      && upgrade.is_none()
+      && let Some(old) = old
+      && crate::project_files::only_managed_changed(
+        &old.spec, &svc.spec,
+      )
+      && let Some(state) = live
+      && !state.containers.is_empty()
+      && state.containers.iter().all(|c| !c.foreign)
+      && let Some(previous) =
+        state.hash.as_ref().filter(|old| **old != hash)
+      && deployed_template(current, net, name, snap.applied.get(name))
+        .as_deref()
+        == Some(template.as_str())
+    {
+      let id = b.item(
+        address.clone(),
+        Layer::Container,
+        Action::Update,
+        Some(json!({ "hash": previous })),
+        after.clone(),
+        Vec::new(),
+        "重载配置文件",
+      );
+      b.step(
+        vec![id],
+        format!("在 {server} 上更新 {name} 的配置文件"),
+        Step::ServiceUp {
+          service: name.clone(),
+          instance_id: Some(svc.instance_id.clone()),
+          expect: Some(hash),
+          refresh_files_from: Some(previous.clone()),
+        },
+      );
+      continue;
+    }
     // 配置没变、只是要停下来：不重建，直接停。
     if moved.is_none()
       && svc.spec.stopped
@@ -2254,6 +2307,7 @@ fn service_items(
         Step::ServiceUp {
           service: name.clone(),
           expect: Some(hash.clone()),
+          refresh_files_from: None,
           instance_id: Some(svc.instance_id.clone()),
         },
       );
@@ -6785,6 +6839,7 @@ mod tests {
         service: "app".into(),
         instance_id: None,
         expect: None,
+        refresh_files_from: None,
       },
     };
     assert!(

@@ -1566,8 +1566,43 @@ pub enum ServiceCmd {
     #[arg(long, requires = "path")]
     rm: bool,
     #[command(flatten)]
+    metadata: FileOptions,
+    #[command(flatten)]
     apply: ApplyFlags,
   },
+}
+
+#[derive(Args)]
+pub struct FileOptions {
+  #[arg(long, requires = "path", conflicts_with_all = ["no_init_only", "rm"])]
+  pub init_only: bool,
+  #[arg(long, requires = "path", conflicts_with = "rm")]
+  pub no_init_only: bool,
+  #[arg(long, requires = "path", conflicts_with_all = ["unset_mode", "rm"])]
+  pub mode: Option<String>,
+  #[arg(long, requires = "path", conflicts_with = "rm")]
+  pub unset_mode: bool,
+  #[arg(long, requires = "path", conflicts_with_all = ["unset_owner", "rm"])]
+  pub owner: Option<String>,
+  #[arg(long, requires = "path", conflicts_with = "rm")]
+  pub unset_owner: bool,
+  #[arg(long, requires = "path", conflicts_with_all = ["unset_on_change", "rm"])]
+  pub on_change: Option<String>,
+  #[arg(long, requires = "path", conflicts_with = "rm")]
+  pub unset_on_change: bool,
+}
+
+impl FileOptions {
+  pub fn has_edits(&self) -> bool {
+    self.init_only
+      || self.no_init_only
+      || self.mode.is_some()
+      || self.unset_mode
+      || self.owner.is_some()
+      || self.unset_owner
+      || self.on_change.is_some()
+      || self.unset_on_change
+  }
 }
 
 #[derive(Subcommand)]

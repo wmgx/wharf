@@ -342,6 +342,7 @@ async fn require_retry_access(
         service: service.clone(),
         instance_id: None,
         expect: None,
+        refresh_files_from: None,
       };
       &deploy
     } else {
@@ -862,6 +863,7 @@ async fn retry_reinserts_volume_sync_after_source_restarts() {
       service: "notes".into(),
       instance_id: None,
       expect: None,
+      refresh_files_from: None,
     },
   };
   let steps = complete_migration_steps(vec![up], &snap);

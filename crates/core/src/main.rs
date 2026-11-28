@@ -108,6 +108,7 @@ mod ping;
 mod pins;
 mod planner;
 mod probe;
+mod project_files;
 mod prune;
 mod quality;
 mod rdap;

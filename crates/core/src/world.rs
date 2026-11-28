@@ -522,6 +522,11 @@ impl World {
               )?;
           }
           crate::shared_volumes::normalize(&mut spec)?;
+          for file in &mut spec.files {
+            if file.on_change.as_deref() == Some("recreate") {
+              file.on_change = None;
+            }
+          }
           if spec.limits.as_ref().is_some_and(|l| {
             l.memory_mb.is_none() && l.cpu_milli.is_none()
           }) {
@@ -2188,6 +2193,7 @@ fn validate_service(
       )));
     }
     if spec.volumes.is_empty()
+      && !spec.files.iter().any(|file| file.init_only)
       && !matches!(spec.source, Source::Compose { .. })
     {
       return Err(ApiError::invalid(format!(
@@ -2336,6 +2342,7 @@ fn validate_service(
     }
   }
   check_files(name, &spec.files)?;
+  crate::project_files::validate(name, spec)?;
   for key in spec.env.keys() {
     let ok = !key.is_empty()
       && key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')

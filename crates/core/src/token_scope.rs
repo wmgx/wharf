@@ -350,6 +350,26 @@ pub fn require_plan_request(
       wharf_api_types::view::Perm::Admin,
     )?;
   }
+  let submitted = req
+    .fleet
+    .iter()
+    .chain(req.partial.iter())
+    .flat_map(|f| &f.services)
+    .chain(req.changes.iter().filter_map(|change| match change {
+      Change::UpsertService { name, spec, .. } => Some((name, spec)),
+      _ => None,
+    }));
+  if submitted.into_iter().any(|(name, spec)| {
+    crate::project_files::exec_changed(
+      current.services.get(name).map(|row| &row.spec),
+      spec,
+    )
+  }) {
+    crate::auth::require_perm(
+      &auth.perms,
+      wharf_api_types::view::Perm::Exec,
+    )?;
+  }
   let Some(services) = &auth.services else {
     return Ok(());
   };

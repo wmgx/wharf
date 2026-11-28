@@ -1363,6 +1363,10 @@ export interface FileSpec {
    * 意图文件中的外置配置路径。
    */
   file?: string | null;
+  init_only?: boolean;
+  mode?: string | null;
+  on_change?: string | null;
+  owner?: string | null;
   /**
    * 容器内的绝对路径，例如 `/etc/app/config.yaml`。
    */

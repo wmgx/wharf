@@ -4097,6 +4097,7 @@ async fn service(
       file,
       raw,
       rm,
+      metadata,
       apply,
     } => {
       let mut spec = c
@@ -4109,7 +4110,8 @@ async fn service(
           .files
           .iter()
           .map(
-            |f| json!({ "path": f.path, "bytes": f.content.len() }),
+            |f| json!({ "path": f.path, "bytes": f.content.len(), "init_only": f.init_only,
+              "mode": f.mode, "owner": f.owner, "on_change": f.on_change.as_deref().unwrap_or("recreate") }),
           )
           .collect();
         out(j, &list, |l| {
@@ -4139,28 +4141,52 @@ async fn service(
         if spec.files.len() == before {
           return Err(missing());
         }
-      } else if let Some(src) = file {
-        let content = (if src == "-" {
-          std::io::read_to_string(std::io::stdin())
-        } else {
-          std::fs::read_to_string(&src)
-        })
-        .map_err(|e| {
-          ApiError::invalid(format!("读不了文件 {src}：{e}"))
-            .with_hint("只支持文本文件；从标准输入读用 --file -")
-        })?;
-        let next = wharf_api_types::spec::FileSpec {
-          path,
-          content,
-          raw,
-          file: None,
-        };
-        if let Some(f) =
-          spec.files.iter_mut().find(|f| f.path == next.path)
-        {
-          *f = next;
-        } else {
-          spec.files.push(next);
+      } else if file.is_some() || metadata.has_edits() {
+        let previous = spec.files.iter().position(|f| f.path == path);
+        let mut next =
+          previous.map(|index| spec.files[index].clone());
+        if let Some(src) = file {
+          let content = (if src == "-" {
+            std::io::read_to_string(std::io::stdin())
+          } else {
+            std::fs::read_to_string(&src)
+          })
+          .map_err(|e| {
+            ApiError::invalid(format!("读不了文件 {src}：{e}"))
+              .with_hint("只支持文本文件；从标准输入读用 --file -")
+          })?;
+          let next =
+            next.get_or_insert(wharf_api_types::spec::FileSpec {
+              path: path.clone(),
+              content: String::new(),
+              raw,
+              file: None,
+              init_only: false,
+              mode: None,
+              owner: None,
+              on_change: None,
+            });
+          next.content = content;
+          if raw {
+            next.raw = true;
+          }
+        }
+        let mut next = next.ok_or_else(missing)?;
+        if metadata.init_only || metadata.no_init_only {
+          next.init_only = metadata.init_only;
+        }
+        if metadata.mode.is_some() || metadata.unset_mode {
+          next.mode = metadata.mode;
+        }
+        if metadata.owner.is_some() || metadata.unset_owner {
+          next.owner = metadata.owner;
+        }
+        if metadata.on_change.is_some() || metadata.unset_on_change {
+          next.on_change = metadata.on_change;
+        }
+        match previous {
+          Some(index) => spec.files[index] = next,
+          None => spec.files.push(next),
         }
       } else {
         apply.check_read_only()?;
@@ -6928,6 +6954,7 @@ fn parse_volume_arg(raw: &str) -> Result<VolumeSpec, ApiError> {
     from_service,
     read_only,
     host_path: None,
+    owner: None,
   })
 }
 

@@ -492,6 +492,34 @@ pub struct FileSpec {
   /// 跳过 plan 阶段的配置文件语法预检。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub raw: bool,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub init_only: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub mode: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub owner: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub on_change: Option<String>,
+}
+
+impl FileSpec {
+  pub fn managed_dir(&self) -> bool {
+    self.init_only
+      || self
+        .on_change
+        .as_deref()
+        .is_some_and(|value| value != "recreate")
+  }
+
+  pub fn needs_agent(&self) -> bool {
+    self.managed_dir() || self.mode.is_some() || self.owner.is_some()
+  }
+}
+
+pub fn parse_file_mode(mode: &str) -> Option<u32> {
+  (mode.len() == 4 && mode.starts_with('0'))
+    .then(|| u32::from_str_radix(mode, 8).ok())
+    .flatten()
 }
 
 impl ServiceSpec {

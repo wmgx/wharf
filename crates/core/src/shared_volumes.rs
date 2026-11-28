@@ -347,6 +347,7 @@ mod tests {
       service: name.into(),
       instance_id: None,
       expect: None,
+      refresh_files_from: None,
     };
     let down = |name: &str| Step::ServiceDown {
       service: name.into(),

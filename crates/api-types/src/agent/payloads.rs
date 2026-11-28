@@ -633,6 +633,18 @@ pub struct ProjectUp {
   pub host_binds: Vec<crate::spec::VolumeSpec>,
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub volume_owners: BTreeMap<String, String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub project_files: Vec<ProjectFile>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub refresh_files_from: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectFile {
+  pub spec: crate::spec::FileSpec,
+  pub component: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub directory: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
