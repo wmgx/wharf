@@ -235,6 +235,17 @@ pub(super) fn active_resource(
   item: &AgentCleanupEntry,
   links: &Result<Vec<crate::link::LinkProject>, ApiError>,
 ) -> bool {
+  if item.kind == OrphanNetwork
+    && snap.world.services.values().any(|row| {
+      row.spec.server == server
+        && row.spec.networks.keys().any(|name| {
+          wharf_api_types::spec::named_network_name(name)
+            == item.display
+        })
+    })
+  {
+    return true;
+  }
   let service = item.service.as_deref().unwrap_or_default();
   let registered = |kind| {
     inv

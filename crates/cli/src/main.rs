@@ -574,6 +574,10 @@ pub struct DeployOps {
   pub self_refs: bool,
   #[arg(long)]
   pub no_self_refs: bool,
+  #[arg(long, value_name = "NAME[=internal]")]
+  pub add_network: Vec<String>,
+  #[arg(long, value_name = "NAME")]
+  pub rm_network: Vec<String>,
 }
 
 /// 看日志的公共参数。

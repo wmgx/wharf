@@ -1155,6 +1155,7 @@ impl World {
       )?;
     }
     crate::shared_volumes::validate_world(self)?;
+    crate::named_networks::validate_world(self)?;
     for (name, app) in &self.edge_apps {
       crate::edge::validate_app(self, name, &app.spec)?;
     }
@@ -2915,6 +2916,7 @@ mod tests {
       lan: None,
       extra_hosts: Default::default(),
       self_refs: false,
+      networks: Default::default(),
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

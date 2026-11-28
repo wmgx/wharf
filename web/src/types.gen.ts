@@ -2065,6 +2065,10 @@ export interface NetProbeTls {
  * 机器的接入方式（design 2.10）。不指定时按检测到的地址推断：有 Tailscale 地址是 `tailscale`，
  * 有别的内网地址是 `lan`，都没有是 `public`（只能经公网和反向隧道）。
  */
+export interface NetworkAttachment {
+  internal?: boolean;
+}
+
 export type NetworkMode = "tailscale" | "lan" | "public";
 
 export interface NetworkServer {
@@ -3118,6 +3122,7 @@ export interface ServiceSpec {
    * 自定义监控：服务所在机器的 agent 每分钟从本机请求一次，连续 3 次不正常推送。
    */
   monitor?: MonitorSpec | null;
+  networks?: Record<string, NetworkAttachment>;
   port_checks?: Record<string, PortCheckSpec>;
   ports?: PortSpec[];
   /**

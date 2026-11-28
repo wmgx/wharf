@@ -288,6 +288,7 @@ mod tests {
       lan: None,
       extra_hosts: Default::default(),
       self_refs: false,
+      networks: Default::default(),
     };
     let hp = BTreeMap::from([("pg".to_string(), 20001)]);
     let j = target("db", &spec, &hp, None, None).unwrap();

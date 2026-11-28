@@ -93,6 +93,7 @@ mod migrate;
 mod missing_refs;
 mod monitor;
 mod multi_logs;
+mod named_networks;
 mod net_conflict;
 mod net_probe;
 mod network;

@@ -26,6 +26,7 @@ use crate::{
 mod gateway;
 mod gateway_probe;
 mod link;
+mod named_networks;
 mod validation;
 use validation::{
   check_own_container, check_project, data_dir_relative,
@@ -181,6 +182,11 @@ impl Ops {
           }
         };
         to_value(self.link_apply(&apply, ctx).await?)
+      }
+      AgentOp::NamedNetworksCheck { networks } => {
+        named_networks::ensure(&self.docker, &networks, false, ctx)
+          .await?;
+        Ok(Value::Null)
       }
       AgentOp::ProjectUp(up) => {
         check_project(&up.project)?;
@@ -1043,6 +1049,8 @@ impl Ops {
     up: &ProjectUp,
     ctx: &Ctx,
   ) -> Result<ProjectUpResult, ApiError> {
+    named_networks::ensure(&self.docker, &up.networks, true, ctx)
+      .await?;
     if up.trial.is_some()
       && let Err(e) = self
         .docker

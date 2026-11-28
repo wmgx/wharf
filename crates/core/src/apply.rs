@@ -342,6 +342,52 @@ pub(crate) async fn start_with_actor(
       .suggest("wharf plan"),
     );
   }
+  let network_services: BTreeSet<_> = stored
+    .steps
+    .iter()
+    .filter_map(|step| match &step.step {
+      Step::ServiceUp { service, .. } | Step::Rebuild { service } => {
+        Some(service.as_str())
+      }
+      _ => None,
+    })
+    .collect();
+  if !network_services.is_empty() {
+    let current = state
+      .db
+      .call(|c| crate::world::World::from_rows(db::all_resources(c)?))
+      .await?;
+    let cancel = CancellationToken::new();
+    for service in network_services {
+      let previous =
+        current.services.get(service).map(|row| &row.spec);
+      let next = stored
+        .writes
+        .iter()
+        .find_map(|w| match w {
+          Write::Upsert {
+            kind, name, spec, ..
+          } if kind == crate::world::KIND_SERVICE
+            && name == service =>
+          {
+            Some(spec)
+          }
+          _ => None,
+        })
+        .map(|spec| {
+          serde_json::from_value::<ServiceSpec>(spec.clone())
+            .map_err(json_err)
+        })
+        .transpose()?;
+      if let Some(spec) = next.as_ref().or(previous)
+        && (!spec.networks.is_empty()
+          || previous.is_some_and(|old| !old.networks.is_empty()))
+      {
+        crate::named_networks::preflight(&state.hub, spec, &cancel)
+          .await?;
+      }
+    }
+  }
   let human = auth.is_some_and(|auth| auth.human);
   let requirements = stored.body.host_requirements.as_deref();
   if requirements.is_none()
@@ -1943,6 +1989,7 @@ async fn run_step_with_dns(
               start_timeout_secs: None,
               readiness: None,
               init: None,
+              networks: Default::default(),
             },
             caddyfile: r.config,
             caddyfile_hash: r.config_hash,
@@ -2057,6 +2104,7 @@ async fn run_step_with_dns(
         start_timeout_secs: None,
         readiness: None,
         init: None,
+        networks: Default::default(),
       };
       let op = match p.reload {
         Some(r) => {
@@ -2110,6 +2158,7 @@ async fn run_step_with_dns(
             start_timeout_secs: None,
             readiness: None,
             init: None,
+            networks: Default::default(),
           }),
           GATEWAY_TIMEOUT,
           Some(progress),
@@ -2789,6 +2838,7 @@ fn should_trial(
   has_trial_collision: bool,
 ) -> bool {
   rollback
+    && spec.networks.is_empty()
     && !matches!(spec.source, Source::Compose { .. })
     && !spec.stopped
     && !spec.ports.is_empty()
@@ -2817,6 +2867,14 @@ async fn service_up(
     )
   })?;
   let server = &row.spec.server;
+  let network_conn = if row.spec.networks.is_empty() {
+    None
+  } else {
+    Some(
+      crate::named_networks::preflight(&state.hub, &row.spec, cancel)
+        .await?,
+    )
+  };
   crate::monitor::require_agent(state, &row.spec)?;
   let readiness = if let Some(m) =
     row.spec.monitor.as_ref().filter(|_| !row.spec.stopped)
@@ -2975,41 +3033,41 @@ async fn service_up(
     no_start,
     trial,
     init,
+    networks: row.spec.networks.clone(),
     start_timeout_secs: row.spec.start_timeout_secs,
     readiness,
   });
-  let result: ProjectUpResult = if let Some(what) = required {
-    let conn = state.hub.deploy_v2_conn_id(server, what)?;
-    state
-      .hub
-      .call_bound(
-        (server, conn),
-        op,
-        SERVICE_UP_TIMEOUT,
-        Some(progress.clone()),
-        cancel,
+  let deploy_conn = required
+    .map(|what| state.hub.deploy_v2_conn_id(server, what))
+    .transpose()?;
+  if network_conn.zip(deploy_conn).is_some_and(|(a, b)| a != b) {
+    return Err(
+      ApiError::new(
+        ErrorCode::AgentOffline,
+        format!("服务器 {server} 的 agent 已重连"),
       )
-      .await
-  } else {
-    state
-      .hub
-      .call(
-        server,
-        op,
-        SERVICE_UP_TIMEOUT,
-        Some(progress.clone()),
-        cancel,
-      )
-      .await
+      .with_hint("重新生成计划"),
+    );
   }
-  .map_err(|mut e| {
-    e.message =
-      crate::log_redact::redact_text_with(&e.message, &values);
-    e.hint = e.hint.map(|hint| {
-      crate::log_redact::redact_text_with(&hint, &values)
-    });
-    e
-  })?;
+  let result: ProjectUpResult = state
+    .hub
+    .call_optional_bound(
+      server,
+      network_conn.or(deploy_conn),
+      op,
+      SERVICE_UP_TIMEOUT,
+      Some(progress.clone()),
+      cancel,
+    )
+    .await
+    .map_err(|mut e| {
+      e.message =
+        crate::log_redact::redact_text_with(&e.message, &values);
+      e.hint = e.hint.map(|hint| {
+        crate::log_redact::redact_text_with(&hint, &values)
+      });
+      e
+    })?;
   let retired = result.retired.clone();
   for warning in &result.warnings {
     progress(format!("提醒：{warning}"));

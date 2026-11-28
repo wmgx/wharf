@@ -625,6 +625,8 @@ pub struct ProjectUp {
   pub no_start: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub init: Option<InitRun>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub networks: BTreeMap<String, crate::spec::NetworkAttachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

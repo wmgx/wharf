@@ -202,6 +202,7 @@ pub async fn sync(
         start_timeout_secs: None,
         readiness: None,
         init: None,
+        networks: Default::default(),
       }),
       CONNECTOR_TIMEOUT,
       Some(progress.clone()),

@@ -1181,6 +1181,31 @@ pub(crate) async fn make_plan_inner(
     &current,
     &desired,
   );
+  for step in &b.steps {
+    if let Step::ServiceUp { service, .. } = &step.step
+      && let Some(row) = desired.services.get(service)
+      && (!row.spec.networks.is_empty()
+        || current
+          .services
+          .get(service)
+          .is_some_and(|old| !old.spec.networks.is_empty()))
+    {
+      crate::named_networks::preflight(
+        &state.hub,
+        &row.spec,
+        &tokio_util::sync::CancellationToken::new(),
+      )
+      .await?;
+      if current
+        .services
+        .get(service)
+        .is_some_and(|old| old.spec.server != row.spec.server)
+      {
+        b.warnings
+          .push(format!("服务 {service} 的同名私网不会跨服务器互通"));
+      }
+    }
+  }
   tracing::info!(
     "生成计划用时 {}ms：{}",
     started.elapsed().as_millis(),

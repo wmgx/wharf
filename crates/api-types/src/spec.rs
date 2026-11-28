@@ -398,6 +398,20 @@ pub struct ServiceSpec {
   pub extra_hosts: BTreeMap<String, std::net::IpAddr>,
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub self_refs: bool,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub networks: BTreeMap<String, NetworkAttachment>,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct NetworkAttachment {
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub internal: bool,
+}
+
+pub fn named_network_name(name: &str) -> String {
+  format!("wharf-net-{name}")
 }
 
 #[derive(

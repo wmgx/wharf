@@ -483,7 +483,7 @@ mod tests {
         },
       );
     }
-    let render = |w, name| {
+    let render = |w: &World, name: &str| {
       crate::snapshot::service_resolved(
         w,
         &net,

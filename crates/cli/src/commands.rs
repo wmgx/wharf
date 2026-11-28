@@ -1085,6 +1085,25 @@ fn set_network_options(
   } else if ops.lan || ops.no_lan {
     spec.lan = Some(ops.lan);
   }
+  for name in &ops.rm_network {
+    spec.networks.remove(name);
+  }
+  for network in &ops.add_network {
+    let (name, internal) = match network.split_once('=') {
+      None => (network.as_str(), false),
+      Some((name, "internal")) => (name, true),
+      Some(_) => {
+        return Err(
+          ApiError::invalid("网络写成 NAME 或 NAME=internal").into(),
+        );
+      }
+    };
+    wharf_api_types::validate_name("网络", name)?;
+    spec.networks.insert(
+      name.into(),
+      wharf_api_types::spec::NetworkAttachment { internal },
+    );
+  }
   for name in &ops.rm_extra_host {
     spec.extra_hosts.remove(&name.to_ascii_lowercase());
   }
@@ -3458,7 +3477,9 @@ async fn service(
           || ops.self_refs
           || ops.no_self_refs
           || !ops.add_extra_host.is_empty()
-          || !ops.rm_extra_host.is_empty())
+          || !ops.rm_extra_host.is_empty()
+          || !ops.add_network.is_empty()
+          || !ops.rm_network.is_empty())
       {
         apply.check_read_only()?;
         wharf_api_types::filter_note(
@@ -3576,6 +3597,7 @@ async fn service(
             lan: None,
             extra_hosts: Default::default(),
             self_refs: false,
+            networks: Default::default(),
           }
         }
       };

@@ -202,6 +202,7 @@ fn merge_settings(
   spec.start_timeout_secs = current.start_timeout_secs;
   spec.lan = current.lan;
   spec.extra_hosts.clone_from(&current.extra_hosts);
+  spec.networks.clone_from(&current.networks);
   spec.stop_grace_secs = current.stop_grace_secs;
   spec.stop_signal.clone_from(&current.stop_signal);
   spec.init_cmd.clone_from(&current.init_cmd);

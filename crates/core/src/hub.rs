@@ -81,6 +81,7 @@ struct Conn {
   gateway_extra_files: bool,
   backup_isolation: bool,
   safe_delete: bool,
+  named_networks_v1: bool,
   data_cleanup: bool,
   exec_v2: bool,
   files_v2: bool,
@@ -216,7 +217,15 @@ fn safe_adopt_required(server: &str) -> ApiError {
   .suggest("wharf upgrade")
 }
 
-pub fn offline(server: &str) -> ApiError {
+pub fn old_network_agent(server: &str) -> ApiError {
+  ApiError::new(
+    ErrorCode::Conflict,
+    format!("服务器 {server} 的 agent 不支持命名私网"),
+  )
+  .with_hint("运行 wharf upgrade，升级后重新生成计划")
+}
+
+fn offline(server: &str) -> ApiError {
   ApiError::new(
     ErrorCode::AgentOffline,
     format!("服务器 {server} 的 agent 不在线"),
@@ -798,6 +807,21 @@ impl Hub {
     }
   }
 
+  pub(crate) fn named_network_conn_id(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.named_networks_v1 {
+      return Err(old_network_agent(server));
+    }
+    Ok(conn.conn_id)
+  }
+
   pub(crate) fn safe_delete_conn_id(
     &self,
     server: &str,
@@ -1073,6 +1097,12 @@ impl Hub {
       {
         progress(crate::build::old_agent_warning(server));
       }
+    }
+    if (matches!(&op, AgentOp::NamedNetworksCheck { .. })
+      || matches!(&op, AgentOp::ProjectUp(up) if !up.networks.is_empty()))
+      && (conn.upgrade_only || !conn.named_networks_v1)
+    {
+      return Err(old_network_agent(server));
     }
     if matches!(&op, AgentOp::RemoveData { .. })
       && (conn.upgrade_only || !conn.safe_delete)
@@ -1420,6 +1450,7 @@ async fn handle_socket(
     core_probe,
     backup_isolation,
     safe_delete,
+    named_networks_v1,
     data_cleanup,
     exec_v2,
     files_v2,
@@ -1603,6 +1634,7 @@ async fn handle_socket(
     gateway_extra_files,
     backup_isolation,
     safe_delete,
+    named_networks_v1,
     data_cleanup,
     exec_v2,
     files_v2,

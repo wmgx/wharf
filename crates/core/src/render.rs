@@ -1109,6 +1109,18 @@ pub fn service_compose(
   bind_ips: &[String],
   secrets: Option<&BTreeMap<String, String>>,
 ) -> Result<(String, SecretMounts), ApiError> {
+  let (compose, mounts) =
+    service_compose_base(name, spec, host_ports, bind_ips, secrets)?;
+  Ok((crate::named_networks::render(name, spec, compose)?, mounts))
+}
+
+fn service_compose_base(
+  name: &str,
+  spec: &ServiceSpec,
+  host_ports: &BTreeMap<String, u16>,
+  bind_ips: &[String],
+  secrets: Option<&BTreeMap<String, String>>,
+) -> Result<(String, SecretMounts), ApiError> {
   match &spec.source {
     Source::Compose { content, .. } => {
       let content = content.as_deref().unwrap_or_default();
@@ -2590,6 +2602,7 @@ mod tests {
       lan: None,
       extra_hosts: Default::default(),
       self_refs: false,
+      networks: Default::default(),
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

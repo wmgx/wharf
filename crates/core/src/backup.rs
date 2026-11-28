@@ -508,6 +508,7 @@ pub(crate) async fn deploy_server(
         start_timeout_secs: None,
         readiness: None,
         init: None,
+        networks: Default::default(),
       }),
       SERVER_TIMEOUT,
       Some(progress.clone()),

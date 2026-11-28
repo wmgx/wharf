@@ -194,6 +194,8 @@ pub enum AgentMsg {
     /// 支持扩展文件操作和日志截止时间。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     files_v2: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    named_networks_v1: bool,
   },
   KeyReady {
     core_public_key: String,
@@ -441,6 +443,9 @@ pub enum AgentOp {
   },
   /// 写入 compose、拉镜像、`up -d`。结果是 [ProjectUpResult]。
   ProjectUp(ProjectUp),
+  NamedNetworksCheck {
+    networks: BTreeMap<String, crate::spec::NetworkAttachment>,
+  },
   GatewayProbe(GatewayProbeJob),
   LinkApply(LinkApply),
   ProjectMounts {
