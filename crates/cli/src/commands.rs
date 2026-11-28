@@ -2239,6 +2239,9 @@ async fn upgrade(
     let (run, passed) = upgrade_agents(c, j).await?;
     data["post_agents"] = run;
     if !passed {
+      if !j {
+        return Err(CliError::Exit(4));
+      }
       return Err(
         ApiError::new(ErrorCode::AgentFailed, "有 agent 没升级成功")
           .into(),

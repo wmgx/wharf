@@ -264,7 +264,7 @@ fn shell_join(args: &[String]) -> String {
     .map(|arg| {
       if !arg.is_empty()
         && arg.bytes().all(|b| {
-          b.is_ascii_alphanumeric() || b"_@%+=:,./-[]".contains(&b)
+          b.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&b)
         })
       {
         arg.clone()

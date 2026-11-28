@@ -1114,6 +1114,6 @@ mod tests {
     assert_eq!(view.omitted["spec.source.compose.content"], 12);
     assert_eq!(view.omitted["spec.files[/etc/app.conf]"], 4);
     assert_eq!(view.spec.files[0].content, "");
-    assert_eq!(view.status.summary, "运行中");
+    assert_eq!(view.status.unwrap().summary, "运行中");
   }
 }
