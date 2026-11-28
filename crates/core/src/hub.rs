@@ -1212,7 +1212,8 @@ impl Hub {
     {
       return Err(old_project_files_agent(server));
     }
-    if matches!(&op, AgentOp::ProjectUp(up) if !up.host_binds.is_empty())
+    if (matches!(&op, AgentOp::HostBindCheck { .. })
+      || matches!(&op, AgentOp::ProjectUp(up) if !up.host_binds.is_empty()))
       && (conn.upgrade_only || !conn.safe_host_bind_v1)
     {
       return Err(old_host_bind_agent(server));

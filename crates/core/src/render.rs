@@ -1265,7 +1265,7 @@ fn compose_extra_hosts(
 ) -> Result<String, ApiError> {
   let target =
     compose_target(name, content, spec.container.as_deref())?;
-  let mut doc = parse_compose(content)?;
+  let mut doc = parse_compose_template(content)?;
   let body = &mut doc["services"][target.as_str()];
   let mut hosts = Vec::new();
   match &body["extra_hosts"] {

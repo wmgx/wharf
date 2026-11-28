@@ -3735,7 +3735,12 @@ async fn service(
         spec.volumes.remove(index);
       }
       for arg in &volume {
-        let v = parse_volume_arg(arg)?;
+        let mut v = parse_volume_arg(arg)?;
+        if let Some(old) =
+          spec.volumes.iter().find(|old| old.name == v.name)
+        {
+          v.owner.clone_from(&old.owner);
+        }
         spec.volumes.retain(|x| x.name != v.name);
         spec.volumes.push(v);
       }

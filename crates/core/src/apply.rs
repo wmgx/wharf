@@ -1642,6 +1642,26 @@ async fn run_step_with_dns(
       explicit_bwlimit,
     } => {
       check_step_instance(world, service, instance_id.as_deref())?;
+      let binds: Vec<_> = world.services[service]
+        .spec
+        .volumes
+        .iter()
+        .filter(|v| v.host_path.is_some())
+        .cloned()
+        .collect();
+      if !binds.is_empty() {
+        let conn = state.hub.host_bind_conn_id(to)?;
+        let _: serde_json::Value = state
+          .hub
+          .call_bound(
+            (to, conn),
+            AgentOp::HostBindCheck { binds },
+            Duration::from_secs(120),
+            None,
+            cancel,
+          )
+          .await?;
+      }
       let shared = *shared_data
         || crate::shared_volumes::consumers_on(world, service, to)
           .next()

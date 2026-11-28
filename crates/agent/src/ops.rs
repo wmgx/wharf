@@ -201,6 +201,11 @@ impl Ops {
       AgentOp::WorkloadEgressStatus => {
         Ok(Value::Bool(crate::egress::workload_ready()))
       }
+      AgentOp::HostBindCheck { binds } => {
+        host_binds::validate_sources(&self.docker, &binds, ctx)
+          .await?;
+        Ok(Value::Null)
+      }
       AgentOp::NamedNetworksCheck { networks } => {
         named_networks::ensure(&self.docker, &networks, false, ctx)
           .await?;

@@ -455,6 +455,9 @@ pub enum AgentOp {
     networks: BTreeMap<String, crate::spec::NetworkAttachment>,
   },
   WorkloadEgressStatus,
+  HostBindCheck {
+    binds: Vec<crate::spec::VolumeSpec>,
+  },
   ComposeEnvCheck {
     project: String,
     compose: String,

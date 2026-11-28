@@ -619,16 +619,24 @@ pub(crate) async fn make_plan_inner(
     let old = current.services.get(name);
     if old.is_some_and(|old| {
       old.spec.server != row.spec.server
-        && (has_external(&old.spec) || has_external(&row.spec))
+        && has_external(&old.spec)
+        && old
+          .spec
+          .volumes
+          .iter()
+          .filter(|v| v.host_path.is_some())
+          .eq(
+            row.spec.volumes.iter().filter(|v| v.host_path.is_some()),
+          )
     }) {
       return Err(
         ApiError::new(
           ErrorCode::Conflict,
-          format!(
-            "服务 {name} 含外部卷，迁移前需单独准备目标路径并重配挂载"
-          ),
+          format!("服务 {name} 的外部挂载需要显式指定目标机目录"),
         )
-        .with_hint("解除外部挂载后迁移，再挂载目标机准备好的目录"),
+        .with_hint(
+          "先准备目标机数据，再用 service deploy 指定目标机及挂载",
+        ),
       );
     }
     if old.is_none_or(|old| old.spec != row.spec)
@@ -2304,6 +2312,17 @@ fn service_items(
           &render_values,
           &snap.log_values,
         )?;
+      }
+      if svc.spec.volumes.iter().any(|v| {
+        v.host_path.is_some()
+          && !v.read_only
+          && old.is_none_or(|row| {
+            row.spec.server != svc.spec.server
+              || !row.spec.volumes.contains(v)
+          })
+      }) && !risk.contains(&Impact::Overwrite)
+      {
+        risk.push(Impact::Overwrite);
       }
       if !risk.contains(&Impact::Public)
         && crate::host_access::has_new_public_bind(
@@ -4615,6 +4634,49 @@ mod tests {
     let config =
       b.items.iter().find(|i| i.layer == Layer::Config).unwrap();
     assert_eq!(config.reason, "切换固定镜像版本");
+  }
+
+  #[test]
+  fn p23_2_legacy_spec_hash_and_plan_keep_their_bytes() {
+    let mut world = world();
+    let input = json!({
+      "server": "s1",
+      "source": {"image": "nginx:1"},
+      "ports": [{"name": "http", "container": 80}],
+      "volumes": [{"name": "data", "target": "/data", "read_only": true}]
+    });
+    let row = world.services.get_mut("app").unwrap();
+    row.spec = serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&row.spec).unwrap(), input);
+    let legacy_yaml = concat!(
+      "# 由 Wharf 生成，不要手改。\n",
+      "name: app\nservices:\n  app:\n    image: nginx:1\n",
+      "    restart: unless-stopped\n    ports:\n    - 127.0.0.1:21000:80\n",
+      "    volumes:\n    - /srv/app/data:/data:ro\n",
+      "    labels:\n      wharf.service: app\n"
+    );
+    let fingerprint = crate::render::hash(legacy_yaml);
+    assert_eq!(hash_of(&world), fingerprint);
+    let planned = plan(
+      &world,
+      &world,
+      &live(Some(fingerprint), vec![container("running")]),
+    );
+    assert!(planned.steps.is_empty() && planned.items.is_empty());
+
+    let raw = r#"{"kind":"service_up","service":"app"}"#;
+    let step: Step = serde_json::from_str(raw).unwrap();
+    assert!(matches!(
+      &step,
+      Step::ServiceUp {
+        refresh_files_from: None,
+        ..
+      }
+    ));
+    assert_eq!(
+      serde_json::to_value(&step).unwrap(),
+      serde_json::from_str::<Value>(raw).unwrap()
+    );
   }
 
   #[test]

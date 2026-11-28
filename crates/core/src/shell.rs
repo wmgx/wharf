@@ -200,6 +200,17 @@ async fn run_audited(
     .map_or((None, None), |(conn, progress)| {
       (Some(conn), Some(progress))
     });
+  let conn = if conn.is_none() && job.workload_no_proxy.is_some() {
+    match state.hub.workload_egress_conn_id(&name) {
+      Ok(conn) => Some(conn),
+      Err(error) => {
+        finish(&state.db, audit_id, End::error(&error)).await;
+        return Err(error);
+      }
+    }
+  } else {
+    conn
+  };
   let timeout = job.timeout_secs;
   let outcome = state
     .hub

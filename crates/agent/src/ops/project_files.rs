@@ -631,3 +631,22 @@ pub(super) async fn refresh(
     retired: Vec::new(),
   })
 }
+
+#[test]
+fn first_file_keeps_application_content() {
+  let tmp = tempfile::tempdir().unwrap();
+  let dir = DirFd::open_absolute(tmp.path()).unwrap();
+  let owner =
+    (unsafe { libc::geteuid() }, unsafe { libc::getegid() });
+  let name = c"settings.json";
+  replace(&dir, name, "{\"n\":1}", 0o600, owner, true).unwrap();
+  replace(&dir, name, "{\"n\":2}", 0o600, owner, false).unwrap();
+  assert!(
+    replace(&dir, name, "{\"n\":3}", 0o600, owner, true).is_err()
+  );
+  let (actual, mode, ids) = read(&dir, name, false).unwrap().unwrap();
+  assert_eq!(
+    (actual.as_str(), mode, ids),
+    ("{\"n\":2}", 0o600, owner)
+  );
+}

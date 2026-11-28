@@ -359,6 +359,34 @@ pub fn require_plan_request(
       Change::UpsertService { name, spec, .. } => Some((name, spec)),
       _ => None,
     }));
+  if !auth.human {
+    for (_, spec) in submitted.clone() {
+      if spec.volumes.iter().any(|v| v.host_path.is_some())
+        && auth.services.is_none()
+      {
+        crate::auth::require_perm(
+          &auth.perms,
+          wharf_api_types::view::Perm::Host,
+        )?;
+        if current
+          .servers
+          .get(&spec.server)
+          .is_some_and(|server| !server.settings.host_docker)
+        {
+          return Err(
+            ApiError::new(
+              ErrorCode::Forbidden,
+              format!(
+                "服务器 {} 未开启宿主机 Docker 权限",
+                spec.server
+              ),
+            )
+            .with_hint("在服务器设置中开启特权与未纳管容器权限"),
+          );
+        }
+      }
+    }
+  }
   if submitted.into_iter().any(|(name, spec)| {
     crate::project_files::exec_changed(
       current.services.get(name).map(|row| &row.spec),
