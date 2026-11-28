@@ -458,12 +458,23 @@ pub(crate) fn check_plan(
   let before = collect_plan_missing(&snap.world, snap)
     .into_iter()
     .collect::<BTreeSet<_>>();
-  error(
-    collect_plan_missing(desired, snap)
-      .into_iter()
-      .filter(|hit| !before.contains(hit))
-      .collect(),
-  )
+  let missing: Vec<_> = collect_plan_missing(desired, snap)
+    .into_iter()
+    .filter(|hit| !before.contains(hit))
+    .collect();
+  let removes_target = missing.iter().any(|hit| {
+    matches!(hit.kind.as_str(), "service" | "service_ref")
+      && snap.world.services.contains_key(&hit.target)
+      && !desired.services.contains_key(&hit.target)
+  });
+  error(missing).map_err(|error| {
+    if removes_target {
+      error
+        .with_hint("先改写或移除这些引用，再把变更和删除放进同一计划")
+    } else {
+      error
+    }
+  })
 }
 
 pub(crate) fn scope_error(
@@ -496,10 +507,22 @@ pub(crate) fn scope_error(
   if missing.len() == total {
     return err;
   }
-  error(missing).err().unwrap_or_else(|| {
+  let hidden = total - missing.len();
+  let mut scoped = error(missing).err().unwrap_or_else(|| {
     ApiError::invalid("改动导致其他资源引用缺失")
       .with_hint("使用不限服务的令牌查看完整引用")
-  })
+  });
+  if err.hint.as_deref()
+    == Some("先改写或移除这些引用，再把变更和删除放进同一计划")
+  {
+    scoped.hint = err.hint;
+  }
+  let mut details = scoped
+    .details
+    .take()
+    .unwrap_or_else(|| json!({"missing":[],"total":0}));
+  details["hidden_dependents"] = json!(hidden);
+  scoped.with_details(details)
 }
 
 #[test]

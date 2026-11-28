@@ -499,6 +499,16 @@ pub(crate) async fn start_with_actor(
   } else {
     None
   };
+  let scope_freshness_error = |error: ApiError| {
+    if error.code == ErrorCode::PlanStale
+      && auth.is_some_and(|auth| auth.services.is_some())
+    {
+      ApiError::new(ErrorCode::PlanStale, "计划依赖的资源已变更")
+        .with_hint("重新生成并确认计划")
+    } else {
+      error
+    }
+  };
   let reason =
     crate::db_snapshot::plan_trigger_reason(plan, &stored.steps);
   if reason.is_some() || skip.is_some() {
@@ -516,7 +526,8 @@ pub(crate) async fn start_with_actor(
           base_instances.as_ref(),
         )
       })
-      .await?;
+      .await
+      .map_err(scope_freshness_error)?;
     crate::db_snapshot::before(
       &state,
       crate::db_snapshot::Trigger::Apply,
@@ -640,7 +651,7 @@ pub(crate) async fn start_with_actor(
         tx.commit().map_err(sql_err)?;
         Ok(alert_changes.clear_after_commit())
       })
-      .await?;
+      .await.map_err(scope_freshness_error)?;
     crate::log_redact::refresh(&state.db).await;
     if removed_firing {
       crate::rules::schedule_unsuppress(&state, now_ms()).await;

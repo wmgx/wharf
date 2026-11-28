@@ -323,3 +323,72 @@ async fn wait_for_unready_service_observes_cancellation() {
   );
   assert_eq!(result.unwrap_err().code, ErrorCode::Cancelled);
 }
+
+#[tokio::test]
+async fn waits_until_service_health_tcp_and_dns_are_ready() {
+  use serde_json::json;
+  use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+  };
+  let state = crate::rules::tests::test_state();
+  state.db.call(|c| {
+    for (kind, name, spec, meta) in [
+      ("server", "s1", json!({"private_addr":{"ip":"100.64.0.1","network":"tailscale"}}), json!({})),
+      ("service", "z-db", json!({"server":"s1","source":{"image":"db:1"},
+        "ports":[{"name":"sql","container":5432,"host":22000}]}), json!({"host_ports":{"sql":22000}})),
+      ("service", "a-app", json!({"server":"s1","source":{"image":"app:1"},
+        "wait_for":{"service":{"kind":"service","service":"z-db"},
+         "tcp":{"kind":"tcp","service":"z-db","port":"sql"},
+         "dns":{"kind":"dns","host":"check.example.test"}}}), json!({})),
+    ] {
+      crate::db::apply_write(c, &crate::db::Write::Upsert { kind:kind.into(), name:name.into(), spec, meta })?;
+    }
+    Ok(())
+  }).await.unwrap();
+  let snap = snapshot::load(&state.db).await.unwrap();
+  let net = snap.net(&snap.world);
+  let (_, hash) = snapshot::service_resolved(
+    &snap.world,
+    &net,
+    "z-db",
+    &Default::default(),
+  )
+  .unwrap();
+  let rounds = Arc::new(AtomicUsize::new(0));
+  let count = rounds.clone();
+  state.hub.mock_agent("s1", false, move |op| match op {
+    AgentOp::ProjectStatus { projects, .. } => {
+      assert_eq!(projects, ["z-db"]);
+      let health = if count.fetch_add(1, Ordering::SeqCst) == 0 { "starting" } else { "healthy" };
+      Ok(json!([{"project":"z-db","hash":hash,"containers":[
+        {"service":"z-db","name":"z-db-1","state":"running","health":health}]}]))
+    }
+    AgentOp::NetProbe(job) if job.kind == NetProbeKind::Tcp => {
+      assert_eq!(job.target, "100.64.0.1:22000");
+      Ok(json!({"elapsed_ms":0,"tcp":{"remote_addr":job.target,"elapsed_ms":0}}))
+    }
+    AgentOp::NetProbe(job) => {
+      assert_eq!(job.kind, NetProbeKind::Dns);
+      assert_eq!(job.target, "check.example.test");
+      Ok(json!({"elapsed_ms":0,"dns":{"ips":["203.0.113.1"],
+        "elapsed_ms":0,"nameservers":[],"search":[]}}))
+    }
+    _ => panic!("等待前不允许启动项目或触发其他操作"),
+  });
+  state.hub.enable_mock_net_probe("s1");
+  tokio::time::timeout(
+    Duration::from_secs(15),
+    run(
+      &state,
+      &snap.world,
+      "a-app",
+      "s1",
+      &CancellationToken::new(),
+    ),
+  )
+  .await
+  .unwrap()
+  .unwrap();
+  assert_eq!(rounds.load(Ordering::SeqCst), 2);
+}

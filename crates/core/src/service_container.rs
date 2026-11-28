@@ -85,7 +85,11 @@ mod tests {
       ErrorCode::Conflict
     );
     state.hub.enable_mock_extra_logs("s1");
-    let result = request("logs/error.log").await.unwrap().0;
+    let result = request("logs/error.log")
+      .await
+      .map_err(|error| error.0)
+      .unwrap()
+      .0;
     assert_eq!(result["logs"], "before\nERROR\nafter\n");
     assert_eq!(result["file"], "logs/error.log");
   }

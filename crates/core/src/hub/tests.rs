@@ -206,6 +206,10 @@ impl Hub {
     lock(&self.conns).get_mut(server).unwrap().files_v2 = true;
   }
 
+  pub(crate) fn enable_mock_net_probe(&self, server: &str) {
+    lock(&self.conns).get_mut(server).unwrap().net_probe = true;
+  }
+
   pub(crate) fn enable_mock_extra_logs(&self, server: &str) {
     let mut conns = lock(&self.conns);
     let conn = conns.get_mut(server).unwrap();
