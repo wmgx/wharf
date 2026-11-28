@@ -227,6 +227,7 @@ mod tests {
       key.put_secret(c, "DB_PASS", "fixture-password", 0, true)?;
       key.put_secret(c, "TLS_KEY", "fixture-key", 0, true)?;
       for (kind, name, spec, meta) in [
+        ("server", "s1", json!({"private_addr":{"ip":"100.64.0.1","network":"overlay"}}), json!({})),
         ("service", "app", json!({
           "server":"s1", "source":{"image":"alpine"},
           "env":{"DB_PASS":"[[b64:DB_PASS]]","KEY_PATH":"[[FILE:TLS_KEY]]","API_TOKEN":"fixture-inline","DB":"[[@db:port]]"},
