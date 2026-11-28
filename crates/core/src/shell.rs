@@ -5,6 +5,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 use axum::{
   Json,
   extract::{Path as AxumPath, Query, State},
+  response::{IntoResponse, Response},
 };
 use rusqlite::{Connection, params};
 use serde::Deserialize;
@@ -16,9 +17,11 @@ use wharf_api_types::{
 };
 
 use crate::{
-  api::ApiResult,
+  api::{ApiResult, AppError},
   auth::Auth,
   db::{Db, now_ms, sql_err, to_time},
+  exec_stream::{self, ExecQuery},
+  hub::ProgressFn,
   snapshot,
   state::AppState,
   world::server_not_found,
@@ -32,13 +35,13 @@ const CLEANUP_GRACE: u64 = 10;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecRequest {
-  command: String,
-  timeout_secs: Option<u64>,
-  cwd: Option<String>,
+  pub(crate) command: String,
+  pub(crate) timeout_secs: Option<u64>,
+  pub(crate) cwd: Option<String>,
 }
 
 impl ExecRequest {
-  fn job(self) -> Result<HostExecJob, ApiError> {
+  pub(crate) fn job(self) -> Result<HostExecJob, ApiError> {
     if self.command.trim().is_empty() {
       return Err(ApiError::invalid("命令不能为空"));
     }
@@ -59,6 +62,7 @@ impl ExecRequest {
       ));
     }
     Ok(HostExecJob {
+      stream: false,
       command: self.command,
       timeout_secs,
       cwd,
@@ -79,8 +83,9 @@ pub async fn exec(
   State(state): State<Arc<AppState>>,
   auth: Auth,
   AxumPath(name): AxumPath<String>,
+  Query(query): Query<ExecQuery>,
   Json(req): Json<ExecRequest>,
-) -> ApiResult<HostExecResponse> {
+) -> Result<Response, AppError> {
   let snap = snapshot::load(&state.db).await?;
   crate::host_access::require_with(
     &auth,
@@ -88,8 +93,33 @@ pub async fn exec(
     snap.world.servers.get(&name).map(|r| &r.settings),
     crate::join::core_server_of(&snap).as_deref(),
   )?;
-  let job = req.job()?;
-  Ok(Json(run_host(state, &auth.name, name, job).await?))
+  let mut job = req.job()?;
+  if !query.stream {
+    return Ok(
+      Json(run_host(state, &auth.name, name, job).await?)
+        .into_response(),
+    );
+  }
+  let (conn, supported) = state.hub.host_exec_connection(&name)?;
+  job.stream = supported;
+  let audit =
+    start(&state.db, &auth.name, &name, "exec", Some(&job.command))
+      .await?;
+  Ok(exec_stream::response(
+    snap.log_values.as_ref().clone(),
+    move |progress, cancel| async move {
+      run_audited(
+        state,
+        name,
+        job,
+        audit,
+        Some((conn, progress)),
+        cancel,
+      )
+      .await
+      .map(|r| (None, r))
+    },
+  ))
 }
 
 /// 在宿主机执行一次命令：检查开关、记审计。页面、CLI 和定时任务共用。
@@ -108,6 +138,25 @@ pub async fn run_host_with_audit(
   name: String,
   job: HostExecJob,
   audit_command: Option<&str>,
+) -> Result<HostExecResponse, ApiError> {
+  run_host_cancellable(
+    state,
+    actor,
+    name,
+    job,
+    audit_command,
+    CancellationToken::new(),
+  )
+  .await
+}
+
+pub async fn run_host_cancellable(
+  state: Arc<AppState>,
+  actor: &str,
+  name: String,
+  job: HostExecJob,
+  audit_command: Option<&str>,
+  cancel: CancellationToken,
 ) -> Result<HostExecResponse, ApiError> {
   let snap = snapshot::load(&state.db).await?;
   let server = snap
@@ -132,63 +181,76 @@ pub async fn run_host_with_audit(
     return Err(error);
   }
 
-  let cancel = CancellationToken::new();
   let _cancel_on_drop = CancelOnDrop(cancel.clone());
-  let task_state = state.clone();
+  tokio::spawn(run_audited(state, name, job, audit_id, None, cancel))
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))?
+}
+
+async fn run_audited(
+  state: Arc<AppState>,
+  name: String,
+  job: HostExecJob,
+  audit_id: i64,
+  stream: Option<(u64, ProgressFn)>,
+  cancel: CancellationToken,
+) -> Result<HostExecResponse, ApiError> {
+  let (conn, progress) = stream
+    .map_or((None, None), |(conn, progress)| {
+      (Some(conn), Some(progress))
+    });
   let timeout = job.timeout_secs;
-  let task = tokio::spawn(async move {
-    let outcome = task_state
-      .hub
-      .call::<HostExecOutcome>(
-        &name,
-        AgentOp::HostExec(job),
-        Duration::from_secs(timeout + CLEANUP_GRACE),
-        None,
-        &cancel,
+  let outcome = state
+    .hub
+    .call_optional_bound::<HostExecOutcome>(
+      &name,
+      conn,
+      AgentOp::HostExec(job),
+      Duration::from_secs(timeout + CLEANUP_GRACE),
+      progress,
+      &cancel,
+    )
+    .await;
+  match outcome {
+    Ok(HostExecOutcome::Finished(result)) => {
+      finish(
+        &state.db,
+        audit_id,
+        End {
+          exit_code: Some(result.exit_code),
+          duration_ms: Some(result.duration_ms),
+          output_bytes: Some(result.output_bytes),
+          error: None,
+        },
       )
       .await;
-    match outcome {
-      Ok(HostExecOutcome::Finished(result)) => {
-        finish(
-          &task_state.db,
-          audit_id,
-          End {
-            exit_code: Some(result.exit_code),
-            duration_ms: Some(result.duration_ms),
-            output_bytes: Some(result.output_bytes),
-            error: None,
-          },
-        )
-        .await;
-        Ok(HostExecResponse {
-          exit_code: result.exit_code,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          truncated: result.truncated,
-          duration_ms: result.duration_ms,
-        })
-      }
-      Ok(HostExecOutcome::Failed(failure)) => {
-        finish(
-          &task_state.db,
-          audit_id,
-          End {
-            exit_code: None,
-            duration_ms: Some(failure.duration_ms),
-            output_bytes: Some(failure.output_bytes),
-            error: Some(error_text(&failure.error)),
-          },
-        )
-        .await;
-        Err(failure.error)
-      }
-      Err(error) => {
-        finish(&task_state.db, audit_id, End::error(&error)).await;
-        Err(error)
-      }
+      Ok(HostExecResponse {
+        exit_code: result.exit_code,
+        stdout: crate::log_redact::redact_text(&result.stdout),
+        stderr: crate::log_redact::redact_text(&result.stderr),
+        truncated: result.truncated,
+        duration_ms: result.duration_ms,
+      })
     }
-  });
-  task.await.map_err(|e| ApiError::internal(e.to_string()))?
+    Ok(HostExecOutcome::Failed(failure)) => {
+      finish(
+        &state.db,
+        audit_id,
+        End {
+          exit_code: None,
+          duration_ms: Some(failure.duration_ms),
+          output_bytes: Some(failure.output_bytes),
+          error: Some(error_text(&failure.error)),
+        },
+      )
+      .await;
+      Err(crate::log_redact::redact_error(failure.error))
+    }
+    Err(error) => {
+      finish(&state.db, audit_id, End::error(&error)).await;
+      Err(crate::log_redact::redact_error(error))
+    }
+  }
 }
 
 #[derive(Deserialize)]
@@ -245,9 +307,14 @@ pub(crate) async fn start(
   let server = server.to_string();
   let kind = kind.to_string();
   let command = command.map(|command| {
-    crate::log_redact::redact_text(&crate::redact::redact_command(
-      command,
-    ))
+    let text = crate::log_redact::redact_text(
+      &crate::redact::redact_command(command),
+    );
+    let mut end = text.len().min(4096);
+    while !text.is_char_boundary(end) {
+      end -= 1;
+    }
+    text[..end].to_string()
   });
   db.call(move |c| {
     let now = now_ms();
@@ -392,5 +459,60 @@ mod tests {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].command.as_deref(), Some("printf ok"));
     assert_eq!(rows[0].exit_code, Some(7));
+  }
+  #[tokio::test]
+  async fn streaming_host_exec_falls_back_for_legacy_agent() {
+    use crate::{db, host_access::tests::auth};
+    use axum::body::to_bytes;
+    use wharf_api_types::view::{ExecStreamEvent, Perm};
+    let state = crate::rules::tests::test_state();
+    state
+      .db
+      .call(|c| {
+        db::apply_write(
+          c,
+          &db::Write::Upsert {
+            kind: "server".into(),
+            name: "s1".into(),
+            meta: serde_json::json!({}),
+            spec: serde_json::json!({"host_exec":true}),
+          },
+        )
+      })
+      .await
+      .unwrap();
+    state.hub.mock_agent("s1", false, |op| {
+      assert!(matches!(op, AgentOp::HostExec(job) if !job.stream));
+      Ok(serde_json::json!({"status":"finished","exit_code":2,
+        "stdout":"hi","stderr":"","truncated":false,"duration_ms":1,"output_bytes":2}))
+    });
+    state.hub.enable_mock_host_shell("s1");
+    let response = exec(
+      State(state),
+      auth([Perm::Host, Perm::Admin], false),
+      AxumPath("s1".into()),
+      Query(ExecQuery { stream: true }),
+      Json(ExecRequest {
+        command: "true".into(),
+        timeout_secs: None,
+        cwd: None,
+      }),
+    )
+    .await
+    .map_err(|error| error.0)
+    .unwrap();
+    let body = to_bytes(response.into_body(), 1024).await.unwrap();
+    let frames = std::str::from_utf8(&body)
+      .unwrap()
+      .lines()
+      .map(|line| serde_json::from_str(line).unwrap())
+      .collect::<Vec<ExecStreamEvent>>();
+    assert!(matches!(
+      &frames[..],
+      [
+        ExecStreamEvent::Stdout { .. },
+        ExecStreamEvent::Done { exit_code: 2, .. }
+      ]
+    ));
   }
 }

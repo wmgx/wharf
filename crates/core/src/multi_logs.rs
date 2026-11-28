@@ -206,6 +206,7 @@ pub(super) async fn fetch(
           server,
           AgentOp::Logs {
             project: project.clone(),
+            container: None,
             tail: per,
             follow: false,
             since,

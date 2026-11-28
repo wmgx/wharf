@@ -80,6 +80,7 @@ struct Conn {
   gateway_extra_files: bool,
   backup_isolation: bool,
   safe_delete: bool,
+  exec_v2: bool,
   shared_volumes: bool,
   safe_gateway: bool,
   gateway_probe: bool,
@@ -648,6 +649,79 @@ impl Hub {
     self.shared_volumes_conn_id(server).is_ok()
   }
 
+  pub(crate) fn exec_v2_conn_id(
+    &self,
+    server: &str,
+    feature: &str,
+  ) -> Result<u64, ApiError> {
+    self.exec_connection(server).and_then(|(id, supported)| {
+      if supported {
+        Ok(id)
+      } else {
+        Err(
+          ApiError::new(
+            ErrorCode::Conflict,
+            format!(
+              "服务器 {server} 的 agent 版本旧，不支持{feature}"
+            ),
+          )
+          .with_hint("先升级 agent：wharf upgrade"),
+        )
+      }
+    })
+  }
+
+  pub(crate) fn host_exec_connection(
+    &self,
+    server: &str,
+  ) -> Result<(u64, bool), ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|c| !c.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if !conn.host_shell || conn.upgrade_only {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 不支持宿主机命令"),
+        )
+        .with_hint("先升级 agent：wharf upgrade"),
+      );
+    }
+    Ok((conn.conn_id, conn.exec_v2))
+  }
+
+  fn exec_connection(
+    &self,
+    server: &str,
+  ) -> Result<(u64, bool), ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|c| !c.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    Ok((conn.conn_id, !conn.upgrade_only && conn.exec_v2))
+  }
+
+  pub(crate) async fn call_optional_bound<T: DeserializeOwned>(
+    &self,
+    server: &str,
+    conn: Option<u64>,
+    op: AgentOp,
+    timeout: Duration,
+    progress: Option<ProgressFn>,
+    cancel: &CancellationToken,
+  ) -> Result<T, ApiError> {
+    if let Some(conn) = conn {
+      self
+        .call_bound((server, conn), op, timeout, progress, cancel)
+        .await
+    } else {
+      self.call(server, op, timeout, progress, cancel).await
+    }
+  }
+
   pub(crate) fn safe_delete_conn_id(
     &self,
     server: &str,
@@ -791,7 +865,31 @@ impl Hub {
         .suggest(format!("wharf server upgrade {server}")),
       );
     }
+    let requires_exec_v2 = match &op {
+      AgentOp::ServiceExec(_) => true,
+      AgentOp::HostExec(job) => job.stream,
+      AgentOp::Logs { container, .. }
+      | AgentOp::ProjectRestart { container, .. } => {
+        container.is_some()
+      }
+      AgentOp::TaskRun(job) => {
+        matches!(&job.how, wharf_api_types::agent::TaskHow::Exec { env, .. } if !env.is_empty())
+      }
+      _ => false,
+    };
+    if requires_exec_v2 && (conn.upgrade_only || !conn.exec_v2) {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 版本旧"),
+        )
+        .with_hint("先升级 agent：wharf upgrade"),
+      );
+    }
     let cancel_grace = match &op {
+      AgentOp::HostExec(_)
+      | AgentOp::ServiceExec(_)
+      | AgentOp::TaskRun(_) => Some(Duration::from_secs(15)),
       AgentOp::LinkApply(_) => Some(Duration::from_secs(90)),
       AgentOp::ServiceStopForData { .. } => {
         Some(Duration::from_secs(250))
@@ -1028,7 +1126,7 @@ impl Hub {
           tokio::select! {
             result = &mut rx => result.unwrap_or_else(|_| Err(offline(server))),
             _ = conn.closed.cancelled() => Err(offline(server)),
-            _ = tokio::time::sleep(grace) => Err(abort(ErrorCode::Timeout, "未收到 agent 数据操作收尾确认".into())),
+            _ = tokio::time::sleep(grace) => Err(abort(ErrorCode::Timeout, "未收到 agent 收尾确认".into())),
           }
         } else {
           Err(abort(ErrorCode::Cancelled, "已取消".into()))
@@ -1198,6 +1296,7 @@ async fn handle_socket(
     core_probe,
     backup_isolation,
     safe_delete,
+    exec_v2,
     shared_volumes,
     safe_gateway,
     gateway_probe,
@@ -1375,6 +1474,7 @@ async fn handle_socket(
     gateway_extra_files,
     backup_isolation,
     safe_delete,
+    exec_v2,
     shared_volumes,
     safe_gateway,
     gateway_probe,

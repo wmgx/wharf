@@ -520,6 +520,7 @@ async fn run_retry_reruns_only_failed_and_skipped_and_rejects_stale()
   let service = "notes".to_string();
   let restart = Step::ServiceRestart {
     service: service.clone(),
+    container: None,
   };
   let steps: Vec<_> = [
     (restart.clone(), StepStatus::Done),

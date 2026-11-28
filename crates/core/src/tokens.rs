@@ -223,6 +223,7 @@ pub async fn whoami(auth: Auth) -> ApiResult<Value> {
     "perms": auth.perms.iter().map(|p| p.as_str()).collect::<Vec<_>>(),
     "build": wharf_api_types::BUILD,
     "version": env!("CARGO_PKG_VERSION"),
+    "exec_v2": true,
   });
   if !auth.human {
     value["expires_at"] = json!(auth.expires_at);

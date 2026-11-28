@@ -869,6 +869,11 @@ pub enum TaskHow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     service: Option<String>,
     command: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    env: BTreeMap<String, String>,
+    /// 任务执行才准备容器内取消句柄。只读探测不写容器文件。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    cancellable: bool,
   },
   /// `docker run --rm`；有 `command` 时用 `sh -c` 代替镜像的入口。
   Container {

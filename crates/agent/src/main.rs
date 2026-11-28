@@ -53,6 +53,7 @@ mod probe;
 mod registry;
 mod report;
 mod restic;
+mod service_exec;
 mod settle;
 mod sync;
 mod task;
