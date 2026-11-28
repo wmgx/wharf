@@ -128,6 +128,8 @@ fn old_core_ignores_new_hello_capability() {
     frpc_reload: false,
     safe_adopt: false,
     safe_migrate: true,
+    migrate_v2: false,
+    data_ops: false,
     safe_backup: true,
     backup_move: false,
     backup_v2: false,
@@ -257,6 +259,12 @@ impl Hub {
     lock(&self.conns).get_mut(server).unwrap().safe_delete = true;
   }
 
+  pub(crate) fn mock_migrate_v2_agent(&self, server: &str) {
+    self
+      .mock_agent(server, false, |_| panic!("此测试无需 agent 调用"));
+    lock(&self.conns).get_mut(server).unwrap().migrate_v2 = true;
+  }
+
   pub(crate) fn mock_safe_migrate_agent(
     &self,
     server: &str,
@@ -369,6 +377,8 @@ impl Hub {
         frpc_reload: false,
         safe_adopt: false,
         safe_migrate: false,
+        migrate_v2: false,
+        data_ops: false,
         safe_backup: false,
         backup_move: false,
         backup_v2: false,
@@ -520,6 +530,8 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     frpc_reload: false,
     safe_adopt: false,
     safe_migrate: false,
+    migrate_v2: false,
+    data_ops: false,
     safe_backup: false,
     backup_move: false,
     backup_v2: false,
@@ -597,6 +609,8 @@ fn probe_connection(
     frpc_reload: false,
     safe_adopt: false,
     safe_migrate: false,
+    migrate_v2: false,
+    data_ops: false,
     safe_backup: false,
     backup_move: false,
     backup_v2: false,
@@ -971,6 +985,7 @@ async fn backup_move_blocks_old_agent_and_keeps_service_sync_compat()
       password: OneTimeSecret(String::new()),
       pass: SyncPass::Final,
       kind: SyncKind::CoreBackupRepo,
+      bwlimit_kbps: None,
     }),
     AgentOp::Restic(ResticJob {
       service: "wharf-core".into(),
@@ -978,6 +993,7 @@ async fn backup_move_blocks_old_agent_and_keeps_service_sync_compat()
       repo: ResticRepo::LocalCore,
       password: OneTimeSecret(String::new()),
       action: ResticAction::Snapshots,
+      bwlimit_kbps: None,
       pull: wharf_api_types::agent::PullPolicy {
         mirrors: Default::default(),
         mirrors_only: false,

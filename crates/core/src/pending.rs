@@ -94,6 +94,8 @@ pub struct TunnelDeletePayload {
 #[derive(Default)]
 pub struct PendingState {
   pub migrations: BTreeMap<String, Migration>,
+  pub adopt_data:
+    BTreeMap<String, wharf_api_types::adopt_data::AdoptDataJob>,
   pub backup_moves: BTreeMap<String, crate::backup_move::PendingMove>,
   pub gateway_downs: Vec<GatewayDownPayload>,
   pub tunnel_deletes: Vec<TunnelDeletePayload>,
@@ -155,6 +157,12 @@ pub fn load(c: &Connection) -> Result<PendingState, ApiError> {
             payload: serde_json::from_str(&payload)
               .map_err(json_err)?,
           },
+        );
+      }
+      "adopt_data" => {
+        pending.adopt_data.insert(
+          key,
+          serde_json::from_str(&payload).map_err(json_err)?,
         );
       }
       "gateway_down" => pending
@@ -265,7 +273,7 @@ pub fn clear_service(
 ) -> Result<(), ApiError> {
   c.execute(
     "DELETE FROM pending_steps
-     WHERE (kind IN ('migrate','ensure_dirs') OR (?2 AND kind='service_delete'))
+     WHERE (kind IN ('migrate','ensure_dirs','adopt_data') OR (?2 AND kind='service_delete'))
        AND json_extract(payload,'$.service')=?1",
     params![service,include_deletes],
   ).map_err(sql_err)?;
@@ -460,6 +468,17 @@ pub fn stage(
           },
         )?;
       }
+      Step::AdoptData {
+        job, instance_id, ..
+      } => {
+        put(
+          c,
+          ("adopt_data", &job.service),
+          ids,
+          instance_id.as_deref(),
+          job,
+        )?;
+      }
       Step::EnsureDirs { server, dirs, .. } => {
         if let Some(service) = step.items.iter().find_map(|id| {
           plan
@@ -530,6 +549,9 @@ pub async fn finish_step(
     return state.db.call(move |c| clear(c, kind, &target)).await;
   }
   let cleanup = match step {
+    Step::AdoptData { job, .. } => {
+      Some(("adopt_data", job.service.clone()))
+    }
     Step::DnsUpsert { hostname, .. } => {
       Some(("dns_cutover", hostname.clone()))
     }

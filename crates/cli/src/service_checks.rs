@@ -65,6 +65,7 @@ async fn put(
     vec![Change::UpsertService {
       pins: None,
       commit: None,
+      migrate: None,
       name,
       spec,
       adopt: None,

@@ -778,3 +778,57 @@ pub fn require_apply(
   }
   Ok(())
 }
+
+pub(crate) fn fleet_secret_refs(
+  fleet: &wharf_api_types::spec::Fleet,
+  known: &BTreeMap<String, String>,
+) -> (BTreeSet<String>, Vec<String>) {
+  let mut refs = BTreeSet::new();
+  let mut warnings = Vec::new();
+  for (name, spec) in &fleet.services {
+    refs.extend(
+      service_render_refs(spec)
+        .chain(git_token(spec))
+        .filter(|n| known.contains_key(*n))
+        .map(str::to_string),
+    );
+    if service_account_refs(spec).next().is_some() {
+      warnings
+        .push(format!("服务 {name} 引用应用账号，请在目标集群补配"));
+    }
+    if matches!(&spec.source, Source::Build(build) if build.git.is_none())
+    {
+      warnings.push(format!(
+        "服务 {name} 使用本地代码包，请在目标集群重新上传"
+      ));
+    }
+    for volume in &spec.volumes {
+      if let Some((owner, _)) = volume
+        .from_service
+        .as_deref()
+        .and_then(|r| r.split_once(':'))
+        && !fleet.services.contains_key(owner)
+      {
+        warnings.push(format!(
+          "服务 {name} 引用未打包服务 {owner} 的共享卷"
+        ));
+      }
+    }
+  }
+  for route in &fleet.routes {
+    if route.auth {
+      let name = render::route_auth_secret(&route.hostname);
+      if known.contains_key(&name) {
+        refs.insert(name);
+      }
+    }
+    if let Some(login) = route_login(route) {
+      refs.extend(
+        crate::sso_login::secret_refs(login)
+          .into_iter()
+          .filter(|name| known.contains_key(name)),
+      );
+    }
+  }
+  (refs, warnings)
+}

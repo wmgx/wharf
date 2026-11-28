@@ -75,11 +75,43 @@ fn handle_in(
   cancel: &CancellationToken,
 ) -> Result<Value, ApiError> {
   let (service, path) = match &op {
+    FilesOp::DataMkdir { service, path } => {
+      return crate::data_sync::mkdir(base, service, path)
+        .map(|()| Value::Null);
+    }
+    FilesOp::Remove { service, path } => {
+      return crate::data_sync::remove(base, service, path, None)
+        .map(|()| Value::Null);
+    }
+    FilesOp::AbortWrite {
+      service,
+      path,
+      upload,
+    } => {
+      return crate::data_sync::remove(
+        base,
+        service,
+        path,
+        Some(upload),
+      )
+      .map(|()| Value::Null);
+    }
     FilesOp::List { service, path }
     | FilesOp::Read { service, path, .. }
-    | FilesOp::Write { service, path, .. } => (service, path),
+    | FilesOp::Write { service, path, .. }
+    | FilesOp::DataWrite { service, path, .. } => (service, path),
     _ => return extended::handle(base, op, cancel),
   };
+  if let FilesOp::DataWrite {
+    offset: 0, upload, ..
+  } = &op
+  {
+    wharf_api_types::data_sync::path_parts(path)?;
+    validate_upload_id(upload)?;
+    let parent =
+      path.rsplit_once('/').map_or("", |(parent, _)| parent);
+    crate::data_sync::mkdir(base, service, parent)?;
+  }
   let root = DirFd::open_service_root(base, service)?;
   let segs = parse_rel(path)?;
   if matches!(op, FilesOp::List { .. }) {
@@ -91,8 +123,12 @@ fn handle_in(
   let (name, dirs) = segs
     .split_last()
     .ok_or_else(|| ApiError::invalid("路径不对"))?;
-  let parent =
-    walk(root, dirs, path, matches!(op, FilesOp::Write { .. }))?;
+  let parent = walk(
+    root,
+    dirs,
+    path,
+    matches!(op, FilesOp::Write { .. } | FilesOp::DataWrite { .. }),
+  )?;
   match op {
     FilesOp::Read {
       path,
@@ -116,7 +152,28 @@ fn handle_in(
       last,
       ..
     } => {
-      write(&parent, name, &path, offset, &data, last)?;
+      write(&parent, name, &path, offset, &data, last, None)?;
+      Ok(Value::Null)
+    }
+    FilesOp::DataWrite {
+      path,
+      upload,
+      offset,
+      data,
+      last,
+      mode,
+      ..
+    } => {
+      wharf_api_types::data_sync::path_parts(&path)?;
+      write(
+        &parent,
+        name,
+        &path,
+        offset,
+        &data,
+        last,
+        Some((&upload, mode)),
+      )?;
       Ok(Value::Null)
     }
     _ => unreachable!(),
@@ -199,6 +256,7 @@ fn read(
     return Err(changed());
   }
   Ok(FileChunk {
+    mode: Some(meta.mode() & 0o777),
     data: STANDARD.encode(&buf),
     size: after.size,
     version: Some(after),
@@ -220,6 +278,26 @@ fn regular_target(
   }
 }
 
+fn validate_upload_id(id: &str) -> Result<(), ApiError> {
+  if id.len() != 32 || !id.bytes().all(|c| c.is_ascii_hexdigit()) {
+    return Err(ApiError::invalid("上传标识不合法"));
+  }
+  Ok(())
+}
+
+pub(crate) fn upload_name(
+  name: &CStr,
+  upload: Option<&str>,
+) -> Result<CString, ApiError> {
+  if let Some(id) = upload {
+    validate_upload_id(id)?;
+    return CString::new(format!(".wharf-data-{id}.wharf-upload"))
+      .map_err(|_| ApiError::invalid("上传标识无效"));
+  }
+  CString::new([name.to_bytes(), UPLOAD_SUFFIX.as_bytes()].concat())
+    .map_err(|_| ApiError::invalid("路径不对"))
+}
+
 /// 先写临时文件，最后一块写完再原子改名。
 fn write(
   parent: &DirFd,
@@ -228,6 +306,7 @@ fn write(
   offset: u64,
   data: &str,
   last: bool,
+  upload: Option<(&str, u32)>,
 ) -> Result<(), ApiError> {
   if name.to_bytes().ends_with(UPLOAD_SUFFIX.as_bytes()) {
     return Err(ApiError::invalid("路径不对"));
@@ -238,10 +317,7 @@ fn write(
   let bytes = STANDARD
     .decode(data)
     .map_err(|e| ApiError::invalid(format!("数据不对：{e}")))?;
-  let tmp = CString::new(
-    [name.to_bytes(), UPLOAD_SUFFIX.as_bytes()].concat(),
-  )
-  .map_err(|_| ApiError::invalid("路径不对"))?;
+  let tmp = upload_name(name, upload.map(|(id, _)| id))?;
   if offset == 0
     && let Err(e) = parent.unlink(&tmp)
     && e.kind() != io::ErrorKind::NotFound
@@ -260,6 +336,7 @@ fn write(
   let meta = stat(f.as_raw_fd()).map_err(&err)?;
   if meta.st_mode & libc::S_IFMT != libc::S_IFREG
     || meta.st_nlink != 1
+    || (upload.is_some() && meta.st_size as u64 != offset)
   {
     return Err(ApiError::invalid("临时文件被替换了，请重新上传"));
   }
@@ -283,11 +360,20 @@ fn write(
   // chown 可能清除 set-ID 位，先改属主再恢复原文件权限。
   std::os::unix::fs::fchown(&f, Some(owner.0), Some(owner.1))
     .map_err(&err)?;
-  if let Some(st) = previous {
-    check(unsafe {
-      libc::fchmod(f.as_raw_fd(), st.st_mode & 0o7777)
+  let permissions = previous
+    .map(|st| {
+      st.st_mode & if upload.is_some() { 0o777 } else { 0o7777 }
     })
-    .map_err(&err)?;
+    .or_else(|| {
+      upload.map(|(_, mode)| {
+        #[allow(clippy::unnecessary_cast)]
+        let mode = (mode & 0o777) as libc::mode_t;
+        mode
+      })
+    });
+  if let Some(mode) = permissions {
+    check(unsafe { libc::fchmod(f.as_raw_fd(), mode) })
+      .map_err(&err)?;
   }
   let entry = parent.lstat(&tmp).map_err(&err)?;
   if entry.st_ino != meta.st_ino
@@ -339,6 +425,34 @@ mod tests {
       read(4, first.version).unwrap_err().code,
       ErrorCode::Conflict
     );
+  }
+
+  #[test]
+  fn data_write_creates_missing_service_and_subpath() {
+    let tmp = tempfile::tempdir().unwrap();
+    let push = |path: &str| {
+      handle_in(
+        tmp.path(),
+        FilesOp::DataWrite {
+          service: "app".into(),
+          path: path.into(),
+          upload: "f".repeat(32),
+          offset: 0,
+          data: STANDARD.encode("hello"),
+          last: true,
+          mode: 0o644,
+        },
+      )
+    };
+    push("newsub/a.txt").unwrap();
+    assert_eq!(
+      fs::read_to_string(tmp.path().join("app/newsub/a.txt"))
+        .unwrap(),
+      "hello"
+    );
+    symlink(tmp.path(), tmp.path().join("app/link")).unwrap();
+    assert!(push("link/escape.txt").is_err());
+    assert!(!tmp.path().join("escape.txt").exists());
   }
 
   #[test]

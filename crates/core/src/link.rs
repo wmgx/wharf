@@ -791,7 +791,7 @@ pub async fn require_reach(
         "{from} 连不上 {to} 的内网地址，不能{what}"
       ))
       .with_hint(
-        "两台机器要在同一个组网（Tailscale）或同一个内网里；wharf network 查看谁能连谁",
+        "两台机器需要在同一个组网（Tailscale）或内网里直连；wharf network 查看连通性",
       ),
     );
   }

@@ -381,6 +381,7 @@ impl Docker {
   pub async fn project_mounts(
     &self,
     projects: &[String],
+    running_only: bool,
     ctx: &Ctx,
   ) -> Result<
     std::collections::BTreeMap<
@@ -393,11 +394,12 @@ impl Docker {
     if projects.is_empty() {
       return Ok(mounts);
     }
-    let listed = self
-      .cmd()
+    let mut command = self.cmd().arg("ps");
+    if !running_only {
+      command = command.arg("-a");
+    }
+    let listed = command
       .args([
-        "ps",
-        "-a",
         "--no-trunc",
         "--filter",
         "label=com.docker.compose.project",
@@ -904,7 +906,8 @@ impl Docker {
     target: &Path,
     ctx: &Ctx,
   ) -> Result<Vec<String>, ApiError> {
-    let mounts = self.inspect_container_mounts(true, ctx).await?;
+    let mounts =
+      self.inspect_container_mounts(true, false, ctx).await?;
     Ok(containers_using_path(target, &mounts))
   }
 
@@ -914,8 +917,22 @@ impl Docker {
     ctx: &Ctx,
   ) -> Result<Vec<wharf_api_types::agent::BindMountUser>, ApiError>
   {
+    self.mount_users(query, false, ctx).await
+  }
+
+  pub(crate) async fn mount_users(
+    &self,
+    query: &wharf_api_types::agent::BindMountQuery,
+    include_volumes: bool,
+    ctx: &Ctx,
+  ) -> Result<Vec<wharf_api_types::agent::BindMountUser>, ApiError>
+  {
     let mounts = self
-      .inspect_container_mounts(!query.running_only, ctx)
+      .inspect_container_mounts(
+        !query.running_only,
+        include_volumes,
+        ctx,
+      )
       .await?;
     Ok(
       mount_users(
@@ -939,13 +956,15 @@ impl Docker {
     ctx: &Ctx,
   ) -> Result<Vec<wharf_api_types::agent::BindMountUser>, ApiError>
   {
-    let mounts = self.inspect_container_mounts(false, ctx).await?;
+    let mounts =
+      self.inspect_container_mounts(false, false, ctx).await?;
     Ok(active_mount_users(targets, project, writable_only, mounts))
   }
 
   async fn inspect_container_mounts(
     &self,
     all: bool,
+    include_volumes: bool,
     ctx: &Ctx,
   ) -> Result<Vec<wharf_api_types::agent::BindMountUser>, ApiError>
   {
@@ -978,7 +997,7 @@ impl Docker {
         "Docker 返回的容器挂载信息不完整",
       ));
     }
-    parse_bind_mounts(&out.stdout)
+    parse_bind_mounts(&out.stdout, include_volumes)
   }
 
   /// 当前部署的 compose 和指纹，部署新版本前留着，起不来时换回去。
@@ -1565,6 +1584,7 @@ fn paths_overlap(target: &Path, mount: &Path) -> bool {
 
 pub(crate) fn parse_bind_mounts(
   output: &str,
+  include_volumes: bool,
 ) -> Result<Vec<wharf_api_types::agent::BindMountUser>, ApiError> {
   #[derive(Deserialize)]
   #[serde(rename_all = "PascalCase")]
@@ -1598,7 +1618,7 @@ pub(crate) fn parse_bind_mounts(
       serde_json::from_str(&line[fields.byte_offset()..])
         .map_err(|_| invalid())?;
     for m in mounts.into_iter().flatten().filter(|m| {
-      m.kind == "bind"
+      (m.kind == "bind" || (include_volumes && m.kind == "volume"))
         && !(system
           && m.source == Path::new("/srv")
           && m.destination == Path::new("/srv"))
@@ -1686,7 +1706,7 @@ fn check_purge_mounts(
 #[test]
 fn down_purge_refuses_delete_when_other_container_mounts_srv() {
   let inspect = r#""/reader" "" "reader" [{"Type":"bind","Source":"/srv/photos/originals","Destination":"/photos","RW":false}]"#;
-  let mounts = parse_bind_mounts(inspect).unwrap();
+  let mounts = parse_bind_mounts(inspect, false).unwrap();
   let users =
     containers_using_path(Path::new("/srv/photos"), &mounts);
   assert_eq!(users, ["reader"]);
@@ -2069,7 +2089,8 @@ mod tests {
 "/backup-tool" "" "" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
 "/other" "" "" [{"Type":"bind","Source":"/srv/photos2"}]
 "/exact" "" "" [{"Type":"bind","Source":"/srv/photos"}]"#;
-    let containers = super::parse_bind_mounts(inspect).unwrap();
+    let containers =
+      super::parse_bind_mounts(inspect, false).unwrap();
     assert_eq!(
       super::containers_using_path(
         Path::new("/srv/photos"),
@@ -2086,7 +2107,7 @@ mod tests {
 "/reader" "" "" [{"Type":"bind","Source":"/srv/s1/data","RW":false}]
 "/wharf-agent" "agent" "" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
 "/self" "" "s1" [{"Type":"bind","Source":"/srv/s1/data"}]"#;
-    let mounts = super::parse_bind_mounts(inspect).unwrap();
+    let mounts = super::parse_bind_mounts(inspect, false).unwrap();
     let paths = [PathBuf::from("/srv/s1")];
     let backup =
       super::active_mount_users(&paths, "s1", true, mounts.clone());
@@ -2176,7 +2197,8 @@ esac
 "/wharf-agent-old" "1" "" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
 "/wharf-core" "core" "" [{"Type":"bind","Source":"/srv","Destination":"/srv"}]
 "/dedicated" "core" "" [{"Type":"bind","Source":"/srv/s1","Destination":"/data"}]"#;
-    let containers = super::parse_bind_mounts(inspect).unwrap();
+    let containers =
+      super::parse_bind_mounts(inspect, false).unwrap();
     assert_eq!(
       super::containers_using_path(
         std::path::Path::new("/srv/s1"),

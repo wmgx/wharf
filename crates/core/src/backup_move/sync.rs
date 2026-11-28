@@ -95,6 +95,7 @@ pub(super) async fn run(
           password,
           pass: SyncPass::Final,
           kind: movement.kind(),
+          bwlimit_kbps: None,
         }),
         PUSH_TIMEOUT,
         Some(progress.clone()),

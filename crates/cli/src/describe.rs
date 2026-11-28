@@ -80,22 +80,43 @@ fn walk(
     if command == "data cleanup policy" {
       entry["write_perms"] = json!(["admin"]);
     }
-    if cmd.get_arguments().any(|a| a.get_long() == Some("dry-run"))
-      || command == "data cleanup"
+    if matches!(
+      command.as_str(),
+      "data push" | "data cleanup" | "import"
+    ) || cmd
+      .get_arguments()
+      .any(|a| a.get_long() == Some("dry-run"))
     {
       entry["dry_run"] = json!(true);
     }
     if cmd.get_arguments().any(|a| a.get_long() == Some("apply")) {
       entry["apply_perms"] = match command.as_str() {
         "data cleanup" => json!(["apply", "confirm"]),
+        "data push" => json!(["exec"]),
         "service env sync" => json!(["plan", "apply"]),
         _ => json!(["apply"]),
       };
     }
-    if command == "service env sync" {
-      entry["import_perms"] = json!(["admin"]);
-    }
     match command.as_str() {
+      "data push" => {
+        entry["flag_variants"] = json!({
+          "--delete": {"apply_perms": ["exec", "confirm"]},
+          "--apply": {"returns": "data-push-summary"}
+        });
+      }
+      "export" => {
+        entry["flag_variants"] = json!({
+          "--with-secrets": {"perms": ["admin"], "returns": "bundle-export-summary"}
+        });
+      }
+      "service import" => {
+        entry["flag_variants"] = json!({
+          "--extract-secrets": {"returns": "service-import-preview", "when": "无 --apply 且提取到密钥"}
+        });
+      }
+      "service env sync" => {
+        entry["import_perms"] = json!(["admin"]);
+      }
       "backup core" => {
         entry["returns_by_flag"] = json!({
           "--verify-password":"core_backup_verify", "--export":"core_backup_export"
@@ -203,6 +224,16 @@ fn effect(
       "read"
     };
     return (effect, &["host"]);
+  }
+  match command {
+    "data pull" => return ("read", &["read"]),
+    "data push" => return ("direct", &["read"]),
+    "service adopt-data" => {
+      return ("plan", &["plan", "host", "admin"]);
+    }
+    "service import" => return ("plan", &["plan", "host"]),
+    "import" => return ("plan", &["admin", "plan"]),
+    _ => {}
   }
   if matches!(
     command,
@@ -317,6 +348,12 @@ fn effect(
 
 fn returns(command: &str) -> Option<&'static str> {
   Some(match command {
+    "export" => "fleet",
+    "data pull" => "data-pull-summary",
+    "data push" => "data-push-plan",
+    "import" => "bundle-import-preview",
+    "service adopt-data" | "service move" | "server set"
+    | "service import" => "plan",
     "service files" | "service files ls" => "file_entry",
     "service files tail" => "file_tail",
     "service files grep" => "file_grep",
@@ -449,6 +486,36 @@ pub fn commands(prefix: &[String]) -> Value {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn commands_describe_data_and_import_flag_variants() {
+    use serde_json::json;
+    let index = super::commands(&[]);
+    let command = |name: &str| {
+      index["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["command"] == name)
+        .unwrap()
+    };
+    let push = command("wharf data push");
+    assert_eq!(
+      push["flag_variants"]["--delete"]["apply_perms"],
+      json!(["exec", "confirm"])
+    );
+    let export = command("wharf export");
+    assert_eq!(
+      export["flag_variants"]["--with-secrets"],
+      json!({"perms": ["admin"], "returns": "bundle-export-summary"})
+    );
+    let import = command("wharf service import");
+    assert_eq!(import["returns"], "plan");
+    assert_eq!(
+      import["flag_variants"]["--extract-secrets"]["returns"],
+      "service-import-preview"
+    );
+  }
+
   #[test]
   fn backup_move_declares_wait_and_no_wait_results() {
     let v = super::commands(&["backup".into(), "move".into()]);

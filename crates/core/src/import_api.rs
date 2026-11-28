@@ -15,6 +15,8 @@ use wharf_api_types::{
   view::{ImportPreview, ImportRequest, Perm, Unmanaged},
 };
 
+use crate::secret_import::SecretChangesExt;
+
 use crate::{
   api::ApiResult,
   auth::Auth,
@@ -103,8 +105,21 @@ pub(crate) async fn discover(
 pub async fn preview(
   State(s): State<Arc<AppState>>,
   auth: Auth,
+  axum::Extension(audit): axum::Extension<crate::audit::AuditSlot>,
   Json(req): Json<ImportRequest>,
 ) -> ApiResult<ImportPreview> {
+  if req.commit_secrets {
+    auth.require(Perm::Admin)?;
+    if !req.extract_secrets || auth.services.is_some() {
+      return Err(
+        ApiError::new(
+          ErrorCode::Forbidden,
+          "转存密钥需要完整管理权限",
+        )
+        .into(),
+      );
+    }
+  }
   let (kind, raw_name) = target(&req.project, &req.container)?;
   let snap = snapshot::load(&s.db).await?;
   crate::host_access::require_with(
@@ -204,14 +219,46 @@ pub async fn preview(
     );
   }
   warnings.extend(converted.warnings);
-  let (compose, keys) =
-    crate::redact::redact_compose_secrets(&converted.compose);
-  if compose.is_empty() {
-    return Err(ApiError::invalid("无法生成脱敏后的导入预览").into());
-  }
-  if !keys.is_empty() {
-    warnings.push(format!("以下环境变量疑似包含口令，预览已脱敏：{}（导入前请在密钥管理中创建密钥并写成 [[密钥名]]）", keys.join("、")));
-  }
+  let (compose, extracted_secrets) = if req.extract_secrets {
+    let (compose, mut items, values) =
+      import::extract_secrets_from_compose(
+        &converted.compose,
+        &name,
+        req.secret_prefix.as_deref(),
+      )?;
+    let summary = crate::secret_import::write(&s, values, req.secret_conflict, None, !req.commit_secrets).await
+      .map_err(|mut e| {
+        if e.code == ErrorCode::Conflict {
+          e.hint = Some("加 --only-missing-secrets 保留已有密钥、--overwrite-secrets 覆盖，或用 --secret-prefix 换前缀".into());
+        }
+        e
+      })?;
+    for item in &mut items {
+      item.action = summary.action(&item.secret_name).into();
+    }
+    if req.commit_secrets {
+      audit.set_detail(format!(
+        "import_extract_secrets service={name} {}",
+        summary.audit()
+      ));
+    }
+    if !req.commit_secrets {
+      audit.skip_record();
+    }
+    (compose, items)
+  } else {
+    let (compose, keys) =
+      crate::redact::redact_compose_secrets(&converted.compose);
+    if compose.is_empty() {
+      return Err(
+        ApiError::invalid("无法生成脱敏后的导入预览").into(),
+      );
+    }
+    if !keys.is_empty() {
+      warnings.push(format!("以下变量疑似包含口令，预览已脱敏：{}。可加 --extract-secrets 自动转存进密钥库", keys.join("、")));
+    }
+    (compose, Vec::new())
+  };
   Ok(Json(ImportPreview {
     spec: ServiceSpec {
       server: req.server,
@@ -240,6 +287,8 @@ pub async fn preview(
       init_timeout_secs: None,
     },
     adopt: converted.adopt,
+    extracted_secrets,
+    secrets_committed: req.commit_secrets,
     name,
     warnings,
   }))

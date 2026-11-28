@@ -276,6 +276,8 @@ async fn handshake(
     frpc_reload: true,
     safe_adopt: true,
     safe_migrate: true,
+    migrate_v2: true,
+    data_ops: true,
     safe_backup: true,
     backup_move: true,
     backup_v2: true,

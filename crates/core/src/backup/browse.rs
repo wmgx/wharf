@@ -291,6 +291,7 @@ impl Extract {
       },
       action,
       core_marker: None,
+      bwlimit_kbps: None,
     })
   }
 

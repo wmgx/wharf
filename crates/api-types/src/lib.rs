@@ -8,10 +8,13 @@
 //! - [error]：统一错误格式 `{ code, message, hint, suggest }`。
 
 pub mod access_logs;
+pub mod adopt_data;
 pub mod agent;
 pub mod backup;
 pub mod build;
+pub mod bundle;
 pub mod compose;
+pub mod data_sync;
 pub mod egress;
 pub mod error;
 pub mod external;

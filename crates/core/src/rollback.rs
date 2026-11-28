@@ -420,6 +420,7 @@ mod tests {
         adopt: None,
         pins,
         commit,
+        migrate: None,
       }])
       .unwrap();
     let row = &world.services["app"];
@@ -465,6 +466,7 @@ mod tests {
         adopt: None,
         pins,
         commit,
+        migrate: None,
       }])
       .unwrap();
     assert_eq!(world.services["app"].spec.source, spec.source);
@@ -599,6 +601,7 @@ mod tests {
       adopt: None,
       pins: None,
       commit: None,
+      migrate: None,
     };
     current.apply_changes(&[change(spec.clone())]).unwrap();
     let old = serde_json::from_value(json!({

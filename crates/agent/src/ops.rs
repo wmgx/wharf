@@ -339,9 +339,9 @@ impl Ops {
         })??;
         to_value(result)
       }
-      AgentOp::ProjectMounts { projects } => {
-        to_value(self.docker.project_mounts(&projects, ctx).await?)
-      }
+      AgentOp::ProjectMounts { projects } => to_value(
+        self.docker.project_mounts(&projects, false, ctx).await?,
+      ),
       AgentOp::SyncServe(s) => {
         check_project(&s.service)?;
         if s.kind.is_service_data() {
@@ -359,6 +359,70 @@ impl Ops {
           Some(self.lock_backup_repo(&p.service, ctx).await?)
         };
         crate::sync::push(&p, ctx).await
+      }
+      AgentOp::AdoptDataInspect(job) => to_value(
+        crate::adopt_data::inspect(
+          &self.docker,
+          &self.data_dir,
+          &job,
+          true,
+          ctx,
+        )
+        .await?,
+      ),
+      AgentOp::AdoptDataCopy(job) => {
+        let _guard = self.lock_data(&job.service, ctx).await?;
+        crate::adopt_data::copy(
+          &self.docker,
+          &self.data_dir,
+          &job,
+          ctx,
+        )
+        .await?;
+        Ok(Value::Null)
+      }
+      AgentOp::DataManifest { service, request } => {
+        let cancel = ctx.cancel.clone();
+        to_value(
+          tokio::task::spawn_blocking(move || {
+            crate::data_sync::manifest(&service, request, &cancel)
+          })
+          .await
+          .map_err(|_| ApiError::internal("数据清单任务失败"))??,
+        )
+      }
+      AgentOp::DataSqliteSnap { service, path } => to_value(
+        crate::data_sync::sqlite_snap(
+          service,
+          path,
+          ctx.cancel.clone(),
+        )
+        .await?,
+      ),
+      AgentOp::DataSqliteRead { snap_id, offset } => {
+        to_value(crate::data_sync::sqlite_read(&snap_id, offset)?)
+      }
+      AgentOp::DataSqliteClose { snap_id } => {
+        crate::data_sync::sqlite_close(&snap_id);
+        Ok(Value::Null)
+      }
+      AgentOp::DirSpace {
+        service,
+        measure_data,
+      } => {
+        let cancel = ctx.cancel.clone();
+        to_value(
+          tokio::task::spawn_blocking(move || {
+            crate::sync::dir_space(
+              Path::new("/srv"),
+              &service,
+              measure_data,
+              &cancel,
+            )
+          })
+          .await
+          .map_err(|_| ApiError::internal("磁盘预检任务失败"))??,
+        )
       }
       AgentOp::RemoveData { service } => {
         self.remove_data(&service, ctx).await
@@ -451,6 +515,17 @@ impl Ops {
       AgentOp::Prune => to_value(self.docker.prune(ctx).await?),
       // 文件 IO 不长，但还是放到阻塞线程，不卡住连接。
       AgentOp::Files(op) => {
+        let _guard = match &op {
+          wharf_api_types::agent::FilesOp::DataWrite {
+            service,
+            ..
+          }
+          | wharf_api_types::agent::FilesOp::AbortWrite {
+            service,
+            ..
+          } => Some(self.lock_data(service, ctx).await?),
+          _ => None,
+        };
         let cancel = ctx.cancel.clone();
         tokio::task::spawn_blocking(move || {
           crate::files::handle(op, &cancel)

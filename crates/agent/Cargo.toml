@@ -35,5 +35,5 @@ tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-[dev-dependencies]
+rusqlite = { workspace = true, features = ["backup"] }
 tempfile = "3"
