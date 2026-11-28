@@ -374,7 +374,7 @@ fn digest_render_caps_body_without_losing_total_count() {
       is_notice: false,
     })
     .collect::<Vec<_>>();
-  let (title, body) = render(&rows).unwrap();
+  let (title, body) = render(&rows, beijing()).unwrap();
   assert!(title.contains("100 条"));
   assert!(body.contains("条已省略"));
   assert!(body.len() <= MAX_RENDER_BYTES);
