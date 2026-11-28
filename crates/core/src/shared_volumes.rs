@@ -307,6 +307,8 @@ mod tests {
           service: service.into(),
           instance_id: None,
           expect: None,
+          refresh_files_from: None,
+          images: Default::default(),
         },
       })
       .collect();

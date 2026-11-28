@@ -3341,6 +3341,7 @@ mod tests {
         },
         Query(BriefQuery::default()),
         axum::Extension(crate::audit::AuditSlot::default()),
+        HeaderMap::new(),
         Json(request.clone()),
       )
       .await
