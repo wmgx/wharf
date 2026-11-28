@@ -64,9 +64,6 @@ pub fn last_for(
   service: &str,
   row: &ServiceRow,
 ) -> Option<MonitorView> {
-  if crate::rules::op_silence::service_busy(state, service) {
-    return None;
-  }
   let target = target(state, snap, service, row)?;
   let applied_at = snap
     .applied

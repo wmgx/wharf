@@ -46,22 +46,31 @@ mod tests {
   use wharf_api_types::{ErrorCode, agent::AgentOp, view::Perm};
 
   #[tokio::test]
-  async fn extra_logs_reject_undeclared_paths_and_old_agents() {
+  async fn extra_logs_enforce_declarations_and_audit_only_file_reads()
+  {
+    use axum::{
+      body::{Body, to_bytes},
+      http::Request,
+    };
+    use tower::ServiceExt;
+
     let state = crate::rules::tests::test_state();
-    state.db.call(|c| db::apply_write(c, &Write::Upsert {
-      kind: "service".into(), name: "stack".into(), meta: json!({}),
-      spec: json!({"server":"s1","source":{"image":"fixture:1"},
-        "volumes":[{"name":"logs","target":"/logs"}],"extra_logs":["logs/error.log"]}),
-    })).await.unwrap();
-    state.hub.mock_agent("s1", false, |op| {
-      assert!(matches!(
-        op,
-        AgentOp::Files(
-          wharf_api_types::agent::FilesOp::ExtraLog { .. }
-        )
-      ));
-      Ok(json!({"path":"logs/error.log","size":19,"lines":3,
-        "content":"before\nERROR\nafter\n","truncated":false}))
+    state.db.call(|c| {
+      db::apply_write(c, &Write::Upsert {
+        kind: "service".into(), name: "stack".into(), meta: json!({}),
+        spec: json!({"server":"s1","source":{"image":"fixture:1"},
+          "volumes":[{"name":"logs","target":"/logs"}],"extra_logs":["logs/error.log"]}),
+      })?;
+      crate::auth::insert_token(c, "log-fixture", &[Perm::Read], "fixture-logs")?;
+      Ok(())
+    }).await.unwrap();
+    state.hub.mock_agent("s1", false, |op| match op {
+      AgentOp::Files(wharf_api_types::agent::FilesOp::ExtraLog {
+        ..
+      }) => Ok(json!({"path":"logs/error.log","size":19,"lines":3,
+          "content":"before\nERROR\nafter\n","truncated":false})),
+      AgentOp::Logs { .. } => Ok(json!("stdout")),
+      _ => panic!("额外的 agent 操作"),
     });
     let request = |file: &str| {
       api::service_logs(
@@ -85,13 +94,60 @@ mod tests {
       ErrorCode::Conflict
     );
     state.hub.enable_mock_extra_logs("s1");
-    let result = request("logs/error.log")
+    let router = crate::api::router(state.clone());
+    for (query, expected) in [
+      (
+        "?file=logs%2Ferror.log&grep=ERROR&context=1",
+        "before\nERROR\nafter\n",
+      ),
+      ("", "stdout"),
+    ] {
+      let request = Request::builder()
+        .uri(format!("/api/services/stack/logs{query}"))
+        .extension(crate::cli_tunnel::Sealed)
+        .header("authorization", "Bearer fixture-logs")
+        .body(Body::empty())
+        .unwrap();
+      let response = router.clone().oneshot(request).await.unwrap();
+      assert_eq!(response.status().as_u16(), 200);
+      let body = to_bytes(response.into_body(), 4096).await.unwrap();
+      let result: serde_json::Value =
+        serde_json::from_slice(&body).unwrap();
+      assert_eq!(result["logs"], expected);
+    }
+    state
+      .db
+      .call(|c| {
+        let mut rows = c
+          .prepare(
+            "SELECT actor, path, status, detail FROM audit_log",
+          )
+          .map_err(db::sql_err)?;
+        let result = rows
+          .query_map([], |r| {
+            Ok((
+              r.get::<_, String>(0)?,
+              r.get::<_, String>(1)?,
+              r.get::<_, u16>(2)?,
+              r.get::<_, String>(3)?,
+            ))
+          })
+          .map_err(db::sql_err)?
+          .collect::<Result<Vec<_>, _>>()
+          .map_err(db::sql_err)?;
+        assert_eq!(
+          result,
+          [(
+            "log-fixture".to_string(),
+            "/api/services/stack/logs".to_string(),
+            200,
+            "logs stack:logs/error.log".to_string()
+          )]
+        );
+        Ok(())
+      })
       .await
-      .map_err(|error| error.0)
-      .unwrap()
-      .0;
-    assert_eq!(result["logs"], "before\nERROR\nafter\n");
-    assert_eq!(result["file"], "logs/error.log");
+      .unwrap();
   }
 
   #[tokio::test]

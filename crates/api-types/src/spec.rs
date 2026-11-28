@@ -3,7 +3,7 @@
 //! 资源名不放在 spec 里，由外层的 key（fleet.toml 的表名、API 路径）给出，
 //! 这样意图文件里不会出现"名字写了两遍还不一致"的问题。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -440,6 +440,79 @@ impl WaitCondition {
   pub fn valid_port(spec: &ServiceSpec, port: &str) -> bool {
     spec.ports.iter().any(|p| p.name == port && !p.udp)
   }
+}
+
+pub fn validate_service_dependencies<'a>(
+  services: impl IntoIterator<Item = (&'a str, &'a ServiceSpec)>,
+) -> Result<(), crate::ApiError> {
+  let mut has_wait = false;
+  let mut dependencies = BTreeMap::<&str, BTreeSet<&str>>::new();
+  for (name, spec) in services {
+    let waits =
+      spec.wait_for.values().filter_map(WaitCondition::service);
+    let owners = spec.volumes.iter().filter_map(|volume| {
+      let (owner, _) =
+        volume.from_service.as_deref()?.split_once(':')?;
+      Some(owner)
+    });
+    for dep in waits.inspect(|_| has_wait = true).chain(owners) {
+      dependencies.entry(name).or_default().insert(dep);
+    }
+  }
+  while !dependencies.is_empty() {
+    let ready: Vec<_> = dependencies
+      .iter()
+      .filter(|(_, owners)| {
+        owners.iter().all(|owner| !dependencies.contains_key(owner))
+      })
+      .map(|(&service, _)| service)
+      .collect();
+    if ready.is_empty() {
+      if !has_wait {
+        let services =
+          dependencies.keys().copied().collect::<Vec<_>>();
+        return Err(
+          crate::ApiError::invalid(format!(
+            "共享卷依赖成环：{}",
+            services.join("、")
+          ))
+          .with_hint("解除其中一个共享卷引用后再试")
+          .with_details(
+            serde_json::json!({"dependency_cycle": services}),
+          ),
+        );
+      }
+      let mut chain = Vec::new();
+      let mut next = *dependencies.keys().next().unwrap();
+      loop {
+        if let Some(start) =
+          chain.iter().position(|&name| name == next)
+        {
+          chain.push(next);
+          let cycle = &chain[start..];
+          return Err(
+            crate::ApiError::invalid(format!(
+              "启动等待成环：{}",
+              cycle.join(" → ")
+            ))
+            .with_hint("移除一条启动等待关系")
+            .with_details(
+              serde_json::json!({"dependency_cycle": cycle}),
+            ),
+          );
+        }
+        chain.push(next);
+        next = *dependencies[next]
+          .iter()
+          .find(|&&name| dependencies.contains_key(name))
+          .unwrap();
+      }
+    }
+    for service in ready {
+      dependencies.remove(service);
+    }
+  }
+  Ok(())
 }
 
 pub fn validate_wait_for(

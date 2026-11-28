@@ -155,6 +155,50 @@ pub(super) async fn tick(
   let snap = snapshot::load(&state.db).await?;
   for (service, spec, identity, since) in rows {
     let cron = validate(&spec)?.with_offset(offset);
+    let key = identity.key();
+    let Some(guard) = RunGuard::acquire(&key) else {
+      continue;
+    };
+    if let Some(window) = spec.catch_up_mins
+      && until > after
+    {
+      // 截止分钟仍能补跑，从下一分钟起记录过期。
+      let expiry = chrono::Duration::minutes(i64::from(window) + 1);
+      let lookback =
+        (until - after).num_minutes().clamp(0, 1440) as u32;
+      if let Some(missed) =
+        cron.prev_at_or_before(until - expiry, lookback)
+        && missed + expiry > after
+        && missed > resumed
+        && missed.timestamp_millis() >= since
+        && !scheduled_since(state, &key, missed).await?
+      {
+        let detail = format!(
+          "错过定时重启 {}，在 {window} 分钟内未补跑",
+          missed.with_timezone(&offset).format("%H:%M"),
+        );
+        let (id, _) = insert_run_at(
+          state,
+          &key,
+          TaskStatus::Failed,
+          "catch_up",
+          missed.timestamp_millis(),
+          Some((&service, Some(&identity.instance_id))),
+          None,
+        )
+        .await?;
+        finish(
+          state,
+          id,
+          TaskStatus::Failed,
+          None,
+          &detail,
+          None,
+          None,
+        )
+        .await;
+      }
+    }
     let Some((due, trigger)) =
       due_for(&cron, &spec, after, until, resumed, since)
     else {
@@ -172,10 +216,6 @@ pub(super) async fn tick(
     {
       continue;
     }
-    let key = identity.key();
-    let Some(guard) = RunGuard::acquire(&key) else {
-      continue;
-    };
     if scheduled_since(state, &key, due).await? {
       continue;
     }
@@ -455,8 +495,8 @@ fn restart_due_does_not_catch_up_before_revision_or_resume() {
 }
 
 #[tokio::test]
-async fn scheduled_restart_catches_up_once_and_keeps_stopped_service_stopped()
- {
+async fn scheduled_restart_records_catch_up_stop_and_expired_window()
+{
   use std::sync::atomic::{AtomicUsize, Ordering};
   let state = crate::migrate::tests::seed_service(false).await;
   let save = |stopped| db::Write::Upsert {
@@ -539,5 +579,44 @@ async fn scheduled_restart_catches_up_once_and_keeps_stopped_service_stopped()
   .await
   .unwrap();
   assert_eq!(wait_for_runs(2).await[1].0, "skipped");
+
+  state.hub.disconnect("s2");
+  let write = save(false);
+  state
+    .db
+    .call(move |c| db::apply_write(c, &write))
+    .await
+    .unwrap();
+  let missed = due + chrono::Duration::minutes(2);
+  let deadline = missed + chrono::Duration::minutes(3);
+  tick(
+    &state,
+    missed - chrono::Duration::minutes(1),
+    deadline,
+    resumed,
+    offset,
+  )
+  .await
+  .unwrap();
+  tick(
+    &state,
+    deadline,
+    deadline + chrono::Duration::minutes(1),
+    resumed,
+    offset,
+  )
+  .await
+  .unwrap();
+  let rows = wait_for_runs(3).await;
+  assert_eq!(rows.len(), 3);
+  assert_eq!(rows[2], ("failed".into(), "catch_up".into()));
+  let last = state.db.call(|c| {
+    c.query_row(
+      "SELECT started_at, output FROM task_runs ORDER BY id DESC LIMIT 1", [],
+      |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+    ).map_err(sql_err)
+  }).await.unwrap();
+  assert_eq!(last.0, missed.timestamp_millis());
+  assert!(last.1.contains("3 分钟内未补跑"));
   assert_eq!(count.load(Ordering::SeqCst), 1);
 }

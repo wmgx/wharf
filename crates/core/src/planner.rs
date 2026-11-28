@@ -677,7 +677,7 @@ pub(crate) async fn make_plan_inner(
   crate::secret_policy::require_plan_git_secrets(
     &current, &desired, admin,
   )?;
-  // 只改日志、端口监控或心跳时间时，计划只写配置，离线和现存漂移都不触发部署。
+  // 只改不参与部署的服务设置时，计划只写配置。
   if req.changes.iter().all(|c| {
     matches!(
       c,
@@ -1921,20 +1921,7 @@ fn service_items(
           .any(|image| !svc.pins.contains_key(image)))
       .then(|| "按标签重新拉取未固定的镜像".into())
     });
-    let runtime_settings_only = old.is_some_and(|old| {
-      let mut row = svc.clone();
-      row.spec.wait_for.clone_from(&old.spec.wait_for);
-      row.spec.wait_for_timeout_secs = old.spec.wait_for_timeout_secs;
-      row
-        .spec
-        .restart_schedule
-        .clone_from(&old.spec.restart_schedule);
-      row.spec.extra_logs.clone_from(&old.spec.extra_logs);
-      &row == old
-    });
-    let observed = if changed(writes, KIND_SERVICE, name)
-      && !runtime_settings_only
-    {
+    let observed = if changed(writes, KIND_SERVICE, name) {
       None
     } else {
       live.and_then(|p| p.hash.as_deref())
@@ -4502,6 +4489,115 @@ mod tests {
     assert!(b.steps.is_empty());
     assert_eq!(b.items.len(), 1);
     assert_eq!(b.items[0].layer, Layer::Config);
+  }
+
+  #[tokio::test]
+  async fn offline_wait_settings_plan_only_writes_config() {
+    let state = crate::rules::tests::test_state();
+    let mut world = world();
+    world
+      .services
+      .get_mut("app")
+      .unwrap()
+      .pins
+      .insert("nginx:1".into(), format!("sha256:{}", "a".repeat(64)));
+    let mut provider = world.services["app"].clone();
+    provider.spec.ports.clear();
+    provider.host_ports.clear();
+    world.services.insert("db".into(), provider);
+    let mut spec = world.services["app"].spec.clone();
+    spec.wait_for.insert(
+      "db".into(),
+      wharf_api_types::spec::WaitCondition::Service {
+        service: "db".into(),
+      },
+    );
+    let planned = make_plan_inner(
+      &state,
+      PlanRequest {
+        changes: vec![wharf_api_types::spec::Change::UpsertService {
+          name: "app".into(),
+          spec,
+          adopt: None,
+          pins: None,
+          commit: None,
+          migrate: None,
+        }],
+        ..Default::default()
+      },
+      Snapshot {
+        world,
+        ..Default::default()
+      },
+      false,
+      true,
+    )
+    .await
+    .unwrap();
+    assert!(planned.steps.is_empty());
+    assert_eq!(planned.writes.len(), 1);
+    assert_eq!(planned.plan.items.len(), 1);
+    assert_eq!(planned.plan.items[0].layer, Layer::Config);
+  }
+
+  #[tokio::test]
+  async fn legacy_running_services_have_no_plan_drift() {
+    let state = crate::rules::tests::test_state();
+    let raw = "services: {legacy-compose: {image: alpine:3}}\n";
+    let world = World::from_rows(vec![
+      crate::db::ResourceRow { kind: "server".into(), name: "s1".into(),
+        version: 1, spec: json!({}), meta: json!({}) },
+      crate::db::ResourceRow { kind: "service".into(), name: "app".into(),
+        version: 1, spec: json!({"server":"s1","source":{"image":"nginx:1"},
+          "ports":[{"name":"http","container":80,"host":21000}]}),
+        meta: json!({"host_ports":{"http":21000}}) },
+      crate::db::ResourceRow { kind: "service".into(), name: "legacy-compose".into(),
+        version: 1, spec: json!({"server":"s1","source":{"compose":{"content":raw}}}),
+        meta: json!({}) },
+    ]).unwrap();
+    let legacy_image = concat!(
+      "# 由 Wharf 生成，不要手改。\n",
+      "name: app\nservices:\n  app:\n    image: nginx:1\n    restart: unless-stopped\n",
+      "    ports:\n    - 127.0.0.1:21000:80\n    labels:\n      wharf.service: app\n",
+    );
+    use wharf_api_types::agent::AgentOp;
+    state.hub.mock_agent("s1", false, move |op| match op {
+      AgentOp::ProjectStatus { .. } => Ok(json!([
+        {"project":"app","hash":crate::render::hash(legacy_image),"containers":[container("running")]},
+        {"project":"legacy-compose","hash":crate::render::hash(raw),"containers":[
+          {"name":"legacy-compose-1","service":"legacy-compose","state":"running"}]}
+      ])),
+      AgentOp::ResolveImages(job) => Ok(json!(job.images.into_iter().map(|image| json!({
+        "image":image, "digest":format!("sha256:{}", "a".repeat(64)), "config":"new-image",
+      })).collect::<Vec<_>>())),
+      _ => panic!("计划期发了意外请求"),
+    });
+    let applied = [("app", "nginx:1", legacy_image), ("legacy-compose", "alpine:3", raw)]
+      .map(|(name, image, compose)| (name.into(), serde_json::from_value(json!({
+        "hash":crate::render::hash(compose), "at":"2026-01-01T00:00:00Z",
+        "image":image, "image_id":"old-image",
+      })).unwrap()))
+      .into_iter().collect();
+    let planned = make_plan_inner(
+      &state,
+      PlanRequest::default(),
+      Snapshot {
+        world,
+        applied,
+        ..Default::default()
+      },
+      false,
+      true,
+    )
+    .await
+    .unwrap();
+    assert!(planned.writes.is_empty());
+    assert!(planned.steps.is_empty());
+    assert!(
+      planned.plan.items.is_empty(),
+      "{:?}",
+      planned.plan.items
+    );
   }
 
   #[tokio::test]

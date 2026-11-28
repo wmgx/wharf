@@ -1753,7 +1753,7 @@ pub(super) async fn service_logs(
       );
     }
     crate::data::validate_extra_logs(&name, spec)?;
-    audit.set_detail(format!("logs {name}:{path}"));
+    audit.require_record(format!("logs {name}:{path}"));
     return Ok(Json(
       file_logs(&s, &snap, &name, server, path, &q).await?,
     ));
@@ -3202,6 +3202,88 @@ async fn export(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn scoped_plan_hides_services_in_wait_cycle() {
+    let state = crate::rules::tests::test_state();
+    state
+      .db
+      .call(|c| {
+        crate::db::apply_write(
+          c,
+          &crate::db::Write::Upsert {
+            kind: "server".into(),
+            name: "s1".into(),
+            spec: json!({}),
+            meta: json!({}),
+          },
+        )?;
+        for (name, next) in [
+          ("cycle-app", None),
+          ("cycle-db", Some("hidden-x")),
+          ("hidden-x", Some("hidden-y")),
+          ("hidden-y", Some("cycle-app")),
+        ] {
+          let mut spec =
+            json!({"server":"s1","source":{"image":"fixture:1"}});
+          if let Some(next) = next {
+            spec["wait_for"] =
+              json!({"upstream":{"kind":"service","service":next}});
+          }
+          crate::db::apply_write(
+            c,
+            &crate::db::Write::Upsert {
+              kind: "service".into(),
+              name: name.into(),
+              spec,
+              meta: json!({}),
+            },
+          )?;
+        }
+        Ok(())
+      })
+      .await
+      .unwrap();
+    let request: PlanRequest = serde_json::from_value(json!({"changes":[{
+      "op":"upsert_service","name":"cycle-app","spec":{"server":"s1","source":{"image":"fixture:1"},
+        "wait_for":{"db":{"kind":"service","service":"cycle-db"}}}
+    }]})).unwrap();
+    for services in
+      [None, Some(["cycle-app".into(), "cycle-db".into()].into())]
+    {
+      let scoped = services.is_some();
+      let error = make_plan(
+        State(state.clone()),
+        Auth {
+          name: "fixture".into(),
+          perms: [Perm::Plan].into(),
+          services,
+          expires_at: None,
+          allowed_from: vec![],
+          human: false,
+        },
+        Query(BriefQuery::default()),
+        axum::Extension(crate::audit::AuditSlot::default()),
+        Json(request.clone()),
+      )
+      .await
+      .unwrap_err()
+      .0;
+      assert_eq!(error.code, ErrorCode::InvalidInput);
+      if scoped {
+        let payload = serde_json::to_string(&error).unwrap();
+        assert!(
+          !payload.contains("hidden-x")
+            && !payload.contains("hidden-y")
+        );
+        assert!(payload.contains("成环"));
+      } else {
+        assert!(error.message.contains(
+          "cycle-app → cycle-db → hidden-x → hidden-y → cycle-app"
+        ));
+      }
+    }
+  }
 
   #[tokio::test]
   async fn partial_plan_reports_missing_gateway_for_scoped_route() {

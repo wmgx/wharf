@@ -221,7 +221,7 @@ pub(crate) fn check_retry(
   world: &World,
   plan: &Plan,
   steps: &[StepPlan],
-  instances: &Option<BTreeMap<String, String>>,
+  instances: &BTreeMap<String, String>,
 ) -> Result<(), ApiError> {
   for step in steps {
     let (name, removing) = match &step.step {
@@ -249,8 +249,7 @@ pub(crate) fn check_retry(
     let known = |address: &str| {
       address.strip_prefix("service/").is_none_or(|name| {
         world.services.get(name).is_some_and(|row| {
-          instances.as_ref().and_then(|ids| ids.get(address))
-            == Some(&row.instance_id)
+          instances.get(address) == Some(&row.instance_id)
         })
       })
     };
@@ -282,6 +281,56 @@ pub(crate) fn check_retry(
     }
   }
   Ok(())
+}
+
+#[test]
+fn retry_accepts_confirmed_consumer_created_in_same_plan() {
+  use serde_json::json;
+  let service = |name: &str, spec| ResourceRow {
+    kind: "service".into(),
+    name: name.into(),
+    version: 1,
+    spec,
+    meta: json!({"instance_id": format!("fixture-{name}")}),
+  };
+  let db = json!({"server":"s1","source":{"image":"db:1"}});
+  let before =
+    World::from_rows(vec![service("db", db.clone())]).unwrap();
+  let mut stopped = db;
+  stopped["stopped"] = json!(true);
+  let mut after = World::from_rows(vec![
+    service("db", stopped),
+    service(
+      "app",
+      json!({"server":"s1","source":{"image":"app:1"},
+      "env":{"DB":"[[@db]]"}}),
+    ),
+  ])
+  .unwrap();
+  let mut plan: Plan = serde_json::from_value(json!({
+    "plan_id":"p_test", "status":"applied","created_at":"2026-01-01T00:00:00Z",
+    "expires_at":"2026-01-01T00:01:00Z","base_versions":{},"suggest":[],
+    "needs_confirm":["service/db"],
+    "items":[{"id":1,"address":"service/db","layer":"container","action":"update","reason":"停止"}],
+  })).unwrap();
+  let steps = [StepPlan {
+    items: vec![1],
+    title: "停止 db".into(),
+    step: Step::ServiceStop {
+      service: "db".into(),
+    },
+  }];
+  mark(&before, &after, &mut plan.items, &steps);
+  let committed_instances = after.service_instances();
+  check_retry(&after, &plan, &steps, &committed_instances).unwrap();
+  after.services.get_mut("app").unwrap().instance_id =
+    "fixture-replacement".into();
+  assert_eq!(
+    check_retry(&after, &plan, &steps, &committed_instances)
+      .unwrap_err()
+      .code,
+    ErrorCode::PlanStale,
+  );
 }
 
 #[test]

@@ -115,19 +115,10 @@ pub fn validate_service(
 
 pub fn validate_world(world: &World) -> Result<(), ApiError> {
   let mut owned = BTreeMap::new();
-  let mut has_wait = false;
-  let mut dependencies = BTreeMap::<&str, BTreeSet<&str>>::new();
   for (name, row) in &world.services {
-    for wait in row.spec.wait_for.values() {
-      if let Some(owner) = wait.service() {
-        has_wait = true;
-        dependencies.entry(name).or_default().insert(owner);
-      }
-    }
     for v in &row.spec.volumes {
       let Some(raw) = &v.from_service else { continue };
       let (owner, vol) = parse_ref(raw)?;
-      dependencies.entry(name).or_default().insert(owner);
       let other = world.services.get(owner).ok_or_else(|| {
         ApiError::invalid(format!(
           "服务 {name} 的共享卷 {} 引用的服务 {owner} 不存在",
@@ -165,49 +156,12 @@ pub fn validate_world(world: &World) -> Result<(), ApiError> {
       }
     }
   }
-  // 互相挂载对方的自有卷也会形成环，任何一方都不能先安全删数。
-  while !dependencies.is_empty() {
-    let ready: Vec<_> = dependencies
+  wharf_api_types::spec::validate_service_dependencies(
+    world
+      .services
       .iter()
-      .filter(|(_, owners)| {
-        owners.iter().all(|owner| !dependencies.contains_key(owner))
-      })
-      .map(|(&service, _)| service)
-      .collect();
-    if ready.is_empty() {
-      if has_wait {
-        let mut chain = Vec::new();
-        let mut next = *dependencies.keys().next().unwrap();
-        loop {
-          if let Some(start) = chain.iter().position(|&n| n == next) {
-            chain.push(next);
-            return Err(
-              ApiError::invalid(format!(
-                "启动等待成环：{}",
-                chain[start..].join(" → ")
-              ))
-              .with_hint("移除一条启动等待关系"),
-            );
-          }
-          chain.push(next);
-          next = *dependencies[next]
-            .iter()
-            .find(|&&n| dependencies.contains_key(n))
-            .unwrap();
-        }
-      }
-      let services =
-        dependencies.keys().copied().collect::<Vec<_>>().join("、");
-      return Err(
-        ApiError::invalid(format!("共享卷依赖成环：{services}"))
-          .with_hint("解除其中一个共享卷引用后再试"),
-      );
-    }
-    for service in ready {
-      dependencies.remove(service);
-    }
-  }
-  Ok(())
+      .map(|(name, row)| (name.as_str(), &row.spec)),
+  )
 }
 
 pub fn implicit_warnings(
@@ -264,25 +218,21 @@ pub fn sort_steps(
       .collect();
     let mut deps: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for (_, service) in &slots {
-      if down {
-        for dep in crate::catalog::direct_dependents(world, service) {
-          if let Some((_, name)) = slots.iter().find(|(_, name)| {
-            dep.address.strip_prefix("service/")
-              == Some(name.as_str())
-          }) {
-            deps.entry(service).or_default().insert(name);
-          }
-        }
+      let Some(row) = world.services.get(service) else {
         continue;
-      }
-      if let Some(row) = world.services.get(service) {
-        let waits = row
-          .spec
-          .wait_for
-          .values()
-          .filter_map(|wait| wait.service());
-        for owner in owners(&row.spec).chain(waits) {
+      };
+      for owner in owners(&row.spec) {
+        if down {
+          deps.entry(owner).or_default().insert(service);
+        } else {
           deps.entry(service).or_default().insert(owner);
+        }
+      }
+      if !down {
+        for dep in
+          row.spec.wait_for.values().filter_map(|wait| wait.service())
+        {
+          deps.entry(service).or_default().insert(dep);
         }
       }
     }
@@ -431,9 +381,16 @@ mod tests {
   }
 
   #[test]
-  fn batch_delete_orders_consumer_before_owner_and_up_owner_before_consumer()
+  fn batch_delete_keeps_shared_volume_order_with_reverse_env_reference()
    {
-    let world = shared_world();
+    let mut world = shared_world();
+    world
+      .services
+      .get_mut("photos")
+      .unwrap()
+      .spec
+      .env
+      .insert("READER".into(), "[[@reader.http]]".into());
     let up = |name: &str| Step::ServiceUp {
       service: name.into(),
       instance_id: None,

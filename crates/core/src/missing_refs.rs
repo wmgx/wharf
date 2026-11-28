@@ -483,6 +483,17 @@ pub(crate) fn scope_error(
   routes: &BTreeSet<String>,
 ) -> ApiError {
   let Some(allowed) = allowed else { return err };
+  if let Some(cycle) = err
+    .details
+    .as_ref()
+    .and_then(|details| details["dependency_cycle"].as_array())
+    && cycle.iter().any(|name| {
+      name.as_str().is_none_or(|name| !allowed.contains(name))
+    })
+  {
+    return ApiError::invalid("服务依赖成环")
+      .with_hint("使用不限服务的令牌查看完整依赖");
+  }
   let Some(missing) =
     err.details.as_ref().and_then(|d| d.get("missing"))
   else {

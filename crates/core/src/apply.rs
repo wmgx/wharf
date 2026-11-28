@@ -615,6 +615,7 @@ pub(crate) async fn start_with_actor(
     };
     let run_id = run_id.clone();
     crate::rules::ensure_loaded(&state).await;
+    let capabilities = state.clone();
     let removed_firing = state
       .db
       .call_credentials(move |c, key| {
@@ -626,7 +627,7 @@ pub(crate) async fn start_with_actor(
           account_refs.as_ref(),
           base_instances.as_ref(),
         )?;
-        let alert_changes = apply_writes(&tx, &policy_plan, &writes, admin)?;
+        let alert_changes = apply_writes(&tx, &policy_plan, &writes, admin, (&capabilities, &step_plans))?;
         if let Some(dns_gateways) = dns_gateways.filter(|m| !m.is_empty()) {
           let world = crate::world::World::from_rows(db::all_resources(&tx)?)?;
           let active = crate::failover::load_active_from_conn(&tx)?;
@@ -794,6 +795,7 @@ fn apply_writes(
   plan: &Plan,
   writes: &[crate::db::Write],
   admin: bool,
+  (state, steps): (&AppState, &[StepPlan]),
 ) -> Result<crate::rules::lifecycle::Changes, ApiError> {
   let current =
     crate::world::World::from_rows(db::all_resources(tx)?)?;
@@ -839,6 +841,24 @@ fn apply_writes(
     &desired,
     &crate::app_accounts::account_links(tx)?,
   )?;
+  for step in steps {
+    let (service, destination) = match &step.step {
+      Step::VolumeSync { service, to, .. } => (service, Some(to)),
+      Step::ServiceUp { service, .. } | Step::Rebuild { service } => {
+        (service, None)
+      }
+      _ => continue,
+    };
+    if let Some(row) = desired.services.get(service)
+      && !row.spec.stopped
+    {
+      crate::wait_for::require_agent(
+        state,
+        destination.unwrap_or(&row.spec.server),
+        &row.spec,
+      )?;
+    }
+  }
   Ok(crate::rules::lifecycle::Changes::between(
     &current, &desired,
   ))
@@ -3704,6 +3724,165 @@ mod tests {
     }))
     .unwrap();
     assert!(!should_trial(&spec, true, true, false));
+  }
+
+  #[tokio::test]
+  async fn partial_apply_starts_consumer_after_silenced_dependency_probes_pass()
+   {
+    use serde_json::json;
+    let state = crate::rules::tests::test_state();
+    let weak = Arc::downgrade(&state);
+    let mut projects = std::collections::BTreeMap::new();
+    let mut port_ok = false;
+    let mut http_ok = false;
+    state.hub.mock_agent("s1", false, move |op| match op {
+      AgentOp::ProjectStatus { projects: names, .. } => Ok(json!(
+        names.iter().filter_map(|name| projects.get(name)).collect::<Vec<_>>()
+      )),
+      AgentOp::ResolveImages(_) => Ok(json!([{"image":"fixture:1","digest":format!("sha256:{}", "a".repeat(64))}])),
+      AgentOp::ProjectUp(up) => {
+        if up.project == "a-wait-client" {
+          assert!(port_ok && http_ok);
+        } else {
+          assert_eq!(up.project, "z-wait-store");
+        }
+        let containers = json!([{"service":up.project,"name":format!("{}-1",up.project),
+          "state":"running","health":"healthy"}]);
+        projects.insert(up.project.clone(), json!({"project":up.project,"hash":up.hash,"containers":containers}));
+        Ok(json!({"containers":containers,"images":[],"warnings":[],"retired":[]}))
+      }
+      AgentOp::PortChecks { checks } => {
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].port, 22000);
+        assert!(projects.contains_key("z-wait-store"));
+        assert!(crate::rules::op_silence::service_busy(&weak.upgrade().unwrap(), "z-wait-store"));
+        port_ok = true;
+        Ok(json!([true]))
+      }
+      AgentOp::HttpCheck(_) => {
+        assert!(projects.contains_key("z-wait-store"));
+        assert!(crate::rules::op_silence::service_busy(&weak.upgrade().unwrap(), "z-wait-store"));
+        http_ok = true;
+        Ok(json!({"status":200,"ms":1}))
+      }
+      _ => panic!("额外的 agent 操作"),
+    });
+    state.hub.enable_mock_service_checks("s1");
+    state
+      .db
+      .call(|c| {
+        db::apply_write(
+          c,
+          &Write::Upsert {
+            kind: "server".into(),
+            name: "s1".into(),
+            spec: json!({}),
+            meta: json!({}),
+          },
+        )
+      })
+      .await
+      .unwrap();
+    let request = serde_json::from_value(json!({"partial":{"services":{
+      "a-wait-client":{"server":"s1","source":{"image":"fixture:1"},"wait_for_timeout_secs":2,
+        "wait_for":{"ready":{"kind":"service","service":"z-wait-store"}}},
+      "z-wait-store":{"server":"s1","source":{"image":"fixture:1"},
+        "ports":[{"name":"http","container":8080,"host":22000}],"monitor":{"path":"/health"}}
+    }}})).unwrap();
+    let planned =
+      crate::planner::make_plan(&state, request).await.unwrap();
+    crate::planner::save(&state, &planned).await.unwrap();
+    let response = start(
+      state.clone(),
+      ApplyRequest {
+        plan_id: planned.plan.plan_id,
+        confirm: vec![],
+        verify_before_dns: None,
+        skip_snapshot: false,
+      },
+      &BTreeSet::from([Perm::Admin]),
+      None,
+    )
+    .await
+    .unwrap();
+    let run = tokio::time::timeout(Duration::from_secs(8), async {
+      loop {
+        let run = load_run(&state, &response.run_id).await.unwrap();
+        if run.status != RunStatus::Running {
+          break run;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+      }
+    })
+    .await
+    .unwrap();
+    assert_eq!(run.status, RunStatus::Succeeded, "{:?}", run.steps);
+  }
+
+  #[tokio::test]
+  async fn apply_keeps_stopped_intent_when_wait_probe_agent_is_replaced()
+   {
+    use serde_json::json;
+    let state = crate::rules::tests::test_state();
+    state.db.call(|c| {
+      for (kind, name, spec) in [
+        ("server", "s1", json!({})),
+        ("service", "paused-app", json!({"server":"s1","source":{"image":"fixture:1"},
+          "stopped":true,"wait_for":{"dns":{"kind":"dns","host":"check.example.test"}}})),
+      ] {
+        db::apply_write(c, &Write::Upsert {
+          kind: kind.into(), name: name.into(), spec, meta: json!({}),
+        })?;
+      }
+      Ok(())
+    }).await.unwrap();
+    state.hub.mock_agent("s1", false, |op| match op {
+      AgentOp::ProjectStatus { .. } => Ok(json!([])),
+      AgentOp::ResolveImages(_) => Ok(json!([{"image":"fixture:1","digest":format!("sha256:{}", "a".repeat(64))}])),
+      _ => panic!("计划期发了意外请求"),
+    });
+    state.hub.enable_mock_net_probe("s1");
+    let request = serde_json::from_value(json!({"changes":[{
+      "op":"upsert_service","name":"paused-app",
+      "spec":{"server":"s1","source":{"image":"fixture:1"},
+        "wait_for":{"dns":{"kind":"dns","host":"check.example.test"}}}
+    }]}))
+    .unwrap();
+    let planned =
+      crate::planner::make_plan(&state, request).await.unwrap();
+    assert!(planned.steps.iter().any(|step| matches!(
+      &step.step, Step::ServiceUp { service, .. } if service == "paused-app"
+    )));
+    crate::planner::save(&state, &planned).await.unwrap();
+    state.hub.mock_agent("s1", false, |_| {
+      panic!("能力不足时不应发送 agent 请求")
+    });
+    let plan_id = planned.plan.plan_id;
+    let error = start(
+      state.clone(),
+      ApplyRequest {
+        plan_id: plan_id.clone(),
+        confirm: vec![],
+        verify_before_dns: None,
+        skip_snapshot: false,
+      },
+      &BTreeSet::from([Perm::Admin]),
+      None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(error.hint.unwrap().contains("wharf upgrade"));
+    assert_eq!(
+      stored_plan(&state, &plan_id)
+        .await
+        .unwrap()
+        .body
+        .plan
+        .status,
+      PlanStatus::Pending
+    );
+    assert!(snapshot::load(&state.db).await.unwrap().world.services["paused-app"].spec.stopped);
   }
 
   #[tokio::test]

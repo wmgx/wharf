@@ -89,6 +89,34 @@ pub(crate) fn resolve_with_host_style(
   net: &Net,
   legacy: bool,
 ) -> Result<String, ApiError> {
+  resolve_refs(text, me, world, net, legacy, true)
+}
+
+pub(crate) fn probe_address(
+  me: &str,
+  world: &World,
+  net: &Net,
+  service: &str,
+  port: &str,
+) -> Result<String, ApiError> {
+  resolve_refs(
+    &format!("[[@{service}.{port}]]"),
+    me,
+    world,
+    net,
+    false,
+    false,
+  )
+}
+
+fn resolve_refs(
+  text: &str,
+  me: &str,
+  world: &World,
+  net: &Net,
+  legacy: bool,
+  check_reach: bool,
+) -> Result<String, ApiError> {
   if !text.contains("[[@") {
     return Ok(text.to_string());
   }
@@ -140,7 +168,8 @@ pub(crate) fn resolve_with_host_style(
       .with_hint("服务之间经内网地址互相访问，先让这台接入组网")
       .suggest("wharf network")
     })?;
-    if target != my_server
+    if check_reach
+      && target != my_server
       && net.reach.get(&(my_server.clone(), target.clone()))
         == Some(&false)
     {

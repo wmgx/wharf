@@ -240,8 +240,9 @@ async fn require_retry_access(
   original: &Run,
   steps: &[StepPlan],
   snap: &snapshot::Snapshot,
-  confirmed: &[String],
+  approval: (&[String], &BTreeMap<String, String>),
 ) -> Result<(), ApiError> {
+  let (confirmed, post_instances) = approval;
   let core_server = crate::join::core_server_of(snap);
   if !original.plan_id.is_empty() {
     let stored = stored_plan(state, &original.plan_id).await?;
@@ -250,7 +251,7 @@ async fn require_retry_access(
       &snap.world,
       &plan,
       steps,
-      &stored.body.base_instances,
+      post_instances,
     )?;
     let items: BTreeSet<_> =
       steps.iter().flat_map(|s| s.items.iter().copied()).collect();
@@ -437,7 +438,7 @@ pub async fn retry_run(
     &original,
     &steps,
     &snap,
-    &meta.confirmed,
+    (&meta.confirmed, &meta.post_instances),
   )
   .await?;
   let run = Run {
@@ -769,7 +770,7 @@ async fn retry_requires_confirm_only_for_remaining_risky_steps() {
     &run,
     &[safe],
     &snap,
-    &confirmed,
+    (&confirmed, &snap.world.service_instances()),
   )
   .await
   .unwrap();

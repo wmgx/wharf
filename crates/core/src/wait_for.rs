@@ -180,11 +180,12 @@ async fn check(
     }
     WaitCondition::Tcp { service: dep, port } => {
       let net = snap.net(&snap.world);
-      let target = match crate::refs::resolve(
-        &format!("[[@{dep}.{port}]]"),
+      let target = match crate::refs::probe_address(
         service,
         &snap.world,
         &net,
+        dep,
+        port,
       ) {
         Ok(target) => target,
         Err(e) => return Ok((false, e.message)),
@@ -269,6 +270,14 @@ async fn service_ready(
   {
     return Ok((false, "还没有可比对的部署指纹".into()));
   }
+  let refresh_observations =
+    |view: &mut wharf_api_types::view::ServiceView| {
+      view.monitor =
+        crate::monitor::last_for(state, snap, service, row);
+      view.port_checks =
+        crate::service_monitor::port_views(state, snap, service, row);
+    };
+  refresh_observations(&mut view);
   if view.needs_service_probe() {
     if let Some(monitor) =
       crate::monitor::doctor_monitor(state, snap, service, row).await
@@ -286,16 +295,7 @@ async fn service_ready(
     {
       return Ok((false, port.detail));
     }
-    if let Some(fresh) = crate::views::service_view(
-      state,
-      snap,
-      &net,
-      service,
-      Some(&live),
-      &Default::default(),
-    ) {
-      view = fresh;
-    }
+    refresh_observations(&mut view);
   }
   Ok(view.service_ready())
 }
@@ -325,7 +325,8 @@ async fn wait_for_unready_service_observes_cancellation() {
 }
 
 #[tokio::test]
-async fn waits_until_service_health_tcp_and_dns_are_ready() {
+async fn waits_until_health_tcp_and_dns_are_ready_with_stale_reach_failure()
+ {
   use serde_json::json;
   use std::sync::{
     Arc,
@@ -335,7 +336,8 @@ async fn waits_until_service_health_tcp_and_dns_are_ready() {
   state.db.call(|c| {
     for (kind, name, spec, meta) in [
       ("server", "s1", json!({"private_addr":{"ip":"100.64.0.1","network":"tailscale"}}), json!({})),
-      ("service", "z-db", json!({"server":"s1","source":{"image":"db:1"},
+      ("server", "s2", json!({"private_addr":{"ip":"100.64.0.2","network":"tailscale"}}), json!({})),
+      ("service", "z-db", json!({"server":"s2","source":{"image":"db:1"},
         "ports":[{"name":"sql","container":5432,"host":22000}]}), json!({"host_ports":{"sql":22000}})),
       ("service", "a-app", json!({"server":"s1","source":{"image":"app:1"},
         "wait_for":{"service":{"kind":"service","service":"z-db"},
@@ -344,6 +346,7 @@ async fn waits_until_service_health_tcp_and_dns_are_ready() {
     ] {
       crate::db::apply_write(c, &crate::db::Write::Upsert { kind:kind.into(), name:name.into(), spec, meta })?;
     }
+    crate::db::set_reach(c, &[("s1".into(), "s2".into(), false)], crate::db::now_ms())?;
     Ok(())
   }).await.unwrap();
   let snap = snapshot::load(&state.db).await.unwrap();
@@ -357,15 +360,18 @@ async fn waits_until_service_health_tcp_and_dns_are_ready() {
   .unwrap();
   let rounds = Arc::new(AtomicUsize::new(0));
   let count = rounds.clone();
-  state.hub.mock_agent("s1", false, move |op| match op {
+  state.hub.mock_agent("s2", false, move |op| match op {
     AgentOp::ProjectStatus { projects, .. } => {
       assert_eq!(projects, ["z-db"]);
       let health = if count.fetch_add(1, Ordering::SeqCst) == 0 { "starting" } else { "healthy" };
       Ok(json!([{"project":"z-db","hash":hash,"containers":[
         {"service":"z-db","name":"z-db-1","state":"running","health":health}]}]))
     }
+    _ => panic!("等待目标只需提供运行状态"),
+  });
+  state.hub.mock_agent("s1", false, move |op| match op {
     AgentOp::NetProbe(job) if job.kind == NetProbeKind::Tcp => {
-      assert_eq!(job.target, "100.64.0.1:22000");
+      assert_eq!(job.target, "100.64.0.2:22000");
       Ok(json!({"elapsed_ms":0,"tcp":{"remote_addr":job.target,"elapsed_ms":0}}))
     }
     AgentOp::NetProbe(job) => {
