@@ -506,6 +506,14 @@ fn bundle_envelope_roundtrip_and_rejects_wrong_passphrase() {
 async fn bundle_import_maps_backup_and_commits_secrets_with_plan() {
   use serde_json::json;
   let state = crate::migrate::tests::seed_service(false).await;
+  use wharf_api_types::agent::AgentOp;
+  state.hub.mock_agent("s1", false, |op| match op {
+    AgentOp::ResolveImages(_) => Ok(json!([
+      {"image": "fixture:1", "digest": format!("sha256:{}", "a".repeat(64))}
+    ])),
+    AgentOp::ProjectStatus { .. } => Ok(json!([])),
+    _ => panic!("便携包计划发出意外的 agent 请求"),
+  });
   let payload = BundlePayload {
     version: 1,
     exported_at: 0,
