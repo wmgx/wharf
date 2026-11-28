@@ -70,7 +70,9 @@ pub async fn insert_owned_at(
         .iter()
         .map(|(n, s, v)| (n.as_str(), s.as_str(), *v))
         .collect();
-      insert(c, at, &rows)
+      let tx = c.transaction().map_err(sql_err)?;
+      insert(&tx, at, &rows)?;
+      tx.commit().map_err(sql_err)
     })
     .await;
   if let Err(e) = result {
@@ -102,7 +104,9 @@ pub async fn record_links(
         .iter()
         .map(|(n, s, v)| (n.as_str(), s.as_str(), *v))
         .collect();
-      insert(c, now_ms(), &points)
+      let tx = c.transaction().map_err(sql_err)?;
+      insert(&tx, now_ms(), &points)?;
+      tx.commit().map_err(sql_err)
     })
     .await;
   if let Err(e) = result {
@@ -124,7 +128,13 @@ pub async fn record_report_at(
     .call(move |c| {
       let tx = c.transaction().map_err(sql_err)?;
       let s = owned.as_str();
-      crate::traffic::add(&tx, s, at, m.net_rx, m.net_tx)?;
+      crate::traffic::add(
+        &tx,
+        s,
+        at,
+        (m.net_rx, m.net_tx),
+        m.net_rx_bytes.zip(m.net_tx_bytes),
+      )?;
       insert(
         &tx,
         at,

@@ -415,6 +415,8 @@ pub async fn record_report(
     if let Some(m) = &mut stored.metrics {
       m.oom = None;
       m.hosts.clear();
+      m.net_rx_bytes = None;
+      m.net_tx_bytes = None;
     }
     if stored.agent_memory.is_none() && stored.time_ms.is_none() {
       stored.agent_memory = previous.and_then(|r| r.agent_memory.clone());

@@ -2,7 +2,7 @@
 //! 容器用 `docker stats`。速率要和上一次比，第一次只记下基准。
 
 use std::{
-  collections::{BTreeMap, BTreeSet, HashMap},
+  collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
   time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -20,10 +20,12 @@ pub struct Sampler {
   gateway:
     Option<(Instant, HashMap<String, crate::gw_stats::Totals>)>,
   events_since: Option<u64>,
+  seen_oom: VecDeque<(u64, String)>,
 }
 
 struct Prev {
-  at: Instant,
+  host_at: Instant,
+  containers_at: Instant,
   /// /proc/stat 的 (总, 空闲) 节拍数。
   cpu: (u64, u64),
   agent_cpu: Option<(bool, u64)>,
@@ -39,17 +41,8 @@ impl Sampler {
     disk: Option<crate::report::DiskSample>,
     ctx: &Ctx,
   ) -> Option<Metrics> {
-    let now = Instant::now();
-    let unix_now = SystemTime::now()
-      .duration_since(UNIX_EPOCH)
-      .unwrap_or_default()
-      .as_secs();
-    let agent = crate::agent_memory::sample();
-    let oom = match self.events_since.replace(unix_now) {
-      Some(since) => oom_events(docker, since, unix_now, ctx).await,
-      None => None,
-    };
     let gw_now = crate::gw_stats::collect().await;
+    let now = Instant::now();
     let hosts = match self.gateway.replace((now, gw_now.clone())) {
       Some((at, old)) => crate::gw_stats::diff(
         &gw_now,
@@ -60,8 +53,11 @@ impl Sampler {
     };
     let cpu = cpu_ticks(&read("/proc/stat"))?;
     let net = host_net(&read("/proc/net/dev"));
+    let agent = crate::agent_memory::sample();
+    let host_at = Instant::now();
     let cpus = cpu_count();
     let containers = container_stats(docker, ctx).await;
+    let containers_at = Instant::now();
     let mem = read("/proc/meminfo");
     let mem_total = meminfo(&mem, "MemTotal:");
     let projects_now: HashMap<String, (u64, u64)> = containers
@@ -69,15 +65,40 @@ impl Sampler {
       .map(|(p, s)| (p.clone(), (s.rx, s.tx)))
       .collect();
     let prev = self.prev.replace(Prev {
-      at: now,
+      host_at,
+      containers_at,
       cpu,
       net,
       projects: projects_now,
       agent_cpu: agent.0,
-    })?;
-    let secs = now.duration_since(prev.at).as_secs_f64().max(1.0);
-    let rate = |cur: u64, old: u64| {
-      (cur.saturating_sub(old) as f64 / secs).round() as u64
+    });
+    let unix_now = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .unwrap_or_default()
+      .as_secs();
+    let Some(prev) = prev else {
+      self.events_since.get_or_insert(unix_now);
+      return None;
+    };
+    let host_secs =
+      host_at.duration_since(prev.host_at).as_secs_f64().max(1.0);
+    let container_secs = containers_at
+      .duration_since(prev.containers_at)
+      .as_secs_f64()
+      .max(1.0);
+    let rate =
+      |delta: u64, secs: f64| (delta as f64 / secs).round() as u64;
+    let rx_bytes = net.0.saturating_sub(prev.net.0);
+    let tx_bytes = net.1.saturating_sub(prev.net.1);
+    let oom = if let Some(since) =
+      self.events_since.filter(|since| *since <= unix_now)
+    {
+      let from = since.max(unix_now.saturating_sub(600));
+      let events = oom_events(docker, from, unix_now, ctx).await;
+      self.accept_oom(unix_now, events)
+    } else {
+      self.events_since = Some(unix_now);
+      None
     };
     let (total, idle) = (
       cpu.0.saturating_sub(prev.cpu.0),
@@ -88,7 +109,10 @@ impl Sampler {
       .map(|(name, s)| {
         let (rx, tx) =
           prev.projects.get(&name).map_or((0, 0), |(rx, tx)| {
-            (rate(s.rx, *rx), rate(s.tx, *tx))
+            (
+              rate(s.rx.saturating_sub(*rx), container_secs),
+              rate(s.tx.saturating_sub(*tx), container_secs),
+            )
           });
         let m = ProjectMetrics {
           cpu: s.cpu / cpus,
@@ -103,7 +127,7 @@ impl Sampler {
       |((cgroup, now), (was_cgroup, old))| {
         (cgroup == was_cgroup).then(|| {
           (100.0 * now.saturating_sub(old) as f64
-            / (secs * 1e6 * f64::from(cpus)))
+            / (host_secs * 1e6 * f64::from(cpus)))
           .min(100.0) as f32
         })
       },
@@ -123,8 +147,10 @@ impl Sampler {
       mem_used: mem_total
         .saturating_sub(meminfo(&mem, "MemAvailable:")),
       mem_total,
-      net_rx: rate(net.0, prev.net.0),
-      net_tx: rate(net.1, prev.net.1),
+      net_rx: rate(rx_bytes, host_secs),
+      net_tx: rate(tx_bytes, host_secs),
+      net_rx_bytes: Some(rx_bytes),
+      net_tx_bytes: Some(tx_bytes),
       disk_used: disk.map_or(0, |d| d.total.saturating_sub(d.free)),
       disk_total: disk.map_or(0, |d| d.total),
       projects,
@@ -132,6 +158,34 @@ impl Sampler {
       oom,
     })
   }
+
+  fn accept_oom(
+    &mut self,
+    until: u64,
+    events: Option<Vec<OomEvent>>,
+  ) -> Option<Vec<String>> {
+    let events = events?;
+    self.events_since = Some(until);
+    let cutoff = until.saturating_sub(120) * 1_000_000_000;
+    self.seen_oom.retain(|(at, _)| *at >= cutoff);
+    let mut projects = BTreeSet::new();
+    for event in events {
+      let key = (event.at, event.id);
+      if !self.seen_oom.contains(&key) {
+        if event.at >= cutoff {
+          self.seen_oom.push_back(key);
+        }
+        projects.insert(event.project);
+      }
+    }
+    Some(projects.into_iter().collect())
+  }
+}
+
+struct OomEvent {
+  at: u64,
+  id: String,
+  project: String,
 }
 
 async fn oom_events(
@@ -139,7 +193,7 @@ async fn oom_events(
   since: u64,
   until: u64,
   ctx: &Ctx,
-) -> Option<Vec<String>> {
+) -> Option<Vec<OomEvent>> {
   let result = docker
     .cmd()
     .args([
@@ -153,8 +207,7 @@ async fn oom_events(
       "--filter".into(),
       "event=oom".into(),
       "--format".into(),
-      "{{index .Actor.Attributes \"com.docker.compose.project\"}}"
-        .into(),
+      "{{.TimeNano}} {{.Actor.ID}} {{index .Actor.Attributes \"com.docker.compose.project\"}}".into(),
     ])
     .timeout(STATS_TIMEOUT)
     .run(ctx)
@@ -172,14 +225,23 @@ async fn oom_events(
   }
 }
 
-fn parse_oom(text: &str) -> Vec<String> {
+fn parse_oom(text: &str) -> Vec<OomEvent> {
   text
     .lines()
-    .map(str::trim)
-    .filter(|s| !s.is_empty() && *s != "<no value>")
-    .map(str::to_string)
-    .collect::<BTreeSet<_>>()
-    .into_iter()
+    .filter_map(|line| {
+      let mut fields = line.splitn(3, ' ');
+      let at = fields.next()?.parse().ok()?;
+      let id = fields.next()?;
+      let project = fields.next()?.trim();
+      (!id.is_empty()
+        && !project.is_empty()
+        && project != "<no value>")
+        .then(|| OomEvent {
+          at,
+          id: id.into(),
+          project: project.into(),
+        })
+    })
     .collect()
 }
 
@@ -343,11 +405,24 @@ mod tests {
   use super::*;
 
   #[test]
-  fn oom_projects_are_sorted_and_unique() {
+  fn oom_cursor_holds_on_error_and_deduplicates_boundary() {
+    let mut sampler = Sampler {
+      events_since: Some(5),
+      ..Sampler::default()
+    };
+    assert_eq!(sampler.accept_oom(10, None), None);
+    assert_eq!(sampler.events_since, Some(5));
+    let events = || {
+      Some(parse_oom(
+        "10000000000 c1 web\n10000000000 c2 <no value>\n",
+      ))
+    };
     assert_eq!(
-      parse_oom("web\n\n<no value>\nweb\napi\n"),
-      ["api", "web"]
+      sampler.accept_oom(10, events()),
+      Some(vec!["web".into()])
     );
+    assert_eq!(sampler.events_since, Some(10));
+    assert_eq!(sampler.accept_oom(11, events()), Some(vec![]));
   }
 
   #[test]

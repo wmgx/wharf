@@ -1707,7 +1707,9 @@ export interface Metrics {
    * 字节每秒，不含回环、docker 网桥和组网网卡。
    */
   net_rx: number;
+  net_rx_bytes?: number | null;
   net_tx: number;
+  net_tx_bytes?: number | null;
   /**
    * 上次上报以来因内存超限被杀过容器的 compose project 名。
    * 旧 agent 没有这个字段；新 agent 每次都带，没有就是空列表。

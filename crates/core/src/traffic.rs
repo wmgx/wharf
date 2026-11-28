@@ -54,10 +54,18 @@ pub fn add(
   c: &Connection,
   server: &str,
   at: i64,
-  rx_rate: u64,
-  tx_rate: u64,
+  rates: (u64, u64),
+  exact: Option<(u64, u64)>,
 ) -> Result<(), ApiError> {
-  let last: Option<i64> = c
+  let (rx, tx) = if let Some((rx, tx)) = exact {
+    const MAX_SAMPLE_BYTES: u64 = 100 << 30;
+    if rx.max(tx) > MAX_SAMPLE_BYTES {
+      tracing::warn!(server, "单轮流量采样超过上限，已忽略");
+      return Ok(());
+    }
+    (rx as f64, tx as f64)
+  } else {
+    let last: Option<i64> = c
     .query_row(
       "SELECT MAX(at) FROM points WHERE subject = ?1 AND name = 'host.net_rx'",
       params![server],
@@ -66,11 +74,14 @@ pub fn add(
     .optional()
     .map_err(sql_err)?
     .flatten();
-  let Some(last) = last else { return Ok(()) };
-  let gap = at - last;
-  if gap <= 0 || gap > MAX_GAP_MS {
-    return Ok(());
-  }
+    let Some(last) = last else { return Ok(()) };
+    let gap = at - last;
+    if gap <= 0 || gap > MAX_GAP_MS {
+      return Ok(());
+    }
+    let seconds = gap as f64 / 1000.0;
+    (rates.0 as f64 * seconds, rates.1 as f64 * seconds)
+  };
   let day = day_start(at);
   let mut stmt = c
     .prepare_cached(
@@ -78,12 +89,9 @@ pub fn add(
        ON CONFLICT (subject, name, at) DO UPDATE SET value = value + excluded.value",
     )
     .map_err(sql_err)?;
-  let secs = gap as f64 / 1000.0;
-  for (name, rate) in
-    [("traffic.rx", rx_rate), ("traffic.tx", tx_rate)]
-  {
+  for (name, bytes) in [("traffic.rx", rx), ("traffic.tx", tx)] {
     stmt
-      .execute(params![name, server, day, rate as f64 * secs])
+      .execute(params![name, server, day, bytes])
       .map_err(sql_err)?;
   }
   Ok(())
@@ -296,6 +304,25 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn traffic_uses_exact_bytes() {
+    let db = Db::memory();
+    db.call(|c| {
+      add(c, "s1", 1_800_000_000_000, (100, 10), Some((1000, 400)))?;
+      let total: f64 = c
+        .query_row(
+          "SELECT value FROM points WHERE name = 'traffic.rx'",
+          [],
+          |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+      assert_eq!(total, 1000.0);
+      Ok(())
+    })
+    .await
+    .unwrap();
+  }
+
+  #[tokio::test]
   async fn adds_rate_times_gap() {
     let db = crate::db::Db::memory();
     let total = db
@@ -306,8 +333,8 @@ mod tests {
           params![t0],
         )
         .map_err(sql_err)?;
-        add(c, "a", t0 + 60_000, 100, 10)?;
-        add(c, "a", t0 + 60_000 + MAX_GAP_MS + 1, 100, 10)?;
+        add(c, "a", t0 + 60_000, (100, 10), None)?;
+        add(c, "a", t0 + 60_000 + MAX_GAP_MS + 1, (100, 10), None)?;
         c.query_row(
           "SELECT value FROM points WHERE name = 'traffic.rx'",
           [],
