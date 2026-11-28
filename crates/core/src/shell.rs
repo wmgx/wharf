@@ -489,7 +489,7 @@ mod tests {
     state.hub.enable_mock_host_shell("s1");
     let response = exec(
       State(state),
-      auth([Perm::Host], false),
+      auth([Perm::Host, Perm::Admin], false),
       AxumPath("s1".into()),
       Query(ExecQuery { stream: true }),
       Json(ExecRequest {
@@ -499,6 +499,7 @@ mod tests {
       }),
     )
     .await
+    .map_err(|error| error.0)
     .unwrap();
     let body = to_bytes(response.into_body(), 1024).await.unwrap();
     let frames = std::str::from_utf8(&body)

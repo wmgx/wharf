@@ -71,7 +71,10 @@ mod tests {
       ErrorCode::Conflict
     );
     state.hub.enable_mock_exec_v2("s1");
-    assert_eq!(request("db").await.unwrap().0["logs"], "db 日志");
+    assert_eq!(
+      request("db").await.map_err(|error| error.0).unwrap().0["logs"],
+      "db 日志"
+    );
     let error = request("redis").await.unwrap_err().0;
     assert_eq!(error.code, ErrorCode::InvalidInput);
     let hint = error.hint.unwrap();

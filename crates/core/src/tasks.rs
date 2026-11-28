@@ -1573,9 +1573,10 @@ async fn check_run_scope(
         return Err(error.into());
       }
       _ => {
-        return Err(crate::token_scope::forbidden(
-          &auth.name, allowed, "",
-        ));
+        return Err(
+          crate::token_scope::forbidden(&auth.name, allowed, "")
+            .into(),
+        );
       }
     }
   }
@@ -1848,7 +1849,7 @@ mod tests {
       crate::host_access::tests::auth([Perm::Read], false);
     auth.services = Some(["notes".into()].into_iter().collect());
     let Json(rows) = runs(
-      State(state),
+      State(state.clone()),
       auth,
       Path("dump".into()),
       Query(RunsQuery { limit: 10 }),
@@ -1858,6 +1859,17 @@ mod tests {
     .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].service.as_deref(), Some("notes"));
+    let mut auth =
+      crate::host_access::tests::auth([Perm::Read], false);
+    auth.services = Some(["notes".into()].into_iter().collect());
+    let denied = run_detail(
+      State(state),
+      auth,
+      Path(("dump".into(), rows[0].id - 1)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(denied.0.code, ErrorCode::NotFound);
   }
 
   #[tokio::test]
@@ -2277,6 +2289,7 @@ async fn cancelled_task_history_keeps_previous_failure() {
     || auth([Perm::Read, Perm::Apply, Perm::Exec], false);
   cancel_run(State(state.clone()), permissions(), Path(id))
     .await
+    .map_err(|error| error.0)
     .unwrap();
   assert!(token.is_cancelled());
   finish(&state, id, TaskStatus::Cancelled, None, "已手动取消", None)
@@ -2296,6 +2309,7 @@ async fn cancelled_task_history_keeps_previous_failure() {
       Path(("cancel-fixture".into(), failed))
     )
     .await
+    .map_err(|error| error.0)
     .unwrap()
     .0
     .output,

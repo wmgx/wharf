@@ -245,6 +245,7 @@ mod tests {
     auth.services = Some(["app".to_string()].into_iter().collect());
     let result = get(State(state.clone()), auth, Path("app".into()))
       .await
+      .map_err(|error| error.0)
       .unwrap()
       .0;
     assert_eq!(result.secrets_masked, ["DB_PASS", "TLS_KEY"]);

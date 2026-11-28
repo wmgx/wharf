@@ -346,3 +346,50 @@ pub(crate) async fn run_task(
 fn shell_quote(value: &str) -> String {
   format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn cancelled_exec_kills_its_process_group() {
+    let temp = tempfile::tempdir().unwrap();
+    let session = Session {
+      dir: temp.path().join("exec").to_string_lossy().into_owned(),
+      marker: "__WHARF_SE_fixture__".into(),
+    };
+    let mut child = Command::new("sh")
+      .args(&session.args("sleep 30", "", "0")[1..])
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .kill_on_drop(true)
+      .spawn()
+      .unwrap();
+    let pidfile = Path::new(&session.dir).join("pid");
+    tokio::time::timeout(Duration::from_secs(3), async {
+      while !std::fs::read_to_string(&pidfile)
+        .is_ok_and(|s| !s.trim().is_empty())
+      {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+      }
+    })
+    .await
+    .unwrap();
+    let result = Command::new("sh")
+      .args(["-c", CLEANUP, "_", &session.dir])
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .status()
+      .await
+      .unwrap();
+    assert!(result.success());
+    let status =
+      tokio::time::timeout(Duration::from_secs(3), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.code(), Some(137));
+  }
+}
