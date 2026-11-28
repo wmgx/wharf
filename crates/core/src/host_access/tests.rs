@@ -32,6 +32,7 @@ fn service(content: &str, adopt: Option<AdoptSpec>) -> Change {
     adopt,
     pins: None,
     commit: None,
+    migrate: None,
   }
 }
 
@@ -811,6 +812,7 @@ fn explicit_from_service_does_not_require_host_docker() {
     adopt: None,
     pins: None,
     commit: None,
+    migrate: None,
   }])
   .unwrap();
   assert!(

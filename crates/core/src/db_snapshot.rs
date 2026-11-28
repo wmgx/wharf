@@ -82,6 +82,7 @@ pub fn plan_trigger_reason(
       matches!(
         s.step,
         Step::VolumeSync { .. }
+          | Step::AdoptData { .. }
           | Step::ServiceDown {
             purge_data: true,
             ..

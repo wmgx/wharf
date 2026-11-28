@@ -207,6 +207,8 @@ fn complete_migration_steps(
           from: from.clone(),
           to: to.clone(),
           instance_id: m.payload.instance_id.clone(),
+          bwlimit_kbps: None,
+          explicit_bwlimit: false,
           shared_data: crate::shared_volumes::consumers_on(
             &snap.world,
             service,

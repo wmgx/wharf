@@ -393,7 +393,8 @@ pub fn require_plan_request(
   }
   for change in &req.changes {
     let address = match change {
-      Change::UpsertService { name, .. }
+      Change::AdoptData { service: name, .. }
+      | Change::UpsertService { name, .. }
       | Change::RemoveService { name, .. }
       | Change::RefreshImages { name, .. }
       | Change::RetagImage { name, .. } => {
@@ -729,6 +730,7 @@ fn scoped_token_cannot_mount_out_of_scope_service_volume() {
       adopt: None,
       pins: None,
       commit: None,
+      migrate: None,
     }],
     ..Default::default()
   };

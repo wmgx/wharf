@@ -1094,6 +1094,14 @@ export interface ExposureView {
   risks: RiskRow[];
 }
 
+export interface ExtractedSecretItem {
+  action: string;
+  component?: string | null;
+  env_key: string;
+  reason: string;
+  secret_name: string;
+}
+
 export interface ExternalIncident {
   name: string;
   url: string;
@@ -1479,7 +1487,9 @@ export interface ImportPreview {
    * 提交 `UpsertService` 时原样带上。
    */
   adopt?: AdoptSpec | null;
+  extracted_secrets?: ExtractedSecretItem[];
   name: string;
+  secrets_committed?: boolean;
   spec: ServiceSpec;
   warnings?: string[];
 }
@@ -2633,6 +2643,10 @@ export interface ServerSettings {
    * 机器基线：系统设置的期望值，agent 定时检查差异，apply 时纠正。
    */
   baseline?: Baseline;
+  /**
+   * 后台传输限速，例如 3M 或 500K。
+   */
+  bg_bwlimit?: string | null;
   /**
    * 构建时传给内置模板的参数，例如 `PIP_INDEX_URL`、`GOPROXY`（国内机器配镜像源）。
    */

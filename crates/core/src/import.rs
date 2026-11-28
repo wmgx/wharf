@@ -1538,3 +1538,138 @@ mod adoption_tests {
     assert_eq!(result.ports[0].host, Some(32772));
   }
 }
+
+type ExtractedSecrets = (
+  String,
+  Vec<wharf_api_types::view::ExtractedSecretItem>,
+  BTreeMap<String, String>,
+);
+
+pub(crate) fn extract_secrets_from_compose(
+  yaml: &str,
+  service: &str,
+  prefix: Option<&str>,
+) -> Result<ExtractedSecrets, ApiError> {
+  use sha2::{Digest, Sha256};
+  use wharf_api_types::{
+    secret_detect::env_secret_reason, view::ExtractedSecretItem,
+  };
+  let mut root = crate::render::parse_compose(yaml)?;
+  let normalize = |name: &str| {
+    name
+      .chars()
+      .map(|c| {
+        if c.is_ascii_alphanumeric() {
+          c.to_ascii_uppercase()
+        } else {
+          '_'
+        }
+      })
+      .collect::<String>()
+  };
+  if let Some(prefix) = prefix {
+    crate::api::check_secret_name(prefix)?;
+  }
+  let prefix = prefix.map_or_else(
+    || format!("{}_", normalize(service)),
+    str::to_string,
+  );
+  let secret_name = |mut name: String| {
+    if crate::secret_policy::describe(&name).is_some()
+      || name.starts_with("OIDC_")
+    {
+      name.insert_str(0, "SVC_");
+    }
+    if name.len() > 64 {
+      let hash = hex::encode(Sha256::digest(name.as_bytes()));
+      name.truncate(55);
+      name.push('_');
+      name.push_str(&hash[..8]);
+    }
+    name
+  };
+  let mut values = BTreeMap::<String, String>::new();
+  let mut items = Vec::new();
+  let Some(services) =
+    root.get_mut("services").and_then(Value::as_mapping_mut)
+  else {
+    return Ok((yaml.into(), items, values));
+  };
+  for (component, spec) in services {
+    let Some(component) = component.as_str() else {
+      continue;
+    };
+    let Some(env) = spec.get_mut("environment") else {
+      continue;
+    };
+    let mut extract = |key: &str, raw: &str| {
+      let value = raw.replace("$$", "$");
+      let reason = env_secret_reason(key, &value)?;
+      let key_name = normalize(key);
+      let mut name = secret_name(format!("{prefix}{key_name}"));
+      if values.get(&name).is_some_and(|old| *old != value) {
+        let base =
+          format!("{prefix}{}_{key_name}", normalize(component));
+        name = secret_name(base.clone());
+        let mut index = 2;
+        while values.get(&name).is_some_and(|old| *old != value) {
+          name = secret_name(format!("{base}_{index}"));
+          index += 1;
+        }
+      }
+      items.push(ExtractedSecretItem {
+        env_key: key.into(),
+        component: Some(component.into()),
+        secret_name: name.clone(),
+        reason: reason.into(),
+        action: String::new(),
+      });
+      let reference = format!("[[{name}]]");
+      values.entry(name).or_insert(value);
+      Some(reference)
+    };
+    match env {
+      Value::Mapping(env) => {
+        for (key, value) in env {
+          if let Some(key) = key.as_str()
+            && let Some(raw) = value.as_str()
+            && let Some(reference) = extract(key, raw)
+          {
+            *value = Value::String(reference);
+          }
+        }
+      }
+      Value::Sequence(env) => {
+        for item in env {
+          if let Some((key, raw)) =
+            item.as_str().and_then(|raw| raw.split_once('='))
+            && let Some(reference) = extract(key, raw)
+          {
+            *item = Value::String(format!("{key}={reference}"));
+          }
+        }
+      }
+      _ => {}
+    }
+  }
+  let compose = if items.is_empty() {
+    yaml.into()
+  } else {
+    serde_yaml_ng::to_string(&root)
+      .map_err(|_| ApiError::invalid("无法生成脱敏后的导入预览"))?
+  };
+  Ok((compose, items, values))
+}
+
+#[test]
+fn import_extract_secrets_unescapes_dollars_and_retains_plain_env() {
+  let (yaml, items, values) = extract_secrets_from_compose(
+    "services: {web: {environment: {DB_PASS: 'p$$word', APP_ENV: prod}}}", "blog", None,
+  ).unwrap();
+  assert_eq!(items[0].secret_name, "BLOG_DB_PASS");
+  assert_eq!(values["BLOG_DB_PASS"], "p$word");
+  assert!(
+    yaml.contains("[[BLOG_DB_PASS]]")
+      && yaml.contains("APP_ENV: prod")
+  );
+}

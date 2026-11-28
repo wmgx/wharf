@@ -1297,6 +1297,7 @@ fn service_op(step: &Step) -> Option<(&str, &'static str)> {
     Step::ServiceStop { service, .. } => Some((service, "停止")),
     Step::ServiceRestart { service, .. } => Some((service, "重启")),
     Step::VolumeSync { service, .. } => Some((service, "迁移数据")),
+    Step::AdoptData { job, .. } => Some((&job.service, "收编数据")),
     Step::Restore { service, .. } => Some((service, "恢复")),
     Step::ServiceDown { service, .. } => Some((service, "删除")),
     _ => None,
@@ -1403,12 +1404,34 @@ async fn run_step_with_dns(
         )
         .await?;
     }
+    Step::AdoptData {
+      server,
+      instance_id,
+      job,
+    } => {
+      check_step_instance(
+        world,
+        &job.service,
+        instance_id.as_deref(),
+      )?;
+      crate::adopt_data::execute(
+        state,
+        server,
+        job,
+        world.services[&job.service].spec.stopped,
+        &progress,
+        cancel,
+      )
+      .await?;
+    }
     Step::VolumeSync {
       service,
       from,
       to,
       instance_id,
       shared_data,
+      bwlimit_kbps,
+      explicit_bwlimit,
     } => {
       check_step_instance(world, service, instance_id.as_deref())?;
       let shared = *shared_data
@@ -1420,6 +1443,7 @@ async fn run_step_with_dns(
         &net,
         service,
         (from, to, shared),
+        (*bwlimit_kbps, *explicit_bwlimit),
         !world.services[service].spec.stopped,
         progress,
         cancel,
@@ -1467,6 +1491,12 @@ async fn run_step_with_dns(
         return Err(ApiError::new(
           ErrorCode::Conflict,
           "迁移数据尚未同步，先运行 wharf plan",
+        ));
+      }
+      if snap.pending.adopt_data.contains_key(service) {
+        return Err(ApiError::new(
+          ErrorCode::Conflict,
+          "外部数据尚未复制，先重试数据收编",
         ));
       }
       if let Err(e) = service_up(

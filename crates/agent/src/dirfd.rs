@@ -186,8 +186,16 @@ impl DirFd {
   }
 
   pub(crate) fn unlink(&self, name: &CStr) -> io::Result<()> {
+    self.unlink_with(name, 0)
+  }
+
+  pub(crate) fn unlink_with(
+    &self,
+    name: &CStr,
+    flags: libc::c_int,
+  ) -> io::Result<()> {
     check(unsafe {
-      libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0)
+      libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), flags)
     })
   }
 
@@ -238,7 +246,7 @@ impl DirFd {
     Ok(out)
   }
 
-  fn read_names(&self) -> io::Result<Vec<CString>> {
+  pub(crate) fn read_names(&self) -> io::Result<Vec<CString>> {
     let mut out = Vec::new();
     self.visit_names(|name| {
       out.push(name.to_owned());

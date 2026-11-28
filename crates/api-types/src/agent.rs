@@ -170,6 +170,10 @@ pub enum AgentMsg {
     #[serde(default)]
     safe_migrate: bool,
     #[serde(default)]
+    migrate_v2: bool,
+    #[serde(default)]
+    data_ops: bool,
+    #[serde(default)]
     safe_backup: bool,
     #[serde(default)]
     build_v2: bool,
@@ -490,6 +494,11 @@ pub enum AgentOp {
   SyncServe(SyncServe),
   /// 迁移的发送端：把本机 `/srv/<service>/` 推送到另一台机器的 [AgentOp::SyncServe]。
   SyncPush(SyncPush),
+  DirSpace {
+    service: String,
+    #[serde(default)]
+    measure_data: bool,
+  },
   /// 删除迁移后留在旧服务器上的 `/srv/<service>/`。这台机器上还部署着这个服务时拒绝。
   RemoveData {
     service: String,
@@ -607,6 +616,23 @@ pub enum AgentOp {
   UpgradeLog,
   /// 服务数据目录 `/srv/<service>/` 里的文件：列目录、分块读、分块写。
   Files(FilesOp),
+  AdoptDataInspect(crate::adopt_data::AdoptDataJob),
+  AdoptDataCopy(crate::adopt_data::AdoptDataJob),
+  DataManifest {
+    service: String,
+    request: crate::data_sync::ManifestRequest,
+  },
+  DataSqliteSnap {
+    service: String,
+    path: String,
+  },
+  DataSqliteRead {
+    snap_id: String,
+    offset: u64,
+  },
+  DataSqliteClose {
+    snap_id: String,
+  },
   /// 列宿主机上的一个目录（只读挂载宿主机根目录），结果是 `Vec<String>`，目录名以 `/` 结尾。
   HostListDir {
     path: String,
@@ -640,7 +666,32 @@ pub struct PackedUpload {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum FilesOp {
   /// 结果是 `Vec<FileEntry>`。
-  List { service: String, path: String },
+  List {
+    service: String,
+    path: String,
+  },
+  Mkdir {
+    service: String,
+    path: String,
+  },
+  Remove {
+    service: String,
+    path: String,
+  },
+  AbortWrite {
+    service: String,
+    path: String,
+    upload: String,
+  },
+  DataWrite {
+    service: String,
+    path: String,
+    upload: String,
+    offset: u64,
+    data: String,
+    last: bool,
+    mode: u32,
+  },
   /// 结果是 [FileChunk]。
   Read {
     service: String,
@@ -696,6 +747,8 @@ pub struct RemoveDataResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileChunk {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub mode: Option<u32>,
   /// base64。
   pub data: String,
   /// 文件总大小。

@@ -316,7 +316,42 @@ pub(crate) fn job(
         registry_proxy: None,
       }),
     core_marker: None,
+    bwlimit_kbps: None,
   })
+}
+
+pub(crate) fn limit_job(
+  mut op: AgentOp,
+  state: &AppState,
+  snap: &Snap,
+  (server, target): (&str, &str),
+  progress: &ProgressFn,
+) -> AgentOp {
+  if let AgentOp::Restic(job) = &mut op
+    && matches!(
+      &job.action,
+      ResticAction::Backup { .. } | ResticAction::Restore { .. }
+    )
+    && let Some(limit) = [server, target]
+      .into_iter()
+      .filter_map(|name| {
+        snap
+          .world
+          .servers
+          .get(name)
+          .and_then(|row| row.settings.bg_bwlimit_kbps())
+      })
+      .min()
+  {
+    if state.hub.supports_migrate_v2(server) {
+      job.bwlimit_kbps = Some(limit);
+    } else {
+      progress(format!(
+        "服务器 {server} 的 agent 版本旧，跳过备份或恢复限速；先 wharf upgrade"
+      ));
+    }
+  }
+  op
 }
 
 pub(crate) fn rest_repo(
@@ -691,20 +726,26 @@ pub async fn backup(
     let backed: Result<BackupSummary, ApiError> = call_source(
       state,
       (&w.server, conn),
-      job(
-        &snap,
-        &w.server,
-        service,
-        rest_repo(
-          &w.target_ip,
-          REST_SERVER_PORT,
+      limit_job(
+        job(
+          &snap,
+          &w.server,
           service,
-          &creds.http,
+          rest_repo(
+            &w.target_ip,
+            REST_SERVER_PORT,
+            service,
+            &creds.http,
+          ),
+          &creds.key,
+          ResticAction::Backup {
+            host: w.server.clone(),
+          },
         ),
-        &creds.key,
-        ResticAction::Backup {
-          host: w.server.clone(),
-        },
+        state,
+        &snap,
+        (&w.server, &w.target),
+        &progress,
       ),
       RESTIC_TIMEOUT,
       &progress,
@@ -835,15 +876,26 @@ pub async fn restore(
   let restored = call_source::<serde_json::Value>(
     state,
     (&w.server, conn),
-    job(
+    limit_job(
+      job(
+        &snap,
+        &w.server,
+        service,
+        rest_repo(
+          &w.target_ip,
+          REST_SERVER_PORT,
+          service,
+          &creds.http,
+        ),
+        &creds.key,
+        ResticAction::Restore {
+          snapshot: snapshot_id.to_string(),
+        },
+      ),
+      state,
       &snap,
-      &w.server,
-      service,
-      rest_repo(&w.target_ip, REST_SERVER_PORT, service, &creds.http),
-      &creds.key,
-      ResticAction::Restore {
-        snapshot: snapshot_id.to_string(),
-      },
+      (&w.server, &w.target),
+      &progress,
     ),
     RESTIC_TIMEOUT,
     &progress,

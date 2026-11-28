@@ -354,14 +354,24 @@ impl World {
               .with_hint("写成 2027-01-31"),
             );
           }
+          if let Some(limit) = &settings.bg_bwlimit
+            && wharf_api_types::resources::parse_bwlimit_kbps(limit)?
+              == 0
+          {
+            return Err(ApiError::invalid(
+              "请清除 bg_bwlimit 以关闭限速",
+            ));
+          }
           server.settings = settings.clone();
         }
+        Change::AdoptData { .. } => {}
         Change::UpsertService {
           name,
           spec,
           adopt,
           pins: req_pins,
           commit: req_commit,
+          ..
         } => {
           if let Source::Build(b) = &spec.source
             && b.dockerfile.is_some()
@@ -759,6 +769,7 @@ impl World {
       changes.push(Change::UpsertService {
         pins: None,
         commit: None,
+        migrate: None,
         name: name.clone(),
         spec: spec.clone(),
         adopt: None,
@@ -2310,6 +2321,7 @@ mod tests {
       adopt: None,
       pins: None,
       commit: None,
+      migrate: None,
     }])
     .unwrap();
     w.allocate_ports().unwrap();
@@ -2345,6 +2357,7 @@ mod tests {
         adopt: None,
         pins: None,
         commit: None,
+        migrate: None,
       }])
       .unwrap_err()
       .message
@@ -2438,7 +2451,7 @@ mod tests {
     w.servers.insert("s1".into(), server);
     w.apply_changes(&[
       Change::UpsertGateway { name: "edge".into(), spec: serde_json::from_value(json!({"kind":"caddy","server":"s1","default":true,"wildcard":["example.com"]})).unwrap() },
-      Change::UpsertService { pins: None, commit: None, name: "app".into(), spec: image_service("s1"), adopt: None },
+      Change::UpsertService { pins: None, commit: None, migrate: None, name: "app".into(), spec: image_service("s1"), adopt: None },
     ]).unwrap();
     w.allocate_ports().unwrap();
     let now = chrono::Utc::now().timestamp_millis();
@@ -2740,6 +2753,7 @@ mod tests {
     let add = |name: &str| Change::UpsertService {
       pins: None,
       commit: None,
+      migrate: None,
       name: name.into(),
       spec: image_service("node1"),
       adopt: None,
@@ -2828,6 +2842,7 @@ mod tests {
         adopt: None,
         pins: None,
         commit: None,
+        migrate: None,
       },
       Change::UpsertService {
         name: "reader".into(),
@@ -2835,6 +2850,7 @@ mod tests {
         adopt: None,
         pins: None,
         commit: None,
+        migrate: None,
       },
     ])
     .unwrap();
@@ -2901,6 +2917,7 @@ mod tests {
     w.apply_changes(&[Change::UpsertService {
       pins: None,
       commit: None,
+      migrate: None,
       name: "app".into(),
       spec: image_service("node1"),
       adopt: None,
@@ -2994,6 +3011,7 @@ services:
       Change::UpsertService {
         pins: None,
         commit: None,
+        migrate: None,
         name: "app".into(),
         spec: image_service("s1"),
         adopt: None,
@@ -3064,6 +3082,7 @@ services:
     w.apply_changes(&[Change::UpsertService {
       pins: None,
       commit: None,
+      migrate: None,
       name: "new".into(),
       spec: image_service("s1"),
       adopt: None,
@@ -3082,6 +3101,7 @@ services:
     w.apply_changes(&[Change::UpsertService {
       pins: None,
       commit: None,
+      migrate: None,
       name: "app".into(),
       spec: spec.clone(),
       adopt: None,
@@ -3097,6 +3117,7 @@ services:
       .apply_changes(&[Change::UpsertService {
         pins: None,
         commit: None,
+        migrate: None,
         name: "app".into(),
         spec,
         adopt: None,
@@ -3111,6 +3132,7 @@ services:
       .apply_changes(&[Change::UpsertService {
         pins: None,
         commit: None,
+        migrate: None,
         name: "wharf-try-s1".into(),
         spec: image_service("s1"),
         adopt: None,
@@ -3125,6 +3147,7 @@ services:
       .apply_changes(&[Change::UpsertService {
         pins: None,
         commit: None,
+        migrate: None,
         name: "wharf-task-x".into(),
         spec: image_service("s1"),
         adopt: None,
@@ -3167,6 +3190,7 @@ services:
       .apply_changes(&[Change::UpsertService {
         pins: None,
         commit: None,
+        migrate: None,
         name: "s1".into(),
         spec,
         adopt: None,
@@ -3184,6 +3208,7 @@ services:
       Change::UpsertService {
         pins: None,
         commit: None,
+        migrate: None,
         name: "a".into(),
         spec: image_service("node1"),
         adopt: None,
@@ -3191,6 +3216,7 @@ services:
       Change::UpsertService {
         pins: None,
         commit: None,
+        migrate: None,
         name: "b".into(),
         spec: image_service("node1"),
         adopt: None,
@@ -3283,6 +3309,7 @@ services:
       Change::UpsertService {
         pins: None,
         commit: None,
+        migrate: None,
         name: "who".into(),
         spec: image_service("node1"),
         adopt: None,
@@ -3408,6 +3435,7 @@ services:
       Change::UpsertService {
         pins: None,
         commit: None,
+        migrate: None,
         name: "who".into(),
         spec: image_service("node1"),
         adopt: None,
@@ -3446,6 +3474,7 @@ services:
     w.apply_changes(&[Change::UpsertService {
       pins: None,
       commit: None,
+      migrate: None,
       name: "x".into(),
       spec: image_service("nowhere"),
       adopt: None,
@@ -3463,6 +3492,7 @@ services:
     w.apply_changes(&[Change::UpsertService {
       pins: None,
       commit: None,
+      migrate: None,
       name: "x".into(),
       spec,
       adopt: None,
@@ -3500,6 +3530,7 @@ services:
       .apply_changes(&[Change::UpsertService {
         pins: None,
         commit: None,
+        migrate: None,
         name: "x".into(),
         spec: image_service("node1"),
         adopt: None,

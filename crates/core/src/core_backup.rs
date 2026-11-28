@@ -898,7 +898,13 @@ async fn run_repo<T: serde::de::DeserializeOwned>(
   core
     .call(
       state,
-      job,
+      backup::limit_job(
+        job,
+        state,
+        snap,
+        (&core.server, &w.target),
+        progress,
+      ),
       backup::RESTIC_TIMEOUT,
       Some(progress.clone()),
       cancel,

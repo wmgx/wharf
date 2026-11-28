@@ -74,11 +74,17 @@ fn walk(
     if read_when_no_args(&command) {
       entry["read_when_no_args"] = json!(true);
     }
-    if cmd.get_arguments().any(|a| a.get_long() == Some("dry-run")) {
+    if matches!(command.as_str(), "data push" | "import")
+      || cmd.get_arguments().any(|a| a.get_long() == Some("dry-run"))
+    {
       entry["dry_run"] = json!(true);
     }
     if cmd.get_arguments().any(|a| a.get_long() == Some("apply")) {
-      entry["apply_perms"] = json!(["apply"]);
+      entry["apply_perms"] = if command == "data push" {
+        json!(["exec"])
+      } else {
+        json!(["apply"])
+      };
     }
     out.push(entry);
   }
@@ -166,6 +172,16 @@ fn effect(
     };
     return (effect, &["host"]);
   }
+  match command {
+    "data pull" => return ("read", &["read"]),
+    "data push" => return ("direct", &["read"]),
+    "service adopt-data" => {
+      return ("plan", &["plan", "host", "admin"]);
+    }
+    "service import" => return ("plan", &["plan", "host"]),
+    "import" => return ("plan", &["admin", "plan"]),
+    _ => {}
+  }
   if command == "gateway rotate-link" {
     return ("direct", &["apply"]);
   }
@@ -246,6 +262,11 @@ fn effect(
 
 fn returns(command: &str) -> Option<&'static str> {
   Some(match command {
+    "data pull" => "data-pull-summary",
+    "data push" => "data-push-plan",
+    "import" => "bundle-import-preview",
+    "service adopt-data" | "service move" | "server set" => "plan",
+    "service import" => "import-preview",
     "status" => "status",
     "plan" | "plan show" => "plan",
     "plan list" => "plan_summary",

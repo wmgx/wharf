@@ -100,11 +100,103 @@ async fn check_writers(
   )).with_hint("先用 wharf service stop 停止共用该目录的服务，或将挂载改为只读（:ro）"))
 }
 
+pub(crate) async fn check_space(
+  state: &AppState,
+  service: &str,
+  from: &str,
+  to: &str,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  let query = |server, measure_data| {
+    state.hub.call::<wharf_api_types::agent::DirSpaceInfo>(
+      server,
+      AgentOp::DirSpace {
+        service: service.into(),
+        measure_data,
+      },
+      Duration::from_secs(30),
+      None,
+      cancel,
+    )
+  };
+  let (source, target) =
+    tokio::try_join!(query(from, true), query(to, false))?;
+  let bytes = source
+    .data_bytes
+    .ok_or_else(|| ApiError::internal("源机没有返回数据占用"))?;
+  check_migration_disk(
+    to,
+    bytes,
+    target.fs_avail_bytes,
+    target.fs_total_bytes,
+  )
+}
+
+pub(crate) async fn check_space_from_report(
+  state: &AppState,
+  snap: &crate::snapshot::Snapshot,
+  service: &str,
+  to: &str,
+) -> Result<(), ApiError> {
+  use rusqlite::OptionalExtension;
+  let Some(disk) = snap.agent(to).and_then(|a| a.report.disk) else {
+    return Ok(());
+  };
+  let service = service.to_string();
+  let source_bytes = state.db.call(move |c| {
+    c.query_row(
+      "SELECT value FROM points WHERE name='disk.data' AND subject=?1 ORDER BY at DESC LIMIT 1",
+      [service], |row| row.get::<_, f64>(0),
+    ).optional().map_err(crate::db::sql_err)
+  }).await?;
+  if let Some(source) = source_bytes {
+    check_migration_disk(to, source as u64, disk.free, disk.total)?;
+  }
+  Ok(())
+}
+
+fn check_migration_disk(
+  to: &str,
+  source_bytes: u64,
+  available: u64,
+  total: u64,
+) -> Result<(), ApiError> {
+  const MIB: u64 = 1024 * 1024;
+  let required = source_bytes
+    .saturating_add((source_bytes / 10).max(100 * MIB))
+    .saturating_add((total / 20).min(512 * MIB));
+  if available < required {
+    return Err(ApiError::invalid(format!(
+      "目标服务器 {to} 磁盘空间不足：源数据 {source_bytes} 字节，含余量需 {required} 字节，目标仅剩 {available} 字节"
+    )).with_hint(format!("先清理目标机空间（wharf server prune {to}）或更换目标服务器"))
+      .with_details(serde_json::json!({
+        "source_bytes": source_bytes, "required_bytes": required,
+        "target_avail_bytes": available, "target_total_bytes": total,
+      })));
+  }
+  Ok(())
+}
+
+#[test]
+fn migration_plan_blocks_when_target_disk_insufficient() {
+  const GIB: u64 = 1 << 30;
+  let error =
+    check_migration_disk("s2", 2 * GIB, 3 * GIB / 2, 20 * GIB)
+      .unwrap_err();
+  assert_eq!(error.code, ErrorCode::InvalidInput);
+  assert_eq!(error.details.unwrap()["source_bytes"], 2 * GIB);
+  assert!(
+    check_migration_disk("s2", 2 * GIB, 3 * GIB, 20 * GIB).is_ok()
+  );
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn volume_sync(
   state: &AppState,
   net: &Net,
   service: &str,
   (from, to, shared): (&str, &str, bool),
+  (bwlimit_kbps, explicit): (Option<u32>, bool),
   source_should_run: bool,
   progress: ProgressFn,
   cancel: &CancellationToken,
@@ -127,6 +219,25 @@ pub async fn volume_sync(
   }) {
     return Ok(());
   }
+  if explicit {
+    state.hub.require_migrate_v2(from)?;
+    state.hub.require_migrate_v2(to)?;
+  }
+  if state.hub.supports_migrate_v2(from)
+    && state.hub.supports_migrate_v2(to)
+  {
+    check_space(state, service, from, to, cancel).await?;
+  }
+  let bwlimit_kbps = if bwlimit_kbps.is_some()
+    && !state.hub.supports_migrate_v2(from)
+  {
+    progress(format!(
+      "服务器 {from} 的 agent 版本旧，跳过迁移限速；先 wharf upgrade"
+    ));
+    None
+  } else {
+    bwlimit_kbps
+  };
   let mount_conn =
     if shared || state.hub.supports_shared_volumes(from) {
       Some(state.hub.shared_volumes_conn_id(from)?)
@@ -227,6 +338,7 @@ pub async fn volume_sync(
         port,
         password: password.clone(),
         pass,
+        bwlimit_kbps,
       });
       let result: Pushed = if let Some(conn) = mount_conn {
         state
@@ -513,6 +625,7 @@ pub(crate) mod tests {
         &migration_net(),
         "notes",
         ("s1", "s2", true),
+        (None, false),
         true,
         Arc::new(|_| {}),
         &CancellationToken::new(),
@@ -553,6 +666,7 @@ pub(crate) mod tests {
       &migration_net(),
       "notes",
       ("s1", "s2", false),
+      (None, false),
       true,
       Arc::new(|_| {}),
       &CancellationToken::new(),
@@ -589,6 +703,7 @@ pub(crate) mod tests {
       &migration_net(),
       "notes",
       ("s1", "s2", false),
+      (None, false),
       false,
       progress.clone(),
       &cancel,
@@ -638,6 +753,7 @@ pub(crate) mod tests {
         &migration_net(),
         "notes",
         ("s1", "s2", false),
+        (None, false),
         true,
         Arc::new(|_| {}),
         &CancellationToken::new()
@@ -684,6 +800,7 @@ pub(crate) mod tests {
         &migration_net(),
         "notes",
         ("s1", "s2", false),
+        (None, false),
         true,
         Arc::new(|_| {}),
         &CancellationToken::new(),
@@ -712,6 +829,7 @@ pub(crate) mod tests {
       &migration_net(),
       "notes",
       ("s1", "s2", false),
+      (None, false),
       true,
       Arc::new(|_| {}),
       &CancellationToken::new(),

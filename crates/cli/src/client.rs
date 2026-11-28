@@ -106,7 +106,7 @@ impl Config {
     Ok(())
   }
 
-  fn open_temp(
+  pub(crate) fn open_temp(
     path: &Path,
   ) -> anyhow::Result<(std::fs::File, PathBuf)> {
     if let Some(dir) = path.parent() {
@@ -646,6 +646,52 @@ impl Client {
       .post(
         &format!("/api/gateways/{}/link/rotate", seg(gateway)),
         &serde_json::json!({"token": token, "cert": cert}),
+      )
+      .await
+  }
+
+  pub(crate) async fn data_pull(
+    &self,
+    path: &str,
+    body: &wharf_api_types::data_sync::PullRequest,
+    timeout: Duration,
+  ) -> CliResult<reqwest::Response> {
+    let req = self
+      .http
+      .post(format!("{}{path}", self.endpoint))
+      .timeout(timeout)
+      .json(body);
+    let req = match &self.token {
+      Some(token) => req.bearer_auth(token),
+      None => req,
+    };
+    let resp = req.send().await.map_err(|e| self.conn_error(e))?;
+    if !resp.status().is_success() {
+      let code = resp.status();
+      let error =
+        resp.json::<ApiError>().await.unwrap_or_else(|_| {
+          ApiError::internal(format!("拉取失败：HTTP {code}"))
+        });
+      return Err(error.into());
+    }
+    Ok(resp)
+  }
+
+  pub(crate) async fn data_push(
+    &self,
+    path: &str,
+    opts: &wharf_api_types::data_sync::PushOptions,
+    body: reqwest::Body,
+    timeout: Duration,
+  ) -> CliResult<wharf_api_types::data_sync::DataSyncSummary> {
+    self
+      .send(
+        self
+          .http
+          .post(format!("{}{path}", self.endpoint))
+          .query(opts)
+          .body(body)
+          .timeout(timeout),
       )
       .await
   }

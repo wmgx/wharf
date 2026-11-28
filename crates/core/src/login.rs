@@ -161,7 +161,7 @@ pub(crate) fn verify_password(password: &str, hash: &str) -> bool {
 static ARGON2_LIMIT: tokio::sync::Semaphore =
   tokio::sync::Semaphore::const_new(2);
 
-async fn run_argon2<T: Send + 'static>(
+pub(crate) async fn run_argon2<T: Send + 'static>(
   work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, ApiError> {
   let permit = tokio::time::timeout(

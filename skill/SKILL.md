@@ -215,3 +215,13 @@ wharf service import <服务器> --project <compose 项目名> --json   # 或 --
 
 - `wharf service monitor <服务>` 和 `wharf service auto-update <服务>` 无修改参数时只读查看。加 `--on` 开启或加 `--off` 关闭，确认后可加 `--apply` 执行。例如 `wharf service auto-update <服务> --on --apply`。用 `wharf service monitor <服务> --unset-expect` 清除预期状态码。
 - `wharf server watch-unit <服务器> <unit>` 无修改参数时只读查看。加 `--on` 开启或加 `--off` 关闭，直接生效。
+
+### 迁移、数据和加密便携包
+
+- `wharf service move <服务> --to <服务器> --bwlimit 3M` 先查目标盘余量，数据仍在两台机器之间直连。省略限速时沿用两端较小的后台限速，`none` 表示本次不限速。
+- `wharf server set <服务器> --bg-bwlimit 3M` 设后台限速，`--unset-bg-bwlimit` 清除。它用于备份、恢复和迁移。
+- `wharf service adopt-data <服务>` 先出计划，可用 `--mount <挂载>` 选卷、用 `--rename <挂载>=<卷名>` 改名。复制保留原卷。
+- `wharf data push <服务>[:子目录] <本地目录>` 默认预览，加 `--apply` 才传输。`--delete` 删除远端多出的文件，需要确认权限。
+- `wharf data pull <服务>[:子目录] <本地目录> --sqlite-safe` 对 SQLite 拍一致快照再下载。
+- `wharf service import <服务器> --project <项目> --extract-secrets` 先预览将抽取的密钥名。加 `--apply` 才会写密钥，同名默认拒绝，可明确选 `--only-missing-secrets` 或 `--overwrite-secrets`。
+- `wharf export --service <服务> --with-secrets -o <加密包>` 生成加密文件。`wharf import <加密包> --map-server <原机>=<目标机>` 默认只预览。`--plan-only` 写密钥并生成计划，`--apply` 继续执行。同名密钥默认拒绝，可明确选 `--only-missing` 或 `--overwrite`。口令从终端、`--passphrase-file` 或 `--passphrase-env` 读取。

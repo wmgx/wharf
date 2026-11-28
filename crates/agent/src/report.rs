@@ -371,7 +371,9 @@ fn disk(path: &std::path::Path) -> Option<Disk> {
 pub(crate) type DiskSample = (Disk, Option<(u64, u64)>);
 
 /// 挂载进来的数据目录在宿主机的磁盘上，statvfs 看到的就是宿主机的容量。
-fn disk_stat(path: &std::path::Path) -> Option<DiskSample> {
+pub(crate) fn disk_stat(
+  path: &std::path::Path,
+) -> Option<DiskSample> {
   use std::os::unix::ffi::OsStrExt;
   let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
   let mut st: libc::statvfs = unsafe { std::mem::zeroed() };

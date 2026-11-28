@@ -66,6 +66,8 @@ fn high_risk_trigger() {
   }
   for step in [
     Step::VolumeSync {
+      bwlimit_kbps: None,
+      explicit_bwlimit: false,
       service: "app".into(),
       from: "s1".into(),
       to: "s2".into(),

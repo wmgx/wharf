@@ -387,7 +387,10 @@ async fn dispatch(
       };
       service(c, cmd, j).await
     }
-    Command::Data => {
+    Command::Data { cmd: Some(cmd) } => {
+      crate::data_sync::run(c, cmd, j).await
+    }
+    Command::Data { cmd: None } => {
       let v: DataView = c.get("/api/data").await?;
       out(j, &v, print::data);
       Ok(())
@@ -827,7 +830,22 @@ async fn dispatch(
       .await
     }
     Command::Run(cmd) => run_cmd(c, cmd, j).await,
-    Command::Export { output, service } => {
+    Command::Import(args) => crate::bundle::import(c, args, j).await,
+    Command::Export {
+      output,
+      service,
+      with_secrets,
+      passphrase,
+    } => {
+      if with_secrets {
+        let output = output.ok_or_else(|| {
+          ApiError::invalid("加密导出需要 -o <路径>")
+        })?;
+        return crate::bundle::export(
+          c, output, service, passphrase, j,
+        )
+        .await;
+      }
       let fleet: Fleet = c.get("/api/export").await?;
       let partial = !service.is_empty();
       let fleet = if partial {
@@ -976,6 +994,7 @@ async fn deploy_plan(
       adopt: None,
       pins: None,
       commit: None,
+      migrate: None,
     }],
     ..Default::default()
   };
@@ -1007,8 +1026,33 @@ async fn plan_output(
       }
     }
   }
+  finish_prepared_plan(c, plan, flags, j, detected, None).await
+}
+
+pub(crate) async fn apply_prepared_plan(
+  c: &Client,
+  plan: Plan,
+  flags: ApplyFlags,
+  j: bool,
+  context: Option<(&str, serde_json::Value)>,
+) -> CliResult<()> {
+  finish_prepared_plan(c, plan, flags, j, None, context).await
+}
+
+async fn finish_prepared_plan(
+  c: &Client,
+  plan: Plan,
+  flags: ApplyFlags,
+  j: bool,
+  detected: Option<crate::deploy::DetectResult>,
+  context: Option<(&str, serde_json::Value)>,
+) -> CliResult<()> {
   if !flags.apply || plan.items.is_empty() {
-    if j && let Some(detected) = detected {
+    if j && let Some((key, value)) = context {
+      let mut output = json!({ "plan": plan });
+      output[key] = value;
+      print::json(&output);
+    } else if j && let Some(detected) = detected {
       let mut value =
         serde_json::to_value(&plan).map_err(anyhow::Error::from)?;
       value["detected"] = detected.summary();
@@ -1054,6 +1098,14 @@ async fn plan_output(
           &plan, &missing,
         ));
     }
+    if let Some((key, value)) = context {
+      let mut details = err
+        .details
+        .take()
+        .unwrap_or_else(|| json!({"plan_id": plan.plan_id}));
+      details[key] = value;
+      err = err.with_details(details);
+    }
     return Err(err.into());
   }
   if !j {
@@ -1065,6 +1117,23 @@ async fn plan_output(
     skip_snapshot: false,
     verify_before_dns,
   };
+  if let Some((key, value)) = context
+    && j
+  {
+    let resp: ApplyResponse = c.post("/api/apply", &req).await?;
+    let mut run = wait_run(c, &resp.run_id, true).await?;
+    if flags.brief {
+      crate::plan_cmd::compact_run(&mut run);
+    }
+    let mut output = json!({ "plan": plan, "run": run });
+    output[key] = value;
+    print::json(&output);
+    return if run.status == RunStatus::Succeeded {
+      Ok(())
+    } else {
+      Err(CliError::Exit(4))
+    };
+  }
   apply(c, req, true, j, Some((plan, detected)), flags.brief).await
 }
 
@@ -1676,6 +1745,8 @@ async fn server(
       unset_traffic_quota,
       unset_traffic_reset_day,
       unset_agent_memory,
+      bg_bwlimit,
+      unset_bg_bwlimit,
       apply,
     } => {
       let current: ServerView =
@@ -1706,6 +1777,8 @@ async fn server(
         || traffic_reset_day.is_some()
         || renew_at.is_some()
         || agent_memory.is_some()
+        || bg_bwlimit.is_some()
+        || unset_bg_bwlimit
         || unset_public_ip
         || unset_private_ip
         || unset_git_proxy
@@ -1756,6 +1829,18 @@ async fn server(
         settings.agent_memory = None;
       }
 
+      if unset_bg_bwlimit {
+        settings.bg_bwlimit = None;
+      }
+      if let Some(limit) = bg_bwlimit {
+        let limit = limit.trim();
+        settings.bg_bwlimit =
+          if limit.is_empty() || limit.eq_ignore_ascii_case("none") {
+            None
+          } else {
+            Some(limit.to_string())
+          };
+      }
       if let Some(value) = agent_memory {
         settings.agent_memory = Some(value);
       }
@@ -2733,8 +2818,13 @@ async fn service(
       container,
       name,
       print,
+      extract_secrets,
+      secret_prefix,
+      only_missing_secrets,
+      overwrite_secrets,
       apply,
     } => {
+      use wharf_api_types::view::SecretImportMode;
       let v: ImportPreview = c
         .post(
           "/api/import",
@@ -2743,9 +2833,32 @@ async fn service(
             project,
             container,
             name,
+            extract_secrets,
+            commit_secrets: extract_secrets && apply.apply,
+            secret_prefix,
+            secret_conflict: if only_missing_secrets {
+              SecretImportMode::OnlyMissing
+            } else if overwrite_secrets {
+              SecretImportMode::Overwrite
+            } else {
+              SecretImportMode::FailOnConflict
+            },
           },
         )
         .await?;
+      if !apply.apply && !v.extracted_secrets.is_empty() {
+        out(
+          j,
+          &json!({"import": &v, "hint": "确认后加 --apply 写入密钥并生成计划"}),
+          |_| {
+            for item in &v.extracted_secrets {
+              println!("{}  {}", item.secret_name, item.action);
+            }
+            println!("确认后加 --apply 写入密钥并生成计划");
+          },
+        );
+        return Ok(());
+      }
       if !j {
         println!("导入为服务 {}", v.name);
         for w in &v.warnings {
@@ -2759,19 +2872,27 @@ async fn service(
           println!("{c}");
         }
       }
-      changes(
-        c,
-        vec![Change::UpsertService {
+      let context = extract_secrets.then(|| ("import", json!(&v)));
+      let req = PlanRequest {
+        changes: vec![Change::UpsertService {
           pins: None,
           commit: None,
+          migrate: None,
           name: v.name,
           spec: v.spec,
           adopt: v.adopt,
         }],
-        apply,
-        j,
-      )
-      .await
+        note: apply.note.clone(),
+        ..Default::default()
+      };
+      let plan: Plan = c
+        .post(
+          crate::plan_cmd::brief_path("/api/plan", apply.brief)
+            .as_ref(),
+          &req,
+        )
+        .await?;
+      apply_prepared_plan(c, plan, apply, j, context).await
     }
     ServiceCmd::Update { name, image, apply } => {
       changes(
@@ -2820,6 +2941,7 @@ async fn service(
         vec![Change::UpsertService {
           pins: None,
           commit: None,
+          migrate: None,
           name,
           spec,
           adopt: None,
@@ -2890,6 +3012,7 @@ async fn service(
         && target.commit.is_none()
         && matches!(&target.spec.source, Source::Build(build) if build.git.is_some());
       let mut edits = vec![Change::UpsertService {
+        migrate: None,
         name: name.clone(),
         spec: target.spec,
         adopt: None,
@@ -3024,6 +3147,7 @@ async fn service(
         vec![Change::UpsertService {
           pins: None,
           commit: None,
+          migrate: None,
           name,
           spec,
           adopt: None,
@@ -3357,10 +3481,56 @@ async fn service(
       }
       deploy_plan(c, name, spec, apply, j, warnings, detected).await
     }
+    ServiceCmd::AdoptData {
+      name,
+      mount,
+      rename,
+      apply,
+    } => {
+      use wharf_api_types::adopt_data::AdoptMountSpec;
+      let mut mounts = BTreeMap::new();
+      for p in mount {
+        mounts.insert(p, None);
+      }
+      for (p, volume) in rename {
+        if mounts.insert(p, Some(volume)).flatten().is_some() {
+          return Err(ApiError::invalid("重复的 --rename").into());
+        }
+      }
+      let mounts = mounts
+        .into_iter()
+        .map(|(path, volume_name)| {
+          if path.starts_with('/') {
+            AdoptMountSpec {
+              target: Some(path.clone()),
+              source: Some(path),
+              volume_name,
+            }
+          } else {
+            AdoptMountSpec {
+              target: None,
+              source: Some(path),
+              volume_name,
+            }
+          }
+        })
+        .collect();
+      changes(
+        c,
+        vec![Change::AdoptData {
+          service: name,
+          mounts,
+        }],
+        apply,
+        j,
+      )
+      .await
+    }
     ServiceCmd::Move {
       name,
       to,
       abort,
+      bwlimit,
       apply,
     } => {
       let view = c
@@ -3394,6 +3564,11 @@ async fn service(
         vec![Change::UpsertService {
           pins: None,
           commit: None,
+          migrate: bwlimit.map(|value| {
+            wharf_api_types::spec::MigrateOptions {
+              bwlimit: Some(value),
+            }
+          }),
           name,
           spec,
           adopt: None,
@@ -3454,6 +3629,7 @@ async fn service(
         vec![Change::UpsertService {
           pins: None,
           commit: None,
+          migrate: None,
           name,
           spec,
           adopt: None,
@@ -3573,6 +3749,7 @@ async fn service(
         vec![Change::UpsertService {
           pins: None,
           commit: None,
+          migrate: None,
           name,
           spec,
           adopt: None,
@@ -3645,6 +3822,7 @@ async fn service(
         vec![Change::UpsertService {
           pins: None,
           commit: None,
+          migrate: None,
           name,
           spec,
           adopt: None,
@@ -3740,6 +3918,7 @@ async fn service(
         vec![Change::UpsertService {
           pins: None,
           commit: None,
+          migrate: None,
           name,
           spec,
           adopt: None,
@@ -5642,6 +5821,7 @@ async fn backup(
     Ok::<_, CliError>(Change::UpsertService {
       pins: None,
       commit: None,
+      migrate: None,
       name,
       spec,
       adopt: None,
@@ -6262,3 +6442,13 @@ fn gateway_add_unset_and_service_port_merge() {
 #[cfg(test)]
 #[path = "commands/review_tests.rs"]
 mod review_tests;
+
+pub(crate) fn parse_server_mapping(
+  raw: &str,
+) -> Result<(String, String), String> {
+  let (old, new) = raw
+    .split_once('=')
+    .filter(|(old, new)| !old.is_empty() && !new.is_empty())
+    .ok_or_else(|| "映射格式为 旧名=新名".to_string())?;
+  Ok((old.into(), new.into()))
+}

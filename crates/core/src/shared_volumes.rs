@@ -327,6 +327,7 @@ mod tests {
         adopt: None,
         pins: None,
         commit: None,
+        migrate: None,
       }]).unwrap();
     }
     world
