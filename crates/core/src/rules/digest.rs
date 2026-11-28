@@ -249,6 +249,9 @@ fn should_clear(skipped: Option<&str>) -> bool {
 
 /// 检查东八区 09:00 是否该发每日汇总。真正发了返回 true。
 pub(super) async fn tick_at(state: &AppState, now: i64) -> bool {
+  if state.is_safe_mode() {
+    return false;
+  }
   tick_at_with(state, now, |event| async move {
     notify::deliver(state, &event).await
   })

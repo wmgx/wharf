@@ -153,6 +153,9 @@ const AGENTS_AFTER_DELAY: Duration = Duration::from_secs(60);
 pub fn spawn_agents_after(state: Arc<AppState>) {
   tokio::spawn(async move {
     tokio::time::sleep(AGENTS_AFTER_DELAY).await;
+    if state.is_safe_mode() {
+      return;
+    }
     let flagged = state
       .db
       .call(|c| {

@@ -54,6 +54,9 @@ fn safe_plan(plan: &Plan, name: &str) -> Result<(), String> {
 }
 
 pub async fn tick(state: &Arc<AppState>) {
+  if state.is_safe_mode() {
+    return;
+  }
   let now = Utc::now();
   let Ok(offset) =
     state.db.call(|c| crate::config_api::offset(c)).await

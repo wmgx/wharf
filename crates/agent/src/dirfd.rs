@@ -272,7 +272,7 @@ impl DirFd {
     Ok(out)
   }
 
-  fn visit_names(
+  pub(crate) fn visit_names(
     &self,
     mut visit: impl FnMut(&CStr) -> io::Result<()>,
   ) -> io::Result<()> {

@@ -253,6 +253,11 @@ pub(crate) async fn reconcile_world(
   let now = db::now_ms();
   let host_units =
     crate::host_units::watched_subjects(state, &snap.world).await?;
+  let core_backup_enabled = state
+    .db
+    .call(|c| crate::core_backup::target(c))
+    .await?
+    .is_some();
   let external_pages =
     crate::external_status::enabled_names(state).await?;
   let tailnet = crate::tailnet_probe::addresses(&snap);
@@ -341,6 +346,13 @@ pub(crate) async fn reconcile_world(
           && snap.applied.contains_key(subject)
           && world.services[subject].spec.monitor.is_some()
       }
+      "backup_spike" if subject == crate::core_backup::REPO => {
+        core_backup_enabled
+      }
+      "backup_spike" => world
+        .services
+        .get(subject)
+        .is_some_and(|row| row.spec.backup.is_some()),
       "heartbeat_late" => {
         service() && world.services[subject].spec.heartbeat.is_some()
       }

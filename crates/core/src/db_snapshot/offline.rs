@@ -150,7 +150,9 @@ fn validate_restore(
 }
 
 // SQLite 在 1 GiB 边界的字节范围上做进程间锁，补查未使用恢复锁的旧控制面。
-fn lock_sqlite(path: &Path) -> Result<Option<File>, ApiError> {
+pub(crate) fn lock_sqlite(
+  path: &Path,
+) -> Result<Option<File>, ApiError> {
   if metadata(path, false)?.is_none() {
     return Ok(None);
   }

@@ -701,6 +701,9 @@ struct PushArgs<'a> {
 
 /// 告警和事件通知的唯一推送出口：依次检查开关、静默、确认、抑制、级别。
 async fn push_with_world(state: &AppState, args: PushArgs<'_>) {
+  if state.is_safe_mode() {
+    return;
+  }
   let PushArgs {
     id,
     subject,

@@ -417,6 +417,9 @@ async fn assess_route(
 }
 
 async fn round(state: &Arc<AppState>) -> Result<(), ApiError> {
+  if state.is_safe_mode() {
+    return Ok(());
+  }
   let Ok(guard) = state
     .locks
     .acquire(crate::locks::LockSpec::apply([]), "主备切换")

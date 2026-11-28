@@ -10,6 +10,7 @@ use clap::{Args, Parser, Subcommand};
 mod access_logs;
 mod alert;
 mod audit;
+mod backup_extract;
 mod bookmark;
 mod catalog;
 mod client;
@@ -457,6 +458,8 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum CoreCmd {
+  /// 解除安全接管模式。
+  Resume,
   /// 本机数据库热快照。整机异地灾备用 `wharf backup core`。
   #[command(subcommand)]
   Snapshot(CoreSnapshotCmd),
@@ -1868,6 +1871,56 @@ pub enum SecretCmd {
   },
 }
 
+#[derive(Args, Default)]
+pub struct BackupRetentionArgs {
+  #[arg(long, conflicts_with = "unset_retention")]
+  keep_daily: Option<u16>,
+  #[arg(long, conflicts_with = "unset_retention")]
+  keep_weekly: Option<u16>,
+  #[arg(long, conflicts_with = "unset_retention")]
+  keep_monthly: Option<u16>,
+  #[arg(long)]
+  unset_retention: bool,
+}
+
+impl BackupRetentionArgs {
+  fn edited(&self) -> bool {
+    self.unset_retention
+      || self.keep_daily.is_some()
+      || self.keep_weekly.is_some()
+      || self.keep_monthly.is_some()
+  }
+
+  fn merge(
+    &self,
+    previous: Option<wharf_api_types::backup::BackupRetention>,
+  ) -> Result<
+    Option<wharf_api_types::backup::BackupRetention>,
+    wharf_api_types::ApiError,
+  > {
+    if self.unset_retention {
+      return Ok(None);
+    }
+    if !self.edited() {
+      return Ok(previous);
+    }
+    let mut r = previous.unwrap_or_default();
+    r.daily = self.keep_daily.unwrap_or(r.daily);
+    r.weekly = self.keep_weekly.unwrap_or(r.weekly);
+    r.monthly = self.keep_monthly.unwrap_or(r.monthly);
+    wharf_api_types::backup::validate_retention(r)?;
+    Ok(Some(r))
+  }
+}
+
+#[derive(Args)]
+pub struct BackupLookup {
+  #[arg(long, default_value = "latest")]
+  snapshot: String,
+  #[arg(long)]
+  from: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub enum BackupCmd {
   /// 给历史业务仓库加上服务专属口令。
@@ -1886,6 +1939,26 @@ pub enum BackupCmd {
     /// 备份存到哪台服务器，不能是服务所在的服务器。
     #[arg(long)]
     to: String,
+    #[arg(long)]
+    exclude: Vec<String>,
+    #[command(flatten)]
+    retention: BackupRetentionArgs,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
+  /// 查看或修改备份目标、排除规则和保留策略。
+  Set {
+    service: String,
+    #[arg(long)]
+    to: Option<String>,
+    #[arg(long)]
+    exclude: Vec<String>,
+    #[arg(long, conflicts_with = "clear_exclude")]
+    unset_exclude: Vec<String>,
+    #[arg(long)]
+    clear_exclude: bool,
+    #[command(flatten)]
+    retention: BackupRetentionArgs,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -1898,15 +1971,71 @@ pub enum BackupCmd {
   /// 立即备份一次并等待结束。
   Run {
     service: String,
+    #[arg(long)]
+    keep: bool,
+    #[arg(long)]
+    note: Option<String>,
     /// 不等待执行结束，只返回 run_id。
     #[arg(long)]
     no_wait: bool,
   },
   /// 备份记录和快照。
-  List { service: String },
+  List {
+    service: String,
+    #[arg(long)]
+    from: Option<String>,
+  },
+  /// 浏览备份快照里的文件。
+  Ls {
+    service: String,
+    #[arg(default_value = "")]
+    path: String,
+    #[command(flatten)]
+    lookup: BackupLookup,
+    #[arg(long)]
+    recursive: bool,
+    #[arg(long, default_value_t = 500)]
+    limit: u32,
+  },
+  /// 从快照提取一个文件到本地或 stdout。
+  Extract {
+    service: String,
+    path: String,
+    #[command(flatten)]
+    lookup: BackupLookup,
+    #[arg(short = 'o', long)]
+    output: Option<String>,
+    #[arg(long)]
+    force: bool,
+  },
+  /// 预览恢复差异，或比较两份快照。
+  Diff {
+    service: String,
+    #[command(flatten)]
+    lookup: BackupLookup,
+    #[arg(long)]
+    base: Option<String>,
+    #[arg(long, default_value_t = 500)]
+    limit: u32,
+  },
+  /// 设置或撤销快照留底，修改快照备注。
+  Keep {
+    service: String,
+    snapshot: String,
+    #[arg(long)]
+    from: Option<String>,
+    #[arg(long)]
+    off: bool,
+    #[arg(long, conflicts_with = "unset_note")]
+    note: Option<String>,
+    #[arg(long)]
+    unset_note: bool,
+  },
   /// 清理业务备份仓库残留的锁。
   Unlock {
     service: String,
+    #[arg(long)]
+    from: Option<String>,
     #[arg(long)]
     stale_only: bool,
   },
@@ -1924,6 +2053,12 @@ pub enum BackupCmd {
     unlock: bool,
     #[arg(long, requires = "unlock")]
     stale_only: bool,
+    #[arg(long, requires = "run")]
+    keep: bool,
+    #[arg(long, requires = "run")]
+    note: Option<String>,
+    #[command(flatten)]
+    retention: BackupRetentionArgs,
   },
   /// 恢复快照：停服务、恢复数据、启动。原来的数据改名保留在 /srv/.wharf-restore/ 下。
   Restore {

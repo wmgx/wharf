@@ -89,6 +89,7 @@ struct Conn {
   safe_adopt: bool,
   safe_migrate: bool,
   safe_backup: bool,
+  backup_v2: bool,
   build_v2: bool,
   deploy_v2: bool,
   safe_rollback: bool,
@@ -364,6 +365,12 @@ impl Hub {
       return Err(safe_migrate_required(server));
     }
     Ok(())
+  }
+
+  pub fn supports_backup_v2(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|c| !c.upgrade_only && c.backup_v2)
   }
 
   pub fn supports_safe_backup(&self, server: &str) -> bool {
@@ -863,6 +870,7 @@ impl Hub {
           wharf_api_types::agent::ResticAction::Backup { .. }
             | wharf_api_types::agent::ResticAction::Restore { .. }
             | wharf_api_types::agent::ResticAction::Prune
+            | wharf_api_types::agent::ResticAction::PruneV2 { .. }
         ) =>
       {
         Some(Duration::from_secs(45))
@@ -876,6 +884,12 @@ impl Hub {
     ) && (conn.upgrade_only || !conn.shared_volumes)
     {
       return Err(shared_volumes_required(server));
+    }
+    if let AgentOp::Restic(job) = &op
+      && job.action.needs_backup_v2()
+      && (conn.upgrade_only || !conn.backup_v2)
+    {
+      return Err(crate::backup::old_backup_v2(server));
     }
     let needs_safe_backup = match &op {
       AgentOp::ServiceStopForData { .. }
@@ -1268,6 +1282,7 @@ async fn handle_socket(
     safe_adopt,
     safe_migrate,
     safe_backup,
+    backup_v2,
     build_v2,
     deploy_v2,
     safe_rollback,
@@ -1445,6 +1460,7 @@ async fn handle_socket(
     safe_adopt,
     safe_migrate,
     safe_backup,
+    backup_v2,
     build_v2,
     deploy_v2,
     safe_rollback,

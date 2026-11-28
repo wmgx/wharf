@@ -6,6 +6,10 @@ use serde_json::{Value, json};
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::UpgradeResult,
+  backup::{
+    BackupDiffView, BackupKeepResult, BackupLsView, BackupPolicy,
+    BackupRetention, BackupRunRequest, validate_backup_excludes,
+  },
   plan::{
     ApplyRequest, ApplyResponse, Plan, PlanRequest, Run, RunStatus,
   },
@@ -16,12 +20,13 @@ use wharf_api_types::{
     UpdateIgnoreScope, UpdateIgnoreSpec, VolumeSpec, image_repo,
   },
   view::{
-    AccountView, AppAccountView, AutoUpdateResult, BackupsView,
-    CheckStatus, DataView, DeploymentView, DoctorReport, GatewayView,
-    ImportPreview, ImportRequest, JoinInfo, NetworkView,
-    RestoreRequest, RollbackTarget, RouteView, ScriptRuntime,
-    SecretView, ServerView, ServiceView, ShellLog, SsoStepResult,
-    SsoTestResult, Status, Unmanaged,
+    AccountView, AppAccountView, AutoUpdateResult,
+    BackupUnlockResult, BackupsView, CheckStatus, DataView,
+    DeploymentView, DoctorReport, GatewayView, ImportPreview,
+    ImportRequest, JoinInfo, NetworkView, RestoreRequest,
+    RollbackTarget, RouteView, ScriptRuntime, SecretView, ServerView,
+    ServiceView, ShellLog, SsoStepResult, SsoTestResult, Status,
+    Unmanaged,
   },
 };
 
@@ -571,6 +576,20 @@ async fn dispatch_command(
     }
     Command::SelfUpdate => crate::selfcmd::self_update(c, j).await,
     Command::Whoami => crate::selfcmd::whoami(c, j).await,
+    Command::Core(crate::CoreCmd::Resume) => {
+      let v: wharf_api_types::view::CoreSafeModeView =
+        c.post("/api/core/resume", &json!({})).await?;
+      out(j, &v, |v| {
+        println!(
+          "安全接管模式：{}",
+          if v.safe_mode { "开启" } else { "关闭" }
+        );
+        if let Some(hint) = &v.hint {
+          println!("{hint}");
+        }
+      });
+      Ok(())
+    }
     Command::Core(crate::CoreCmd::Snapshot(cmd)) => {
       core_snapshot(c, cmd, j).await
     }
@@ -5745,24 +5764,40 @@ fn print_secret(secret: &SecretView) {
   }
 }
 
+fn backup_url(
+  service: &str,
+  suffix: &str,
+  pairs: &[(&str, Option<&str>)],
+) -> String {
+  let base = format!("/api/services/{}/backups", seg(service));
+  let base = format!("{base}{suffix}");
+  let query = pairs
+    .iter()
+    .filter_map(|(k, v)| v.map(|v| format!("{k}={}", seg(v))))
+    .collect::<Vec<_>>()
+    .join("&");
+  if query.is_empty() {
+    base
+  } else {
+    format!("{base}?{query}")
+  }
+}
+
 async fn backup(
   c: &Client,
   cmd: BackupCmd,
   j: bool,
 ) -> CliResult<()> {
-  let set_backup = |name: String, backup: Option<BackupSpec>| async move {
-    let mut spec = c
-      .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
-      .await?
-      .spec;
-    spec.backup = backup;
-    Ok::<_, CliError>(Change::UpsertService {
-      pins: None,
-      commit: None,
-      name,
-      spec,
-      adopt: None,
-    })
+  let get_service = |name: &str| {
+    let url = format!("/api/services/{}", seg(name));
+    async move { c.get::<ServiceView>(&url).await }
+  };
+  let change = |name, spec| Change::UpsertService {
+    pins: None,
+    commit: None,
+    name,
+    spec,
+    adopt: None,
   };
   let repo_timeout = Duration::from_secs(30 * 60);
   match cmd {
@@ -5815,49 +5850,266 @@ async fn backup(
       });
       Ok(())
     }
-    BackupCmd::Enable { service, to, apply } => {
-      let change =
-        set_backup(service, Some(BackupSpec { to })).await?;
-      changes(c, vec![change], apply, j).await
+    BackupCmd::Enable {
+      service,
+      to,
+      exclude,
+      retention,
+      apply,
+    } => {
+      let mut spec = get_service(&service).await?.spec;
+      let mut policy = spec.backup.take().unwrap_or(BackupSpec {
+        to: to.clone(),
+        exclude: vec![],
+        retention: None,
+      });
+      policy.to = to;
+      policy.exclude.extend(exclude);
+      policy.exclude = validate_backup_excludes(&policy.exclude)?;
+      policy.retention = retention.merge(policy.retention)?;
+      spec.backup = Some(policy);
+      changes(c, vec![change(service, spec)], apply, j).await
+    }
+    BackupCmd::Set {
+      service,
+      to,
+      exclude,
+      unset_exclude,
+      clear_exclude,
+      retention,
+      apply,
+    } => {
+      let mut spec = get_service(&service).await?.spec;
+      let edited = to.is_some()
+        || !exclude.is_empty()
+        || !unset_exclude.is_empty()
+        || clear_exclude
+        || retention.edited();
+      if !edited {
+        if apply.apply
+          || apply.note.is_some()
+          || !apply.confirm.is_empty()
+          || apply.dns_verify.mode().is_some()
+        {
+          return Err(
+            ApiError::invalid("没有指定要修改的备份配置项")
+              .with_hint("不带 --apply 可只读查看当前配置")
+              .into(),
+          );
+        }
+        let policy = spec.backup.as_ref();
+        let result = BackupPolicy {
+          service,
+          enabled: policy.is_some(),
+          to: policy.map(|p| p.to.clone()),
+          exclude: policy
+            .map(|p| p.exclude.clone())
+            .unwrap_or_default(),
+          retention: policy.and_then(|p| p.retention),
+          effective_retention: policy
+            .and_then(|p| p.retention)
+            .unwrap_or_default(),
+        };
+        out(j, &result, |value| {
+          if let Some(to) = &value.to {
+            println!("{}：备份到 {to}", value.service);
+            print::backup_policy(
+              value.effective_retention,
+              &value.exclude,
+            );
+          } else {
+            println!("{}：没有开启备份", value.service);
+          }
+        });
+        return Ok(());
+      }
+      let mut policy = match (spec.backup.take(), to.as_ref()) {
+        (Some(policy), _) => policy,
+        (None, Some(to)) => BackupSpec {
+          to: to.clone(),
+          exclude: vec![],
+          retention: None,
+        },
+        (None, None) => return Err(
+          ApiError::invalid("服务尚未开启备份")
+            .with_hint(format!(
+              "开启请运行 wharf backup enable {service} --to <server>"
+            ))
+            .into(),
+        ),
+      };
+      if let Some(to) = to {
+        policy.to = to;
+      }
+      let removed = validate_backup_excludes(&unset_exclude)?;
+      policy
+        .exclude
+        .retain(|r| !clear_exclude && !removed.contains(r));
+      policy.exclude.extend(exclude);
+      policy.exclude = validate_backup_excludes(&policy.exclude)?;
+      policy.retention = retention.merge(policy.retention)?;
+      spec.backup = Some(policy);
+      changes(c, vec![change(service, spec)], apply, j).await
     }
     BackupCmd::Disable { service, apply } => {
-      let change = set_backup(service, None).await?;
-      changes(c, vec![change], apply, j).await
+      let mut spec = get_service(&service).await?.spec;
+      spec.backup = None;
+      changes(c, vec![change(service, spec)], apply, j).await
     }
-    BackupCmd::Run { service, no_wait } => {
-      let r: ApplyResponse = c
-        .post(
-          &format!("/api/services/{}/backups", seg(&service)),
-          &json!({}),
-        )
-        .await?;
+    BackupCmd::Run {
+      service,
+      no_wait,
+      keep,
+      note,
+    } => {
+      let options = BackupRunRequest { keep, note };
+      options.validate()?;
+      let r: ApplyResponse =
+        c.post(&backup_url(&service, "", &[]), &options).await?;
       finish_task(c, &r.run_id, !no_wait, j).await
+    }
+    BackupCmd::Ls {
+      service,
+      path,
+      lookup,
+      recursive,
+      limit,
+    } => {
+      let url = backup_url(
+        &service,
+        "/ls",
+        &[
+          ("path", Some(&path)),
+          ("snapshot", Some(&lookup.snapshot)),
+          ("from", lookup.from.as_deref()),
+          (
+            "recursive",
+            Some(if recursive { "true" } else { "false" }),
+          ),
+          ("limit", Some(&limit.to_string())),
+        ],
+      );
+      let v: BackupLsView =
+        c.get_timeout(&url, Duration::from_secs(7 * 60)).await?;
+      out(j, &v, print::backup_ls);
+      Ok(())
+    }
+    BackupCmd::Extract {
+      service,
+      path,
+      lookup,
+      output,
+      force,
+    } => {
+      let url = backup_url(
+        &service,
+        "/extract",
+        &[
+          ("path", Some(&path)),
+          ("snapshot", Some(&lookup.snapshot)),
+          ("from", lookup.from.as_deref()),
+        ],
+      );
+      crate::backup_extract::run(
+        c,
+        &url,
+        &service,
+        &path,
+        output.as_deref(),
+        force,
+        j,
+      )
+      .await
+    }
+    BackupCmd::Diff {
+      service,
+      lookup,
+      base,
+      limit,
+    } => {
+      let url = backup_url(
+        &service,
+        "/diff",
+        &[
+          ("snapshot", Some(&lookup.snapshot)),
+          ("from", lookup.from.as_deref()),
+          ("base", base.as_deref()),
+          ("limit", Some(&limit.to_string())),
+        ],
+      );
+      let v: BackupDiffView =
+        c.get_timeout(&url, Duration::from_secs(35 * 60)).await?;
+      out(j, &v, print::backup_diff);
+      Ok(())
+    }
+    BackupCmd::Keep {
+      service,
+      snapshot,
+      from,
+      off,
+      note,
+      unset_note,
+    } => {
+      let v: BackupKeepResult = c.post(&backup_url(&service, "/keep", &[]), &json!({
+        "snapshot": snapshot, "keep": !off, "note": note, "clear_note": unset_note, "target": from,
+      })).await?;
+      out(j, &v, |v| {
+        println!(
+          "{}：{}",
+          v.snapshot.short_id,
+          if v.snapshot.keep {
+            "已留底"
+          } else {
+            "已撤销留底"
+          }
+        )
+      });
+      Ok(())
     }
     BackupCmd::Unlock {
       service,
+      from,
       stale_only,
     } => {
-      let value: Value = c
+      let value: BackupUnlockResult = c
         .post(
           &format!("/api/services/{}/backups/unlock", seg(&service)),
-          &json!({ "stale_only": stale_only }),
+          &json!({ "target": from, "stale_only": stale_only }),
         )
         .await?;
-      out(j, &value, |_| println!("已解锁备份仓库"));
+      out(j, &value, |v| {
+        println!("已解锁 {} 上的备份仓库", v.target)
+      });
       Ok(())
+    }
+    BackupCmd::Core {
+      ref retention,
+      ref to,
+      run,
+      unlock,
+      ..
+    } if retention.edited() && (to.is_some() || run || unlock) => {
+      Err(
+        ApiError::invalid(
+          "修改保留策略需单独执行，不能同时启用、解锁或运行备份",
+        )
+        .into(),
+      )
     }
     BackupCmd::Core {
       unlock: true,
       stale_only,
       ..
     } => {
-      let value: Value = c
+      let value: BackupUnlockResult = c
         .post(
           "/api/core-backup/unlock",
           &json!({ "stale_only": stale_only }),
         )
         .await?;
-      out(j, &value, |_| println!("已解锁控制面备份仓库"));
+      out(j, &value, |v| {
+        println!("已解锁 {} 上的控制面备份仓库", v.target)
+      });
       Ok(())
     }
     BackupCmd::Core { to: Some(to), .. } => {
@@ -5870,19 +6122,43 @@ async fn backup(
         .await?;
       finish_task(c, &r.run_id, true, j).await
     }
-    BackupCmd::Core { run: true, .. } => {
+    BackupCmd::Core {
+      run: true,
+      keep,
+      note,
+      ..
+    } => {
+      let options = BackupRunRequest { keep, note };
+      options.validate()?;
       let r: ApplyResponse =
-        c.post("/api/core-backup/run", &json!({})).await?;
+        c.post("/api/core-backup/run", &options).await?;
       finish_task(c, &r.run_id, true, j).await
+    }
+    BackupCmd::Core { retention, .. } if retention.edited() => {
+      let v: Value = c.get("/api/core-backup").await?;
+      let previous: Option<BackupRetention> =
+        serde_json::from_value(v["retention"].clone())
+          .map_err(|_| ApiError::internal("无法读取现有保留策略"))?;
+      let retention = retention.merge(previous)?;
+      let v: Value = c
+        .put(
+          "/api/core-backup/retention",
+          &json!({"retention": retention}),
+        )
+        .await?;
+      out(j, &v, |_| {
+        print::backup_policy(retention.unwrap_or_default(), &[])
+      });
+      Ok(())
     }
     BackupCmd::Core { .. } => {
       let v: Value = c.get("/api/core-backup").await?;
       out(j, &v, print::core_backup);
       Ok(())
     }
-    BackupCmd::List { service } => {
+    BackupCmd::List { service, from } => {
       let v: BackupsView = c
-        .get(&format!("/api/services/{}/backups", seg(&service)))
+        .get(&backup_url(&service, "", &[("from", from.as_deref())]))
         .await?;
       out(j, &v, print::backups);
       Ok(())
