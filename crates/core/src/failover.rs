@@ -876,6 +876,7 @@ async fn manual(
     crate::rules::notice(
       state,
       "failover",
+      Some(host),
       None,
       !want_backup,
       notify::Event {
