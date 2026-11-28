@@ -44,8 +44,10 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(120);
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(180);
 
 const COOLDOWN: Duration = Duration::from_secs(60);
-static VERSION_CHECK: tokio::sync::Mutex<Option<Instant>> =
+static CHECK_NOW: tokio::sync::Mutex<Option<Instant>> =
   tokio::sync::Mutex::const_new(None);
+static VERSION_CHECK: tokio::sync::Mutex<()> =
+  tokio::sync::Mutex::const_new(());
 static PENDING_CHECK: tokio::sync::Mutex<()> =
   tokio::sync::Mutex::const_new(());
 static LAST: RwLock<Option<UpdatesView>> = RwLock::new(None);
@@ -247,8 +249,14 @@ pub async fn check_now(
   auth: Auth,
 ) -> ApiResult<UpdatesView> {
   auth.require(Perm::Plan)?;
-  versions(&s).await;
-  pending(&s).await;
+  {
+    let mut checked = CHECK_NOW.lock().await;
+    if checked.is_none_or(|at| at.elapsed() >= COOLDOWN) {
+      versions(&s).await;
+      pending(&s).await;
+      *checked = Some(Instant::now());
+    }
+  }
   let snap = snapshot::load(&s.db).await?;
   Ok(Json(current(&snap).unwrap_or_default()))
 }
@@ -256,12 +264,6 @@ pub async fn check_now(
 /// 算一次计划，不保存，也不为已有 pin 补查迁移平台。
 async fn pending(state: &AppState) {
   let _guard = PENDING_CHECK.lock().await;
-  if last().and_then(|view| view.pending).is_some_and(|check| {
-    Utc::now() - check.at
-      < chrono::TimeDelta::seconds(COOLDOWN.as_secs() as i64)
-  }) {
-    return;
-  }
   let result = crate::planner::pending_plan(state).await;
   let check = match result {
     Ok(p) => PendingCheck {
@@ -285,12 +287,8 @@ async fn pending(state: &AppState) {
 type Found = Result<(String, String), String>;
 
 pub(crate) async fn versions(state: &AppState) {
-  let mut checked = VERSION_CHECK.lock().await;
-  if checked.is_some_and(|at| at.elapsed() < COOLDOWN) {
-    return;
-  }
+  let _guard = VERSION_CHECK.lock().await;
   refresh(state, None).await;
-  *checked = Some(Instant::now());
 }
 
 pub(crate) async fn refresh_services(
@@ -730,6 +728,68 @@ mod tests {
     let auth = crate::host_access::tests::auth([Perm::Read], false);
     let error = check_now(State(state), auth).await.unwrap_err();
     assert_eq!(error.0.code, wharf_api_types::ErrorCode::Forbidden);
+  }
+
+  #[tokio::test]
+  async fn auto_update_run_checks_latest_during_update_check_cooldown()
+   {
+    use serde_json::json;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let state = crate::rules::tests::test_state();
+    let image = "fixture:latest";
+    let old = format!("sha256:{}", "a".repeat(64));
+    let new = format!("sha256:{}", "b".repeat(64));
+    let pin = old.clone();
+    state
+      .db
+      .call(move |c| {
+        use crate::db::{Write, apply_write};
+        apply_write(c, &Write::Upsert {
+          kind: "server".into(),
+          name: "s1".into(),
+          spec: json!({}),
+          meta: json!({}),
+        })?;
+        apply_write(c, &Write::Upsert {
+          kind: "service".into(),
+          name: "app".into(),
+          spec: json!({
+            "server": "s1", "source": {"image": image}, "auto_update": true,
+          }),
+          meta: json!({"pins": {image: pin}}),
+        })
+      })
+      .await
+      .unwrap();
+
+    let pushed = Arc::new(AtomicBool::new(false));
+    let published = pushed.clone();
+    let latest = new.clone();
+    state.hub.mock_agent("s1", false, move |op| match op {
+      AgentOp::ResolveImages(req) if req.tags => {
+        let digest = if published.load(Ordering::Relaxed) {
+          &latest
+        } else {
+          &old
+        };
+        Ok(json!([{"image": image, "digest": digest}]))
+      }
+      AgentOp::ProjectStatus { .. } => Ok(json!([])),
+      _ => Err(ApiError::invalid("测试只检查新版本发现")),
+    });
+
+    let auth = crate::host_access::tests::auth([Perm::Plan], false);
+    let Json(before) = check_now(State(state.clone()), auth)
+      .await
+      .map_err(|e| e.0)
+      .unwrap();
+    assert!(!before.services["app"].newer);
+
+    pushed.store(true, Ordering::Relaxed);
+    let result = crate::auto_update::run(&state).await;
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].latest.as_deref(), Some(new.as_str()));
   }
 
   #[test]
