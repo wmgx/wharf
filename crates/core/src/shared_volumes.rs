@@ -207,7 +207,10 @@ pub fn sort_steps(
       .iter()
       .enumerate()
       .filter_map(|(i, s)| match &s.step {
-        Step::ServiceUp { service, .. } if !down => {
+        Step::ServiceUp { service, .. }
+        | Step::ServiceStart { service, .. }
+          if !down =>
+        {
           Some((i, service.clone()))
         }
         Step::ServiceDown { service, .. } if down => {
@@ -304,12 +307,10 @@ mod tests {
       .map(|service| StepPlan {
         items: vec![],
         title: service.into(),
-        step: Step::ServiceUp {
+        step: Step::ServiceStart {
           service: service.into(),
-          instance_id: None,
-          expect: None,
-          refresh_files_from: None,
-          images: Default::default(),
+          instance_id: world.services[service].instance_id.clone(),
+          expect: String::new(),
         },
       })
       .collect();

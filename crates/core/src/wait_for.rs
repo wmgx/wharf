@@ -38,7 +38,8 @@ pub(crate) fn validate_steps(
 ) -> Result<(), ApiError> {
   for item in steps {
     let (service, moving) = match &item.step {
-      Step::ServiceUp { service, .. } => (service, false),
+      Step::ServiceUp { service, .. }
+      | Step::ServiceStart { service, .. } => (service, false),
       Step::VolumeSync { service, .. } => (service, true),
       _ => continue,
     };
@@ -51,7 +52,7 @@ pub(crate) fn validate_steps(
     {
       if world.services.get(dep).is_some_and(|row| row.spec.stopped)
         || (moving && steps.iter().any(|step| {
-          matches!(&step.step, Step::ServiceUp { service, .. } if service == dep)
+          matches!(&step.step, Step::ServiceUp { service, .. } | Step::ServiceStart { service, .. } if service == dep)
         }))
       {
         return Err(ApiError::invalid(format!("本次计划无法先让服务 {dep} 就绪"))

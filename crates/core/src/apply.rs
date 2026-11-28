@@ -1117,6 +1117,7 @@ pub(crate) fn apply_writes(
       let (service, destination) = match &step.step {
         Step::VolumeSync { service, to, .. } => (service, Some(to)),
         Step::ServiceUp { service, .. }
+        | Step::ServiceStart { service, .. }
         | Step::Rebuild { service } => (service, None),
         _ => continue,
       };
@@ -2176,6 +2177,8 @@ async fn run_step_with_dns(
         &snap.render_values(world, service),
       )?;
       check_expect(Some(expect), &hash, &format!("服务 {service}"))?;
+      crate::wait_for::run(state, world, service, &server, cancel)
+        .await?;
       project_stop_start(
         state, &server, service, true, &progress, cancel,
       )
@@ -5091,19 +5094,28 @@ mod tests {
       .unwrap();
     state.db.call(|c| {
       c.execute(
-        "UPDATE resources SET spec = json_remove(spec, '$.stopped') WHERE kind = 'service' AND name = 'notes'",
-        [],
+        "UPDATE resources SET spec = json_set(json_remove(spec, '$.stopped'), '$.wait_for', json(?1)) WHERE kind = 'service' AND name = 'notes'",
+        [r#"{"dns":{"kind":"dns","host":"check.example.test"}}"#],
       ).map_err(sql_err)?;
       Ok(())
     }).await.unwrap();
     let snap = snapshot::load(&state.db).await.unwrap();
-    state.hub.mock_agent("s2", false, |op| {
-      assert!(
-        matches!(op, AgentOp::ProjectStart { project, containers }
-        if project == "notes" && containers.is_empty())
-      );
-      Ok(serde_json::json!(true))
+    let mut dns_ok = false;
+    state.hub.mock_agent("s2", false, move |op| match op {
+      AgentOp::NetProbe(job) => {
+        assert_eq!(job.kind, wharf_api_types::net_probe::NetProbeKind::Dns);
+        assert_eq!(job.target, "check.example.test");
+        dns_ok = true;
+        Ok(serde_json::json!({"elapsed_ms":0,"dns":{"ips":["203.0.113.1"],
+          "elapsed_ms":0,"nameservers":[],"search":[]}}))
+      }
+      AgentOp::ProjectStart { project, containers } => {
+        assert!(dns_ok && project == "notes" && containers.is_empty());
+        Ok(serde_json::json!(true))
+      }
+      _ => panic!("额外的 agent 操作"),
     });
+    state.hub.enable_mock_net_probe("s2");
     let start = Step::ServiceStart {
       service: "notes".into(),
       instance_id: snap.world.services["notes"].instance_id.clone(),

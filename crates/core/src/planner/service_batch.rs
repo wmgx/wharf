@@ -372,6 +372,7 @@ async fn make_batch_plan(
               Step::ServiceRestart {
                 service: name.clone(),
                 container: None,
+                scheduled: None,
               },
             )
           } else {
@@ -397,6 +398,7 @@ async fn make_batch_plan(
       }
     }
   }
+  crate::wait_for::validate_steps(&desired, &b.steps)?;
   let mut planned = finish_plan(
     &snap,
     &desired,
