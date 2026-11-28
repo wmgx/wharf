@@ -1,5 +1,5 @@
 import type { Tone } from "@/components/common";
-import type { TaskSpec, TaskStatus } from "@/types";
+import type { TaskStatus, TaskView } from "@/types";
 
 export const STATUS: Record<TaskStatus, [Tone, string]> = {
   running: ["warn", "运行中"], succeeded: ["ok", "成功"], failed: ["bad", "失败"], timed_out: ["bad", "超时"], skipped: ["idle", "跳过"],
@@ -26,6 +26,11 @@ export function cronText(expr: string): string | null {
   return null;
 }
 
-export function where(spec: TaskSpec): string {
-  return spec.kind === "exec" ? `${spec.server} · ${spec.service}` : spec.server;
+export function targetServer(task: TaskView): string {
+  return task.migrating ? "迁移中" : task.target_server ?? task.spec.server;
+}
+
+export function where(task: TaskView): string {
+  const server = targetServer(task);
+  return task.spec.kind === "exec" ? `${server} · ${task.spec.service}` : server;
 }

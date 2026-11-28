@@ -25,7 +25,7 @@ export function TaskForm({ task, server: fixed, taken, onSaved, onCancel }: { ta
   const { status } = useStatus();
   const s = task?.spec;
   const servers = status?.servers ?? [];
-  const [server, setServer] = useState(s?.server ?? fixed ?? servers[0]?.name ?? "");
+  const [server, setServer] = useState(task?.target_server ?? s?.server ?? fixed ?? servers[0]?.name ?? "");
   const [name, setName] = useState(task?.name ?? "");
   const [kind, setKind] = useState<Kind>(s?.kind ?? "exec");
   const [schedule, setSchedule] = useState(s?.schedule ?? "0 4 * * *");
@@ -46,13 +46,13 @@ export function TaskForm({ task, server: fixed, taken, onSaved, onCancel }: { ta
   const [notify, setNotify] = useState(s?.notify ?? true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const services = (status?.services ?? []).filter((v) => v.spec.server === server);
+  const services = status?.services ?? [];
   const clash = !task && taken.includes(name);
   const validSchedule = (kind === "script" && !schedule.trim()) || schedule.trim().split(/\s+/).length === 5;
   const spec = (): TaskSpec => {
-    const base = { server, schedule: schedule.trim(), timeout_secs: Number(timeout) || 600, enabled, notify };
+    const base = { server, schedule: schedule.trim(), timeout_secs: Number(timeout) || 600, enabled, notify, skip_if_stopped: s?.skip_if_stopped, catch_up_mins: s?.catch_up_mins };
     if (kind === "script") return { ...base, kind, runtime, code, deps: runtime === "shell" ? undefined : deps, image: scriptImage.trim() || undefined, env: parseEnv(env), hook: hook ? (s?.kind === "script" ? s.hook ?? "" : "") : undefined };
-    if (kind === "exec") return { ...base, kind, service, container: container.trim() || undefined, command };
+    if (kind === "exec") return { ...base, server: services.find((v) => v.name === service)?.spec.server ?? server, kind, service, container: container.trim() || undefined, command };
     if (kind === "host") return { ...base, kind, command };
     if (kind === "ping") return { ...base, kind, grace_mins: Number(grace) || 60 };
     return { ...base, kind, image: image.trim(), command: command.trim() || undefined, env: parseEnv(env), mounts: mounts.split("\n").map((m) => m.trim()).filter(Boolean) };
@@ -79,9 +79,9 @@ export function TaskForm({ task, server: fixed, taken, onSaved, onCancel }: { ta
           {DESCRIPTIONS[kind]}
         </span>
       </Field>
-      <Field label="服务器" htmlFor="task-server">
-        <Picker id="task-server" value={server} options={serverOptions(servers)} onChange={(v) => { setServer(v); setService(""); }} />
-      </Field>
+      {kind !== "exec" && <Field label="服务器" htmlFor="task-server">
+        <Picker id="task-server" value={server} options={serverOptions(servers)} onChange={setServer} />
+      </Field>}
       {kind === "exec" && <>
         <Field label="服务" htmlFor="task-service">
           <Picker id="task-service" value={service} options={services.map((v) => ({ value: v.name, label: v.name }))} onChange={setService} />

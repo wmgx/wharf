@@ -140,7 +140,11 @@ pub async fn task(
           println!(
             "{:<16} {:<8} {:<16} {:<9} {}{}",
             t.name,
-            t.spec.server,
+            if t.migrating {
+              "迁移中"
+            } else {
+              t.target_server.as_deref().unwrap_or(&t.spec.server)
+            },
             if t.spec.schedule.is_empty() {
               "不定时"
             } else {
@@ -171,6 +175,11 @@ pub async fn task(
           "{}",
           serde_json::to_string_pretty(&t.spec).unwrap_or_default()
         );
+        if let Some(server) = &t.target_server {
+          println!("执行服务器：{server}");
+        } else if t.migrating {
+          println!("迁移中");
+        }
         if let TaskKind::Script { runtime, code, .. } = &t.spec.how {
           println!("运行环境：{}", runtime_name(*runtime));
           if let Some(url) = &t.hook_url {

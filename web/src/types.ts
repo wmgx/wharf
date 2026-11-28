@@ -710,6 +710,8 @@ export type TaskSpec = TaskKind & {
   timeout_secs: number;
   enabled: boolean;
   notify: boolean;
+  skip_if_stopped?: boolean;
+  catch_up_mins?: number;
 };
 
 export type TaskStatus =

@@ -36,7 +36,7 @@ export function TaskDetail() {
       {task.name}<StatusBadge tone={badge[0]}>
         {badge[1]}
       </StatusBadge>
-    </>} description={`${KIND[task.spec.kind]} · ${where(task.spec)} · ${cronText(task.spec.schedule) ?? task.spec.schedule}`} actions={<OpBar ops={taskOps} target={task} label={`${task.name} 的操作`} />} />
+    </>} description={`${KIND[task.spec.kind]} · ${where(task)} · ${cronText(task.spec.schedule) ?? task.spec.schedule}`} actions={<OpBar ops={taskOps} target={task} label={`${task.name} 的操作`} />} />
     <Tabs value={tab} onValueChange={(v) => setTab(v as typeof TABS[number])}>
       <TabsList>
         <TabsTrigger value="overview">概览</TabsTrigger>

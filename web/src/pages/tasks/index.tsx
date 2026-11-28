@@ -15,7 +15,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { useStatus } from "@/status";
 import type { TaskView } from "@/types";
 import { TaskForm } from "./form";
-import { KIND, STATUS, cronText, where } from "./model";
+import { KIND, STATUS, cronText, targetServer, where } from "./model";
 
 export function TasksPage() {
   const { status } = useStatus();
@@ -27,7 +27,7 @@ export function TasksPage() {
   const clickable = useClickable();
   const server = params.get("server") ?? "";
   const failures = (data ?? []).filter((t) => t.last?.status === "failed" || t.last?.status === "timed_out");
-  const rows = (data ?? []).filter((t) => (!server || t.spec.server === server) && (!failed || t.last?.status === "failed" || t.last?.status === "timed_out"));
+  const rows = (data ?? []).filter((t) => (!server || targetServer(t) === server) && (!failed || t.last?.status === "failed" || t.last?.status === "timed_out"));
   const add = <Button onClick={() => { const next = new URLSearchParams(params); next.set("new", "1"); setParams(next); }}>
     <PlusIcon />新建任务</Button>;
   const close = () => { const next = new URLSearchParams(params); next.delete("new"); setParams(next); };
@@ -64,7 +64,7 @@ export function TasksPage() {
                 {KIND[t.spec.kind]}
               </TableCell>
               <TableCell>
-                {where(t.spec)}
+                {where(t)}
               </TableCell>
               <TableCell>
                 <div>

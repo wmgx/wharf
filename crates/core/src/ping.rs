@@ -116,7 +116,7 @@ async fn record(
     tasks::record_ping(state, name, token, status, trigger, output)
       .await?;
   if let Some(id) = recorded {
-    tasks::notify_result(state, name, id, status, output).await;
+    tasks::notify_result(state, name, id, status, output, None).await;
   }
   Ok(recorded.is_some())
 }

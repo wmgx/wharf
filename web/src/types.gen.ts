@@ -3151,6 +3151,7 @@ export interface TaskRunView {
    * 输出的最后 16 KB，密钥值已换成 `***`；出错时是错误信息。
    */
   output: string;
+  service?: string | null;
   started_at: string;
   status: TaskStatus;
   task: string;
@@ -3226,6 +3227,7 @@ export interface TaskView {
   data_bytes?: number | null;
   hook_url?: string | null;
   last?: TaskRunView | null;
+  migrating?: boolean;
   name: string;
   /**
    * 下次运行时间；停用时没有。
@@ -3236,6 +3238,7 @@ export interface TaskView {
    */
   ping_url?: string | null;
   spec: TaskSpec;
+  target_server?: string | null;
   updated_at: string;
 }
 

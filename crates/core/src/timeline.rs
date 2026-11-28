@@ -32,19 +32,21 @@ pub async fn show(
   Query(q): Query<TimelineQuery>,
 ) -> ApiResult<Timeline> {
   auth.require(Perm::Read)?;
-  if !snapshot::load(&state.db)
-    .await?
+  let snap = snapshot::load(&state.db).await?;
+  let instance = snap
     .world
     .services
-    .contains_key(&name)
-  {
-    return Err(service_not_found(&name).into());
-  }
+    .get(&name)
+    .ok_or_else(|| service_not_found(&name))?
+    .instance_id
+    .clone();
   let before = q.before.unwrap_or(i64::MAX);
   let limit = q.limit.unwrap_or(50).clamp(1, 200) as usize;
   let rows = state
     .db
-    .call(move |c| read(c, &name, before, limit).map_err(sql_err))
+    .call(move |c| {
+      read(c, &name, Some(&instance), before, limit).map_err(sql_err)
+    })
     .await?;
   let (items, next_before) = merge(rows, limit);
   Ok(Json(Timeline { items, next_before }))
@@ -53,6 +55,7 @@ pub async fn show(
 fn read(
   c: &Connection,
   name: &str,
+  instance: Option<&str>,
   before: i64,
   limit: usize,
 ) -> rusqlite::Result<Vec<TimelineItem>> {
@@ -99,24 +102,28 @@ fn read(
   let mut stmt = c.prepare(
       "SELECT started_at, task, status FROM (
          SELECT r.started_at, r.task, r.status, DENSE_RANK() OVER (ORDER BY r.started_at DESC) AS page
-         FROM task_runs r JOIN tasks t ON t.name = r.task WHERE json_extract(t.spec, '$.kind') = 'exec' AND json_extract(t.spec, '$.service') = ?1 AND r.started_at < ?2
+         FROM task_runs r WHERE r.service = ?1 AND r.started_at < ?2
+           AND (?4 IS NULL OR r.service_instance_id IS NULL OR r.service_instance_id = ?4)
        ) WHERE page <= ?3 ORDER BY started_at DESC",
     )?;
   rows.extend(
     stmt
-      .query_map(params![name, before, limit as i64 + 1], |r| {
-        Ok(TimelineItem {
-          at: r.get(0)?,
-          kind: "task".into(),
-          title: format!("任务 {}", r.get::<_, String>(1)?),
-          ok: match r.get::<_, String>(2)?.as_str() {
-            "succeeded" => Some(true),
-            "running" => None,
-            _ => Some(false),
-          },
-          actor: None,
-        })
-      })?
+      .query_map(
+        params![name, before, limit as i64 + 1, instance],
+        |r| {
+          Ok(TimelineItem {
+            at: r.get(0)?,
+            kind: "task".into(),
+            title: format!("任务 {}", r.get::<_, String>(1)?),
+            ok: match r.get::<_, String>(2)?.as_str() {
+              "succeeded" => Some(true),
+              "running" | "skipped" => None,
+              _ => Some(false),
+            },
+            actor: None,
+          })
+        },
+      )?
       .collect::<rusqlite::Result<Vec<_>>>()?,
   );
   let mut stmt = c.prepare(
@@ -281,15 +288,31 @@ mod tests {
           [at],
         ).map_err(sql_err)?;
       }
-      let (first, next) = merge(read(c, "s1", i64::MAX, 50).map_err(sql_err)?, 50);
+      let (first, next) = merge(read(c, "s1", None, i64::MAX, 50).map_err(sql_err)?, 50);
       assert_eq!(first.len(), 52);
       assert!(first.iter().all(|i| i.at == 2));
       assert_eq!(next, Some(2));
-      let (last, next) = merge(read(c, "s1", next.unwrap(), 50).map_err(sql_err)?, 50);
+      let (last, next) = merge(read(c, "s1", None, next.unwrap(), 50).map_err(sql_err)?, 50);
       assert_eq!(last.len(), 1);
       assert_eq!(last[0].at, 1);
       assert_eq!(next, None);
       Ok(())
     }).await.unwrap();
   }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn rebind_exec_task_preserves_timeline() {
+  let db = crate::db::Db::memory();
+  db.call(|c| {
+    c.execute_batch("INSERT INTO task_runs (task,status,trigger,started_at,service,service_instance_id) VALUES
+      ('dump','failed','manual',10,'web','a'), ('dump','succeeded','manual',20,'notes','b');").map_err(sql_err)?;
+    let web = read(c, "web", Some("a"), i64::MAX, 10).map_err(sql_err)?;
+    let notes = read(c, "notes", Some("b"), i64::MAX, 10).map_err(sql_err)?;
+    assert_eq!(web[0].ok, Some(false));
+    assert_eq!(notes[0].ok, Some(true));
+    assert!(read(c, "web", Some("other"), i64::MAX, 10).map_err(sql_err)?.is_empty());
+    Ok(())
+  }).await.unwrap();
 }
