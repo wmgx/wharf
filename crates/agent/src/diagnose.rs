@@ -217,7 +217,18 @@ async fn diagnose(
   let user = if running {
     running_user(docker, &container.id, ctx).await
   } else {
-    configured_user(&container.config.user)
+    match configured_user(&container.config.user) {
+      Some(user) => Some(user),
+      None => {
+        resolve_user_from_passwd(
+          docker,
+          &container.id,
+          &container.config.user,
+          ctx,
+        )
+        .await
+      }
+    }
   };
   let mounts = container
     .mounts
@@ -354,12 +365,6 @@ async fn running_user(
 }
 
 fn configured_user(config: &str) -> Option<ContainerUser> {
-  if config.is_empty() {
-    return Some(ContainerUser {
-      uid: 0,
-      gid: Some(0),
-    });
-  }
   if let Some((uid, gid)) = config.split_once(':') {
     return Some(ContainerUser {
       uid: uid.parse().ok()?,
@@ -370,6 +375,78 @@ fn configured_user(config: &str) -> Option<ContainerUser> {
     uid: config.parse().ok()?,
     gid: None,
   })
+}
+
+async fn resolve_user_from_passwd(
+  docker: &Docker,
+  id: &str,
+  user: &str,
+  ctx: &Ctx,
+) -> Option<ContainerUser> {
+  if user.is_empty() {
+    return None;
+  }
+  let (name, group) = user
+    .split_once(':')
+    .map_or((user, None), |(name, group)| (name, Some(group)));
+  if let Ok(uid) = name.parse() {
+    return Some(ContainerUser {
+      uid,
+      gid: group.and_then(|g| g.parse().ok()),
+    });
+  }
+  let archive = docker
+    .cmd()
+    .args(["cp", &format!("{id}:/etc/passwd"), "-"])
+    .timeout(QUICK)
+    .stdout_bounded(ctx, 256 * 1024)
+    .await?;
+  passwd_user(&archive, name, group)
+}
+
+fn passwd_user(
+  archive: &[u8],
+  name: &str,
+  group: Option<&str>,
+) -> Option<ContainerUser> {
+  // shortcut: docker cp 单个普通文件时直接读取首条 tar 记录；需要识别扩展 tar 记录时再复用归档解析。
+  if !matches!(*archive.get(156)?, 0 | b'0')
+    || !archive.starts_with(b"passwd\0")
+  {
+    return None;
+  }
+  let size = std::str::from_utf8(archive.get(124..136)?)
+    .ok()?
+    .trim_matches(['\0', ' ']);
+  let length = usize::from_str_radix(size, 8).ok()?;
+  let text = std::str::from_utf8(
+    archive.get(512..512usize.checked_add(length)?)?,
+  )
+  .ok()?;
+  text.lines().find_map(|line| {
+    let mut fields = line.split(':');
+    if fields.next()? != name {
+      return None;
+    }
+    let mut fields = fields.skip(1);
+    let uid = fields.next()?.parse().ok()?;
+    let gid = match group {
+      Some(g) => g.parse().ok(),
+      None => fields.next()?.parse().ok(),
+    };
+    Some(ContainerUser { uid, gid })
+  })
+}
+
+#[test]
+fn empty_user_is_unknown_and_passwd_resolves_named_user() {
+  assert!(configured_user("").is_none());
+  let mut tar = vec![0; 512];
+  tar[..6].copy_from_slice(b"passwd");
+  tar[124..127].copy_from_slice(b"027");
+  tar.extend_from_slice(b"app:x:1000:1001::/:/sh\n");
+  let user = passwd_user(&tar, "app", None).unwrap();
+  assert_eq!((user.uid, user.gid), (1000, Some(1001)));
 }
 
 fn bind_mount(

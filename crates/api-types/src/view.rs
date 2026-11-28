@@ -1217,6 +1217,8 @@ pub struct DoctorReport {
   pub vendors: Vec<DoctorCheck>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub config: Vec<DoctorCheck>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub checks: Vec<DoctorCheck>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1231,6 +1233,8 @@ pub struct RouteDiagnosis {
   /// 这个域名的注册到期时间（后台用 RDAP 查，查不到没有）。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub domain_expires: Option<DateTime<Utc>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub edge_app: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1801,6 +1805,8 @@ pub struct PortRow {
   pub name: String,
   pub expected: bool,
   pub acked: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub family: Option<String>,
 }
 
 #[derive(

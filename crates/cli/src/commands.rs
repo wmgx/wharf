@@ -619,11 +619,21 @@ async fn dispatch(
       out(j, &v, print::metrics);
       Ok(())
     }
-    Command::Doctor { hostname } => {
-      let path = match &hostname {
-        Some(h) => format!("/api/doctor?host={}", seg(h)),
-        None => "/api/doctor".to_string(),
-      };
+    Command::Doctor {
+      hostname,
+      service,
+      server,
+    } => {
+      let path = [
+        ("host", hostname),
+        ("service", service),
+        ("server", server),
+      ]
+      .into_iter()
+      .find_map(|(key, value)| {
+        value.map(|v| format!("/api/doctor?{key}={}", seg(&v)))
+      })
+      .unwrap_or_else(|| "/api/doctor".into());
       let v: DoctorReport = c.get(&path).await?;
       out(j, &v, print::doctor);
       let bad = v
@@ -631,6 +641,7 @@ async fn dispatch(
         .iter()
         .chain(&v.vendors)
         .chain(&v.config)
+        .chain(&v.checks)
         .chain(v.routes.iter().flat_map(|r| &r.checks))
         .filter(|c| c.status == CheckStatus::Bad)
         .count();
@@ -1327,11 +1338,15 @@ async fn server(
         }
         println!("本机监听\n协议/端口  地址  归属  名字  状态");
         for p in &v.ports {
+          let address = p.family.as_ref().map_or_else(
+            || p.addr.clone(),
+            |family| format!("{} ({family})", p.addr),
+          );
           println!(
             "{}/{}  {}  {}  {}  {}",
             p.proto,
             p.port,
-            p.addr,
+            address,
             p.owner,
             p.name,
             if p.expected {
@@ -1585,26 +1600,11 @@ async fn server(
           settings.build_env.insert(k, v);
         }
       }
-      if let Some(ip) = private_ip {
-        let ip = ip.trim();
-        settings.private_addr = if ip.is_empty() {
-          None
-        } else {
-          ip.parse::<std::net::IpAddr>().map_err(|_| {
-            ApiError::invalid(format!(
-              "--private-ip {ip} 不是 IP 地址"
-            ))
-          })?;
-          Some(PrivateAddr {
-            ip: ip.to_string(),
-            network: if network == "overlay" {
-              PrivateNetwork::Overlay
-            } else {
-              PrivateNetwork::Lan
-            },
-          })
-        };
-      }
+      set_private_network(
+        &mut settings,
+        private_ip.as_deref(),
+        network.as_deref(),
+      )?;
       if let Some(mode) = mode {
         settings.network_mode = match mode.as_str() {
           "tailscale" => Some(NetworkMode::Tailscale),
@@ -5144,4 +5144,68 @@ mod tests {
         .is_err()
     );
   }
+}
+
+fn set_private_network(
+  settings: &mut wharf_api_types::spec::ServerSettings,
+  ip: Option<&str>,
+  network: Option<&str>,
+) -> Result<(), ApiError> {
+  let network = network.map(|n| {
+    if n == "overlay" {
+      PrivateNetwork::Overlay
+    } else {
+      PrivateNetwork::Lan
+    }
+  });
+  match (ip.map(str::trim), network) {
+    (Some(""), Some(_)) => {
+      return Err(ApiError::invalid(
+        "清空 --private-ip 时不能同时指定 --network",
+      ));
+    }
+    (Some(""), None) => settings.private_addr = None,
+    (Some(ip), network) => {
+      ip.parse::<std::net::IpAddr>().map_err(|_| {
+        ApiError::invalid(format!("--private-ip {ip} 不是 IP 地址"))
+      })?;
+      let network = network
+        .or_else(|| settings.private_addr.as_ref().map(|a| a.network))
+        .unwrap_or(PrivateNetwork::Lan);
+      settings.private_addr = Some(PrivateAddr {
+        ip: ip.into(),
+        network,
+      });
+    }
+    (None, Some(network)) => {
+      let addr = settings.private_addr.as_mut().ok_or_else(|| {
+        ApiError::invalid("这台服务器还没有手动设置内网地址，请同时传 --private-ip")
+          .with_hint("wharf server set <name> --private-ip <IP> --network overlay")
+      })?;
+      addr.network = network;
+    }
+    (None, None) => {}
+  }
+  Ok(())
+}
+
+#[test]
+fn server_network_preserve_when_only_ip_changes() {
+  let mut settings = wharf_api_types::spec::ServerSettings::default();
+  assert!(
+    set_private_network(&mut settings, None, Some("overlay"))
+      .is_err()
+  );
+  set_private_network(
+    &mut settings,
+    Some("100.64.0.2"),
+    Some("overlay"),
+  )
+  .unwrap();
+  set_private_network(&mut settings, Some("100.64.0.3"), None)
+    .unwrap();
+  assert_eq!(
+    settings.private_addr.unwrap().network,
+    PrivateNetwork::Overlay
+  );
 }

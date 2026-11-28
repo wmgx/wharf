@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, sync::Mutex};
 
 use wharf_api_types::view::{
   CheckStatus, DoctorReport, Issue, IssueLevel, IssueSubject,
-  ProbeView,
+  ProbeView, RouteDiagnosis,
 };
 
 use crate::state::AppState;
@@ -71,63 +71,137 @@ pub async fn observe(state: &AppState, report: &DoctorReport) {
   if let Ok(mut m) = LAST.lock() {
     m.retain(|h, _| report.routes.iter().any(|r| &r.hostname == h));
   }
-  for r in &report.routes {
-    let Some(web) = r
-      .checks
-      .iter()
-      .find(|c| c.layer == "https" || c.layer == "http")
-    else {
-      continue;
-    };
-    let ok = web.status != CheckStatus::Bad;
-    let host = r.hostname.clone();
-    let cert_days =
-      r.cert_expires.map(|t| (t - chrono::Utc::now()).num_days());
-    if let Some(days) = cert_days {
-      cert_notify(state, &host, days).await;
-    }
-    let prev = last(&host).map_or(0, |p| p.fails);
-    let fails = if ok { 0 } else { prev + 1 };
-    if let Ok(mut m) = LAST.lock() {
-      m.insert(
-        host.clone(),
-        ProbeView {
-          ok,
-          detail: web.detail.clone(),
-          ms: 0,
-          at: web.at.timestamp_millis(),
-          fails,
-          cert_days,
-        },
-      );
-    }
-    // 除了 HTTPS 这层，还有哪一层不通：多半就是原因。
-    let cause = r
-      .checks
-      .iter()
-      .find(|c| c.status == CheckStatus::Bad && c.layer != web.layer);
-    let detail = match cause {
-      Some(c) if !ok => {
-        format!(
-          "{}：{}；{}：{}",
-          r.url, web.detail, c.subject, c.detail
-        )
-      }
-      _ => format!("{}：{}", r.url, web.detail),
-    };
-    crate::rules::observe(
-      state,
-      "probe.ok",
-      &host,
-      f64::from(u8::from(ok)),
-      &detail,
-    )
-    .await;
+  observe_routes(state, &report.routes).await;
+}
+
+pub async fn observe_routes(
+  state: &AppState,
+  routes: &[RouteDiagnosis],
+) {
+  for route in routes {
+    observe_one(state, route).await;
   }
+}
+
+async fn observe_one(state: &AppState, r: &RouteDiagnosis) {
+  let Some(web) = r
+    .checks
+    .iter()
+    .find(|c| c.layer == "https" || c.layer == "http")
+  else {
+    return;
+  };
+  if web.status == CheckStatus::Skip {
+    return;
+  }
+  let ok = web.status != CheckStatus::Bad;
+  let host = r.hostname.clone();
+  let cert_days =
+    r.cert_expires.map(|t| (t - chrono::Utc::now()).num_days());
+  if let Some(days) = cert_days {
+    cert_notify(state, &host, days).await;
+  }
+  if let Ok(mut m) = LAST.lock() {
+    if m
+      .get(&host)
+      .is_some_and(|p| p.at > web.at.timestamp_millis())
+    {
+      return;
+    }
+    let fails = if ok {
+      0
+    } else {
+      m.get(&host).map_or(1, |p| p.fails.saturating_add(1))
+    };
+    m.insert(
+      host.clone(),
+      ProbeView {
+        ok,
+        detail: web.detail.clone(),
+        ms: 0,
+        at: web.at.timestamp_millis(),
+        fails,
+        cert_days,
+      },
+    );
+  }
+  // 除了 HTTPS 这层，还有哪一层不通：多半就是原因。
+  let cause = r
+    .checks
+    .iter()
+    .find(|c| c.status == CheckStatus::Bad && c.layer != web.layer);
+  let detail = match cause {
+    Some(c) if !ok => {
+      format!(
+        "{}：{}；{}：{}",
+        r.url, web.detail, c.subject, c.detail
+      )
+    }
+    _ => format!("{}：{}", r.url, web.detail),
+  };
+  crate::rules::observe(
+    state,
+    "probe.ok",
+    &host,
+    f64::from(u8::from(ok)),
+    &detail,
+  )
+  .await;
 }
 
 /// 证书剩余天数，规则见 [crate::rules]。
 async fn cert_notify(state: &AppState, host: &str, days: i64) {
   crate::rules::observe(state, "cert.days", host, days as f64, "")
     .await;
+}
+
+#[tokio::test]
+async fn observe_routes_clears_single_host_without_wiping_others() {
+  let state = crate::rules::tests::test_state();
+  let a = "p203-a.example.test";
+  let b = "p203-b.example.test";
+  {
+    let mut last = LAST.lock().unwrap();
+    for host in [a, b] {
+      last.insert(
+        host.into(),
+        ProbeView {
+          ok: false,
+          detail: String::new(),
+          ms: 0,
+          at: 0,
+          fails: 3,
+          cert_days: None,
+        },
+      );
+    }
+  }
+  observe_routes(
+    &state,
+    &[RouteDiagnosis {
+      hostname: a.into(),
+      url: format!("https://{a}"),
+      checks: vec![crate::doctor::check(
+        "https",
+        a,
+        CheckStatus::Ok,
+        "HTTP 200",
+      )],
+      cert_expires: None,
+      domain_expires: None,
+      edge_app: None,
+    }],
+  )
+  .await;
+  assert_eq!(last(a).unwrap().fails, 0);
+  assert_eq!(last(b).unwrap().fails, 3);
+  assert!(
+    !issues()
+      .iter()
+      .any(|i| i.subject.as_ref().is_some_and(|s| s.name == a))
+  );
+  LAST
+    .lock()
+    .unwrap()
+    .retain(|host, _| host != a && host != b);
 }

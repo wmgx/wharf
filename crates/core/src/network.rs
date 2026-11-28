@@ -57,10 +57,12 @@ pub async fn probe_all(
       (from.to_string(), to)
     })
     .collect();
-  tokio::join!(
+  let (_, _, relays) = tokio::join!(
     link::probe_pairs(s, &net, pairs, link::ProbeMode::Persist),
-    crate::tailnet_probe::probe_extra(s, &snap, &net)
+    crate::tailnet_probe::probe_extra(s, &snap, &net),
+    crate::tailnet_probe::refresh(s)
   );
+  relays?;
   Ok(snap)
 }
 

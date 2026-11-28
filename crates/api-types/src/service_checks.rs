@@ -27,6 +27,20 @@ const fn one() -> u32 {
 
 impl LogAlertSpec {
   pub fn compile(&self) -> Result<Option<regex::Regex>, ApiError> {
+    if !(1..=1440).contains(&self.window_mins)
+      || !(1..=100_000).contains(&self.min_count)
+    {
+      return Err(ApiError::invalid(
+        "日志规则窗口须为 1 到 1440 分钟，最少次数须为 1 到 100000",
+      ));
+    }
+    self.compile_stored()
+  }
+
+  /// 继续运行升级前已保存的日志规则。
+  pub fn compile_stored(
+    &self,
+  ) -> Result<Option<regex::Regex>, ApiError> {
     if self.pattern.is_empty()
       || self.pattern.len() > 4096
       || self.window_mins == 0
@@ -63,6 +77,19 @@ pub enum PortCheckSpec {
 
 impl PortCheckSpec {
   pub fn validate(&self, udp: bool) -> Result<(), ApiError> {
+    self.validate_with_limits(udp, false)
+  }
+
+  /// 继续运行升级前已保存的端口检查。
+  pub fn validate_stored(&self, udp: bool) -> Result<(), ApiError> {
+    self.validate_with_limits(udp, true)
+  }
+
+  fn validate_with_limits(
+    &self,
+    udp: bool,
+    stored: bool,
+  ) -> Result<(), ApiError> {
     let valid = match self {
       Self::Off => true,
       Self::Dns { domain } => {
@@ -73,6 +100,9 @@ impl PortCheckSpec {
               && domain.split('.').all(|label| {
                 !label.is_empty()
                   && label.len() <= 63
+                  && (stored
+                    || (!label.starts_with('-')
+                      && !label.ends_with('-')))
                   && label
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-')
@@ -83,7 +113,7 @@ impl PortCheckSpec {
         udp
           && [send, expect].iter().all(|v| {
             !v.is_empty()
-              && v.len() <= 65507 * 2
+              && v.len() <= if stored { 65507 * 2 } else { 2048 }
               && v.len().is_multiple_of(2)
               && v.bytes().all(|b| b.is_ascii_hexdigit())
           })
@@ -119,6 +149,19 @@ pub struct LogHit {
   pub lines: Vec<String>,
 }
 
+impl HeartbeatSpec {
+  pub fn validate(&self) -> Result<(), ApiError> {
+    if !(1..=43_200).contains(&self.every_mins)
+      || self.grace_mins > 1440
+    {
+      return Err(ApiError::invalid(
+        "心跳间隔须为 1 到 43200 分钟，宽限须为 0 到 1440 分钟",
+      ));
+    }
+    Ok(())
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogWatch {
   pub id: String,
@@ -144,4 +187,40 @@ pub struct HeartbeatView {
   pub url: String,
   pub last_at: Option<i64>,
   pub status: String,
+}
+
+#[test]
+fn reject_out_of_range_service_checks() {
+  let log = LogAlertSpec {
+    pattern: "fixture".into(),
+    regex: false,
+    window_mins: 99999,
+    min_count: 1,
+    container: None,
+  };
+  assert!(log.compile().is_err());
+  assert!(
+    HeartbeatSpec {
+      every_mins: 100000,
+      grace_mins: 5,
+      token: String::new()
+    }
+    .validate()
+    .is_err()
+  );
+  assert!(
+    PortCheckSpec::Dns {
+      domain: "-a.test".into()
+    }
+    .validate(true)
+    .is_err()
+  );
+  assert!(
+    PortCheckSpec::Custom {
+      send: "ab".repeat(1025),
+      expect: "ab".into()
+    }
+    .validate(true)
+    .is_err()
+  );
 }

@@ -326,15 +326,20 @@ pub fn service_view(
         .collect()
     })
     .unwrap_or_default();
-  let hash = live.and_then(|_| {
-    snapshot::service_resolved(
+  let hash = live.and_then(|live| {
+    let observed = live
+      .get(&row.spec.server)
+      .and_then(|r| r.as_ref().ok())
+      .and_then(|states| states.get(name))
+      .and_then(|p| p.hash.as_deref());
+    snapshot::service_hash(
       &snap.world,
       net,
       name,
       &snap.render_values(&snap.world, name),
+      observed,
     )
     .ok()
-    .map(|(_, h)| h)
   });
   let status = live.map(|live| {
     let project = live
@@ -390,7 +395,14 @@ pub fn service_view(
     status,
     monitor: crate::monitor::last(name),
     log_alerts: crate::service_monitor::log_views(name, &row.spec),
-    port_checks: crate::service_monitor::port_views(name, row),
+    port_checks: crate::service_monitor::port_views(
+      name,
+      row,
+      snap
+        .applied
+        .get(name)
+        .map_or(0, |a| a.at.timestamp_millis()),
+    ),
     heartbeat: crate::service_monitor::heartbeat::view(
       snap, name, false,
     ),

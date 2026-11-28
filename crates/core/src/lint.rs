@@ -38,8 +38,7 @@ pub(crate) fn plan_warnings(
       desired.services.get(name).map(|s| s.spec.server.as_str());
     servers.extend(old.into_iter().chain(new));
     if item.layer == Layer::Config
-      && (item.action == Action::Create
-        || old.zip(new).is_some_and(|(a, b)| a != b))
+      && matches!(item.action, Action::Create | Action::Update)
     {
       services.insert(name);
     }
@@ -74,14 +73,18 @@ pub(crate) fn plan_warnings(
   .collect()
 }
 
-pub(crate) fn doctor_warnings(
+pub(crate) fn scoped_warnings(
   snap: &Snapshot,
+  services: &BTreeSet<String>,
+  servers: &BTreeSet<String>,
 ) -> Vec<(String, String)> {
   warnings(
     snap,
     &snap.world,
-    snap.world.services.iter(),
-    snap.world.servers.keys().map(String::as_str),
+    services
+      .iter()
+      .filter_map(|name| snap.world.services.get_key_value(name)),
+    servers.iter().map(String::as_str),
   )
 }
 
@@ -151,9 +154,17 @@ fn published_port(port: &Value) -> Option<(&str, String)> {
       published.to_string(),
     ));
   }
-  if let Some(published) = port.get("published") {
-    let host = port["host_ip"].as_str().unwrap_or_default();
-    return Some((host, scalar_text(published).unwrap_or_default()));
+  if let Some(map) = port.as_mapping() {
+    let host = map
+      .get("host_ip")
+      .and_then(Value::as_str)
+      .unwrap_or_default();
+    let published = map
+      .get("published")
+      .and_then(scalar_text)
+      .filter(|s| !s.is_empty())
+      .or_else(|| map.get("target").and_then(scalar_text))?;
+    return Some((host, published));
   }
   port.as_u64().map(|target| ("", target.to_string()))
 }
@@ -334,15 +345,38 @@ fn service_memory(spec: &ServiceSpec) -> f64 {
   sum
 }
 
-fn has_reference(value: &str) -> bool {
-  has_reference_to(value, None)
+fn has_compose_var(value: &str) -> bool {
+  let mut bytes = value.bytes().peekable();
+  while let Some(b) = bytes.next() {
+    if b != b'$' {
+      continue;
+    }
+    match bytes.next_if(|b| *b == b'$') {
+      Some(_) => continue,
+      None
+        if bytes
+          .peek()
+          .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_') =>
+      {
+        return true;
+      }
+      None if bytes.next_if_eq(&b'{').is_some() => {
+        return bytes
+          .next()
+          .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+          && bytes.any(|b| b == b'}');
+      }
+      None => {}
+    }
+  }
+  false
 }
 
 fn has_reference_to(
   value: &str,
   known: Option<&BTreeMap<String, String>>,
 ) -> bool {
-  value.contains('$')
+  has_compose_var(value)
     || crate::render::placeholders(value).any(|inner| {
       crate::render::parse_placeholder(inner, true)
         .ok()
@@ -356,7 +390,6 @@ fn has_reference_to(
             })
         })
     })
-    || !crate::refs::used(value).is_empty()
 }
 
 fn env_secret(
@@ -365,6 +398,9 @@ fn env_secret(
   secrets: &BTreeMap<String, String>,
 ) -> Option<String> {
   let trimmed = value.trim();
+  if url_has_password(trimmed, Some(secrets)) {
+    return Some(move_to_vault("密码", "URL 内嵌密码"));
+  }
   let lower = trimmed.to_ascii_lowercase();
   if has_reference_to(trimmed, Some(secrets))
     || trimmed.starts_with('/')
@@ -496,8 +532,6 @@ fn known_format(value: &str) -> Option<&'static str> {
     Some("AWS 访问密钥 ID 格式")
   } else if private_key_header(value) {
     Some("PEM 私钥格式")
-  } else if url_has_password(value) {
-    Some("URL 内嵌密码")
   } else if value.starts_with("eyJ")
     && value.len() >= 40
     && value.split('.').count() == 3
@@ -514,7 +548,10 @@ fn known_format(value: &str) -> Option<&'static str> {
   }
 }
 
-fn url_has_password(value: &str) -> bool {
+fn url_has_password(
+  value: &str,
+  known: Option<&BTreeMap<String, String>>,
+) -> bool {
   let Some((scheme, tail)) = value.split_once("://") else {
     return false;
   };
@@ -527,10 +564,13 @@ fn url_has_password(value: &str) -> bool {
   }
   let authority =
     tail.split(['/', '?', '#']).next().unwrap_or_default();
+  let authority = authority
+    .split_once("[[@")
+    .map_or(authority, |(prefix, _)| prefix);
   authority.rsplit_once('@').is_some_and(|(userinfo, host)| {
-    !host.is_empty()
+    (!host.is_empty() || tail.contains("[[@"))
       && userinfo.split_once(':').is_some_and(|(_, password)| {
-        !password.is_empty() && !has_reference(password)
+        !password.is_empty() && !has_reference_to(password, known)
       })
   })
 }
@@ -585,6 +625,9 @@ fn file_secret(
         .into_iter()
         .flatten()
     {
+      if url_has_password(value, Some(secrets)) {
+        return Some(move_to_vault("密码", "URL 内嵌密码"));
+      }
       if has_reference_to(value, Some(secrets)) {
         continue;
       }
@@ -724,4 +767,32 @@ services:
       }
     }
   }
+}
+
+#[test]
+fn service_ref_and_escaped_dollar_do_not_bypass_secret_lint() {
+  let secrets =
+    BTreeMap::from([("DB_PASS".into(), "fixture".into())]);
+  assert!(
+    env_secret(
+      "DATABASE_URL",
+      "postgres://u:fixture-pass@[[@db]]:5432/app",
+      &secrets
+    )
+    .is_some()
+  );
+  assert!(env_secret("PASS", "Abc$$123", &secrets).is_some());
+  assert!(
+    env_secret(
+      "DATABASE_URL",
+      "postgres://u:[[DB_PASS]]@[[@db]]:5432/app",
+      &secrets
+    )
+    .is_none()
+  );
+  assert!(env_secret("PASS", "${DB_PASS}", &secrets).is_none());
+  assert_eq!(
+    published_port(&serde_yaml_ng::from_str("target: 80").unwrap()),
+    Some(("", "80".into()))
+  );
 }

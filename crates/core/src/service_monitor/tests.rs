@@ -67,7 +67,7 @@ fn invalid_regex_returns_validation_hint() {
   w.spec.pattern = "(".into();
   w.spec.regex = true;
   spec.log_alerts.push(w.spec);
-  assert!(validate(&spec).unwrap_err().hint.is_some());
+  assert!(validate(&spec, None).unwrap_err().hint.is_some());
 }
 
 #[test]

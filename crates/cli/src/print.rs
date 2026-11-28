@@ -410,6 +410,18 @@ pub fn status(s: &Status) {
         );
         continue;
       }
+      if r.spec.service.is_empty() {
+        println!(
+          "  {}  →  上游 {}  经 {}",
+          r.url,
+          r.upstream
+            .as_deref()
+            .or(r.spec.upstream.as_deref())
+            .unwrap_or("-"),
+          r.gateway.as_deref().unwrap_or("-")
+        );
+        continue;
+      }
       println!(
         "  {}  →  {}:{}  经 {}（上游 {}）",
         r.url,
@@ -508,8 +520,14 @@ pub fn doctor(v: &wharf_api_types::view::DoctorReport) {
     };
     println!("  {mark} {:<9} {}  {}", c.layer, c.subject, c.detail);
   };
-  println!("服务器");
-  v.servers.iter().for_each(line);
+  if !v.servers.is_empty() {
+    println!("服务器");
+    v.servers.iter().for_each(line);
+  }
+  if !v.checks.is_empty() {
+    println!("专项检查");
+    v.checks.iter().for_each(line);
+  }
   if !v.vendors.is_empty() {
     println!("\n厂商账号");
     v.vendors.iter().for_each(line);

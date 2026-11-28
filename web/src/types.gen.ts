@@ -883,6 +883,7 @@ export interface DoctorCheck {
  */
 export interface DoctorReport {
   checked_at: string;
+  checks?: DoctorCheck[];
   config?: DoctorCheck[];
   routes: RouteDiagnosis[];
   servers: DoctorCheck[];
@@ -2044,6 +2045,7 @@ export interface PortRow {
   acked: boolean;
   addr: string;
   expected: boolean;
+  family?: string | null;
   name: string;
   owner: string;
   port: number;
@@ -2229,6 +2231,7 @@ export interface RouteDiagnosis {
    * 这个域名的注册到期时间（后台用 RDAP 查，查不到没有）。
    */
   domain_expires?: string | null;
+  edge_app?: string | null;
   hostname: string;
   url: string;
 }

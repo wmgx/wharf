@@ -1057,7 +1057,15 @@ impl World {
   }
 
   /// 整体校验。`joined` 是已经完成 join 的服务器。
+  #[cfg(test)]
   pub fn validate(&self) -> Result<(), ApiError> {
+    self.validate_against(&Self::default())
+  }
+
+  pub fn validate_against(
+    &self,
+    current: &Self,
+  ) -> Result<(), ApiError> {
     crate::oidc::validate_names(self)?;
     crate::secret_policy::validate_world(self)?;
     for (name, server) in &self.servers {
@@ -1068,6 +1076,10 @@ impl World {
     }
     for (name, service) in &self.services {
       validate_service(self, name, &service.spec)?;
+      crate::service_monitor::validate(
+        &service.spec,
+        current.services.get(name).map(|row| &row.spec),
+      )?;
     }
     for (name, app) in &self.edge_apps {
       crate::edge::validate_app(self, name, &app.spec)?;
@@ -1972,7 +1984,6 @@ fn validate_service(
       "启动等待上限需在 10 到 1800 秒之间",
     ));
   }
-  crate::service_monitor::validate(spec)?;
   validate_deploy_options(name, spec)?;
   if name.starts_with(GATEWAY_PROJECT_PREFIX) {
     return Err(ApiError::invalid(format!(

@@ -85,7 +85,9 @@ done"#,
     .run(&Ctx::detached())
     .await;
   let out = out?.check("读取监听端口")?;
-  cleanup?;
+  if cleanup.is_err() {
+    tracing::debug!("回收暴露面辅助容器失败");
+  }
   let (ss, rest) = out
     .stdout
     .split_once("@range\n")
@@ -94,6 +96,8 @@ done"#,
     rest.split_once("@cgroups\n").unwrap_or(("", ""));
   let range = ephemeral_range(range);
   let mut listens = parse_ss(ss);
+  let ss_count = listens.len();
+  let mut explicit = vec![false; ss_count];
   let ids = docker
     .cmd()
     .args(["ps", "-q"])
@@ -103,17 +107,12 @@ done"#,
   let ids: Vec<&str> = ids.stdout.split_whitespace().collect();
   let mut containers = vec![];
   if !ids.is_empty() {
-    let out = docker
-      .cmd()
-      .arg("inspect")
-      .args(ids)
-      .run(ctx)
-      .await?
-      .check("读取容器权限")?;
-    let values: Vec<Value> = serde_json::from_str(&out.stdout)
-      .map_err(|e| {
-        ApiError::internal(format!("容器信息解析失败：{e}"))
-      })?;
+    let out = docker.cmd().arg("inspect").args(ids).run(ctx).await?;
+    let values: Vec<Value> =
+      match serde_json::from_str::<Vec<Value>>(&out.stdout) {
+        Ok(values) if out.success || !values.is_empty() => values,
+        _ => return Err(ApiError::internal("读取容器权限失败")),
+      };
     for v in values {
       let name = v["Name"]
         .as_str()
@@ -127,7 +126,7 @@ done"#,
       for (line, listen) in ss
         .lines()
         .filter(|line| !parse_ss(line).is_empty())
-        .zip(&mut listens)
+        .zip(&mut listens[..ss_count])
       {
         if host_container(line, cgroups, &v) {
           listen.container = Some(name.clone());
@@ -145,12 +144,14 @@ done"#,
             else {
               continue;
             };
-            let addr = b["HostIp"].as_str().unwrap_or("0.0.0.0");
+            let addr =
+              strip_scope(b["HostIp"].as_str().unwrap_or("0.0.0.0"));
             if loopback(addr) {
               continue;
             }
             let mut matched = false;
-            for l in &mut listens {
+            for (l, explicit) in listens.iter_mut().zip(&mut explicit)
+            {
               if l.proto == proto
                 && l.port == port
                 && (l.addr == addr
@@ -159,11 +160,19 @@ done"#,
               {
                 l.container = Some(name.clone());
                 l.project = project.clone();
+                *explicit |= v["HostConfig"]["PortBindings"]
+                  .get(key)
+                  .is_some_and(|b| !b.is_null());
                 matched = true;
               }
             }
             // 关闭 docker-proxy 时 ss 没有发布端口，仍以 Docker 的实际绑定补齐。
             if !matched {
+              explicit.push(
+                v["HostConfig"]["PortBindings"]
+                  .get(key)
+                  .is_some_and(|b| !b.is_null()),
+              );
               listens.push(Listen {
                 proto: proto.into(),
                 addr: addr.into(),
@@ -186,11 +195,22 @@ done"#,
       }
     }
   }
-  listens.retain(|l| !client_socket(l, range));
+  retain_listeners(&mut listens, explicit, range);
   Ok(ExposureReport {
     listens,
     containers,
   })
+}
+
+fn retain_listeners(
+  listens: &mut Vec<Listen>,
+  explicit: Vec<bool>,
+  range: (u16, u16),
+) {
+  let mut explicit = explicit.into_iter();
+  listens.retain(|l| {
+    explicit.next().unwrap_or(false) || !client_socket(l, range)
+  });
 }
 
 fn ephemeral_range(text: &str) -> (u16, u16) {
@@ -236,8 +256,29 @@ fn host_container(
   })
 }
 
+fn strip_scope(addr: &str) -> &str {
+  let addr = addr.trim_matches(['[', ']']);
+  addr.split('%').next().unwrap_or(addr)
+}
+
+fn is_sensitive_host_path(source: &str) -> bool {
+  let source = source.trim_end_matches('/');
+  [
+    "/etc", "/root", "/var/run", "/run", "/proc", "/sys", "/boot",
+  ]
+  .iter()
+  .any(|prefix| {
+    source == *prefix
+      || source
+        .strip_prefix(*prefix)
+        .is_some_and(|tail| tail.starts_with('/'))
+  })
+}
+
 fn loopback(addr: &str) -> bool {
-  addr.parse::<IpAddr>().is_ok_and(|a| a.is_loopback())
+  strip_scope(addr)
+    .parse::<IpAddr>()
+    .is_ok_and(|a| a.is_loopback())
 }
 
 fn parse_ss(text: &str) -> Vec<Listen> {
@@ -250,7 +291,7 @@ fn parse_ss(text: &str) -> Vec<Listen> {
         return None;
       }
       let (addr, port) = cols.get(4)?.rsplit_once(':')?;
-      let addr = addr.trim_matches(['[', ']']);
+      let addr = strip_scope(addr);
       if loopback(addr) {
         return None;
       }
@@ -284,16 +325,15 @@ fn risks(v: &Value) -> Vec<String> {
       "docker_sock",
       sources.iter().any(|s| s.ends_with("docker.sock")),
     ),
-    ("host_root", sources.contains(&"/")),
+    (
+      "host_root",
+      sources.iter().any(|s| {
+        s.starts_with('/') && s.trim_end_matches('/').is_empty()
+      }),
+    ),
     (
       "host_sensitive",
-      sources.iter().any(|s| {
-        [
-          "/etc", "/root", "/var/run", "/run", "/proc", "/sys",
-          "/boot",
-        ]
-        .contains(s)
-      }),
+      sources.iter().any(|s| is_sensitive_host_path(s)),
     ),
     ("host_network", h["NetworkMode"] == "host"),
     ("host_pid", h["PidMode"] == "host"),
@@ -382,4 +422,27 @@ mod tests {
         .is_empty()
     );
   }
+}
+
+#[test]
+fn sensitive_prefix_scope_strip_and_explicit_udp_kept() {
+  assert!(
+    ["/etc/shadow", "/root/.ssh", "/etc/"]
+      .into_iter()
+      .all(is_sensitive_host_path)
+  );
+  assert!(!is_sensitive_host_path("/etc-other"));
+  assert!(
+    parse_ss("udp UNCONN 0 0 127.0.0.53%lo:53 0.0.0.0:*").is_empty()
+  );
+  let mut listens = vec![
+    Listen {
+      proto: "udp".into(),
+      port: 51820,
+      ..Default::default()
+    };
+    2
+  ];
+  retain_listeners(&mut listens, vec![true, false], (32768, 60999));
+  assert_eq!(listens.len(), 1);
 }

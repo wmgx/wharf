@@ -98,6 +98,95 @@ pub fn judge(m: &MonitorSpec, r: &HttpCheckResult) -> (bool, String) {
   )
 }
 
+pub(crate) fn record_manual(
+  service: &str,
+  at: i64,
+  ok: bool,
+  detail: String,
+) {
+  if let Ok(mut results) = LAST.lock() {
+    let fails = match results.get(service) {
+      Some(old) if old.at > at => return,
+      Some(old) => old.fails,
+      None => 0,
+    };
+    results.insert(
+      service.into(),
+      MonitorView {
+        ok,
+        detail,
+        at,
+        fails,
+      },
+    );
+  }
+}
+
+pub(crate) async fn doctor_monitor(
+  state: &AppState,
+  service: &str,
+  row: &ServiceRow,
+) -> Option<wharf_api_types::view::DoctorCheck> {
+  use wharf_api_types::view::CheckStatus;
+  let monitor =
+    row.spec.monitor.as_ref().filter(|_| !row.spec.stopped)?;
+  let server = &row.spec.server;
+  let check = |status, detail: String| {
+    crate::doctor::check("monitor", service, status, detail)
+  };
+  if !state.hub.is_online(server) {
+    return Some(check(
+      CheckStatus::Skip,
+      "agent 离线，测不了".into(),
+    ));
+  }
+  let at = chrono::Utc::now().timestamp_millis();
+  let (ok, detail) = match url(row, monitor) {
+    Ok(url) => match request(state, server, url, monitor).await {
+      Ok(result) => judge(monitor, &result),
+      Err(_) => {
+        return Some(check(
+          CheckStatus::Bad,
+          "未取得监控结果".into(),
+        ));
+      }
+    },
+    Err(e) => (false, e),
+  };
+  record_manual(service, at, ok, detail.clone());
+  Some(check(
+    if ok {
+      CheckStatus::Ok
+    } else {
+      CheckStatus::Bad
+    },
+    detail,
+  ))
+}
+
+async fn request(
+  state: &AppState,
+  server: &str,
+  url: String,
+  monitor: &MonitorSpec,
+) -> Result<HttpCheckResult, wharf_api_types::ApiError> {
+  let job = HttpCheck {
+    url,
+    keyword: monitor.keyword.clone(),
+    timeout_secs: TIMEOUT_SECS,
+  };
+  state
+    .hub
+    .call(
+      server,
+      AgentOp::HttpCheck(job),
+      Duration::from_secs(TIMEOUT_SECS + 10),
+      None,
+      &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+}
+
 pub fn spawn(state: Arc<AppState>) {
   tokio::spawn(async move {
     tokio::time::sleep(Duration::from_secs(90)).await;
@@ -138,30 +227,13 @@ async fn round(state: &AppState) {
           Err(e) => Some((false, e)),
           // agent 离线或太旧：这一轮不算，离线有自己的告警。
           Ok(_) if !state.hub.is_online(&server) => None,
-          Ok(url) => {
-            let job = HttpCheck {
-              url,
-              keyword: m.keyword.clone(),
-              timeout_secs: TIMEOUT_SECS,
-            };
-            match state
-              .hub
-              .call::<HttpCheckResult>(
-                &server,
-                AgentOp::HttpCheck(job),
-                Duration::from_secs(TIMEOUT_SECS + 10),
-                None,
-                &tokio_util::sync::CancellationToken::new(),
-              )
-              .await
-            {
-              Ok(r) => Some(judge(&m, &r)),
-              Err(e) => {
-                tracing::debug!("监控 {name}：{}", e.message);
-                None
-              }
+          Ok(url) => match request(state, &server, url, &m).await {
+            Ok(r) => Some(judge(&m, &r)),
+            Err(e) => {
+              tracing::debug!("监控 {name}：{}", e.message);
+              None
             }
-          }
+          },
         };
         (name, outcome)
       });

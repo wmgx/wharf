@@ -67,7 +67,9 @@ async fn round(
     .filter_map(|(name, row)| {
       let projects = live.get(&row.spec.server)?.as_ref().ok()?;
       let seen = projects.get(name).is_some_and(|p| {
-        p.containers.iter().any(|c| c.state == "restarting")
+        p.containers
+          .iter()
+          .any(|c| !c.foreign && c.state == "restarting")
       });
       Some((name.clone(), seen))
     })
