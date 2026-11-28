@@ -10,7 +10,7 @@ use std::{
 
 use wharf_api_types::view::{
   CheckStatus, DoctorCheck, DoctorReport, Issue, IssueLevel,
-  IssueSubject, ProbeView,
+  IssueSubject, ProbeView, RouteDiagnosis,
 };
 
 use crate::state::AppState;

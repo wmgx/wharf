@@ -430,6 +430,7 @@ async fn check_ports(state: &AppState) {
   let Ok(snap) = crate::snapshot::load(&state.db).await else {
     return;
   };
+  let started_at = now_ms();
   let mut active = BTreeSet::new();
   let mut batches = BTreeMap::<&str, Vec<(String, PortCheck)>>::new();
   for (name, row) in &snap.world.services {
@@ -495,7 +496,7 @@ async fn check_ports(state: &AppState) {
       {
         continue;
       }
-      record_port(id.clone(), now, ok);
+      record_port(id.clone(), started_at, ok);
       let suffix = if check.udp.is_some() { "UDP" } else { "TCP" };
       let detail = format!("{suffix} 127.0.0.1:{}", check.port);
       rules::observe(
