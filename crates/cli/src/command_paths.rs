@@ -101,7 +101,7 @@ pub fn parse(
   app: &Command,
   argv: &[impl AsRef<OsStr>],
 ) -> Result<(Cli, ArgMatches), clap::Error> {
-  use clap::error::ErrorKind;
+  use clap::error::{ContextKind, ContextValue, ErrorKind};
 
   let args = || argv.iter().map(AsRef::as_ref);
   let matches =
@@ -113,18 +113,35 @@ pub fn parse(
         return Err(error);
       }
       let legacy = Cli::command();
-      let old_path = legacy
-        .clone()
-        .ignore_errors(true)
-        .try_get_matches_from(args())
-        .is_ok_and(|matches| {
-          matches.subcommand_name().and_then(group).is_some()
-        });
-      if old_path {
-        legacy.try_get_matches_from(args())
-      } else {
-        Err(error)
+      let probe = legacy.clone().ignore_errors(true);
+      let is_old = |matches: ArgMatches| {
+        matches.subcommand_name().and_then(group).is_some()
+      };
+      if probe.clone().try_get_matches_from(args()).is_ok_and(is_old)
+      {
+        return legacy.try_get_matches_from(args());
       }
+      // 仅探测命令路径，原始参数仍交给旧树生成诊断。
+      if error.kind() == ErrorKind::UnknownArgument
+        && let Some(ContextValue::String(flag)) =
+          error.get(ContextKind::InvalidArg)
+        && let Some(index) =
+          args().enumerate().skip(1).find_map(|(i, arg)| {
+            let arg = arg.to_str()?.split('=').next()?;
+            (arg == flag).then_some(i)
+          })
+        && probe
+          .try_get_matches_from(
+            args()
+              .enumerate()
+              .filter(|(i, _)| *i != index)
+              .map(|(_, arg)| arg),
+          )
+          .is_ok_and(is_old)
+      {
+        return legacy.try_get_matches_from(args());
+      }
+      Err(error)
     })?;
   let cli = decode(app, &matches)?;
   Ok((cli, matches))
@@ -203,6 +220,25 @@ mod tests {
       .unwrap();
     for name in ["migrate", "cleanup-legacy"] {
       assert!(backup.find_subcommand(name).unwrap().is_hide_set());
+    }
+  }
+
+  #[test]
+  fn unknown_flag_before_command_keeps_the_matching_tree_diagnostic()
+  {
+    for (argv, tree) in [
+      (
+        ["wharf", "--json", "--comman", "refs", "schema"],
+        Cli::command(),
+      ),
+      (["wharf", "--json", "--comman", "schema", "refs"], app()),
+    ] {
+      let expected = tree.try_get_matches_from(argv).unwrap_err();
+      let Err(actual) = parse(&app(), &argv) else {
+        panic!("{argv:?}");
+      };
+      assert_eq!(actual.kind(), expected.kind());
+      assert_eq!(actual.to_string(), expected.to_string());
     }
   }
 }

@@ -112,6 +112,13 @@ fn validate_paths_preserve_output_errors_and_changed_history() {
   let body: Value = serde_json::from_slice(&error.stdout).unwrap();
   assert_eq!(body["code"], "InvalidInput");
 
+  let error = run(&["--json", "--comman", "refs", "schema"]);
+  assert_eq!(error.status.code(), Some(1));
+  assert!(error.stderr.is_empty());
+  let body: Value = serde_json::from_slice(&error.stdout).unwrap();
+  assert_eq!(body["code"], "InvalidInput");
+  assert!(body["hint"].is_null());
+
   std::fs::write(dir.path().join("app.toml"), "").unwrap();
   for (args, first) in [
     (&["validate", "app.toml", "--changed"][..], true),
@@ -167,6 +174,9 @@ fn schema_finds_commands_types_and_hidden_aliases() {
       format!("wharf data backup {name}")
     );
   }
+  let restore = lookup(&["data", "backup", "restore"]);
+  assert_eq!(restore["command"], "wharf data backup restore");
+  assert_eq!(restore["effect"], "direct");
   assert_eq!(
     lookup(&["task", "list"])["command"],
     "wharf ops task ls"
@@ -184,4 +194,45 @@ fn schema_finds_commands_types_and_hidden_aliases() {
       .iter()
       .any(|row| row["path"] == "status.actual")
   );
+  for (command, ty, field) in [
+    (["plan", "list"], "plan_summary", "plan_id"),
+    (["service", "list"], "service_view", "status"),
+  ] {
+    let schema = &lookup(&command)["schema"];
+    let item = lookup(&[ty]);
+    assert_eq!(schema["type"], "array");
+    assert_eq!(item["type"], "object");
+    assert_eq!(
+      schema["items"]["properties"][field],
+      item["properties"][field]
+    );
+    assert_eq!(schema["$defs"], item["$defs"]);
+  }
+  assert_eq!(
+    lookup(&["service", "show"])["schema"]["type"],
+    "object"
+  );
+  assert!(
+    lookup(&["service", "list", "--paths"])
+      .as_array()
+      .unwrap()
+      .iter()
+      .any(|row| row["path"] == "[].status.actual")
+  );
+}
+
+#[test]
+fn skill_labels_immediate_restart_and_links_to_read_only_checks() {
+  let skill = include_str!("../../../skill/SKILL.md");
+  let restart = skill
+    .lines()
+    .find(|line| line.contains("`wharf service restart app --json`"))
+    .unwrap();
+  assert!(
+    restart.contains("立即重启")
+      && restart.contains("省略 `--apply` 也会执行")
+  );
+  assert!(restart.contains("`wharf service show app --json`"));
+  assert!(skill.contains("`wharf schema data backup restore`"));
+  assert!(skill.lines().count() <= 120);
 }

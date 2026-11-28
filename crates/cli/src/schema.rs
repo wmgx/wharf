@@ -287,6 +287,51 @@ fn paths(root: &Value) -> Vec<Value> {
   rows.into_values().collect()
 }
 
+fn command_output_schema(
+  command: &Value,
+  mut schema: Value,
+) -> Value {
+  if !matches!(
+    command.as_str(),
+    Some(
+      "wharf plan list"
+        | "wharf run list"
+        | "wharf server list"
+        | "wharf service list"
+        | "wharf service files"
+        | "wharf service files ls"
+        | "wharf service history"
+        | "wharf gateway list"
+        | "wharf route list"
+        | "wharf ops account list"
+        | "wharf ops task ls"
+        | "wharf ops task logs"
+        | "wharf ops token list"
+        | "wharf network edge list"
+        | "wharf network external list"
+        | "wharf config"
+        | "wharf config list"
+        | "wharf config var list"
+        | "wharf secret list"
+        | "wharf secret unused"
+        | "wharf inspect audit"
+        | "wharf inspect top"
+    )
+  ) {
+    return schema;
+  }
+  let mut array = json!({"type": "array"});
+  if let Some(item) = schema.as_object_mut() {
+    for key in ["$schema", "$defs"] {
+      if let Some(value) = item.remove(key) {
+        array[key] = value;
+      }
+    }
+  }
+  array["items"] = schema;
+  array
+}
+
 pub fn run(
   resource: &[String],
   command_query: bool,
@@ -324,7 +369,10 @@ pub fn run(
         .and_then(|name| all.get(name))
         .map(serde_json::to_value)
         .transpose()
-        .map_err(anyhow::Error::from)?;
+        .map_err(anyhow::Error::from)?
+        .map(|schema| {
+          command_output_schema(&description["command"], schema)
+        });
       if !flat {
         description["schema"] = schema.unwrap_or(Value::Null);
         print::json(&description);
