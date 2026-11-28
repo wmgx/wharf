@@ -442,7 +442,7 @@ mod tests {
     )
     .await
     .unwrap();
-    let error = patch(&state, json!({"timezone":"Asia/Tokyo","limits":{"memory_mb":1,"pids":null}})).await.unwrap_err().0;
+    let error = patch(&state, json!({"timezone":"Asia/Tokyo","limits":{"memory_mb":1,"pids":null}})).await.unwrap_err();
     assert_eq!(error.code, ErrorCode::InvalidInput);
     assert_eq!(error.message, "默认值 memory_mb 无效");
     assert!(error.hint.unwrap().contains("32 MB"));
