@@ -749,13 +749,16 @@ async fn dispatch(
     Command::Server(cmd) => server(c, cmd, j).await,
     Command::Top(args) => crate::top::run(c, args, j).await,
     Command::Report(args) => crate::report::run(c, args, j).await,
-    Command::Service(cmd) => service(c, cmd, j).await,
+    // 部署和同步的异步状态较大，隔离它们，避免撑大整个命令分发的栈。
+    Command::Service(cmd) => Box::pin(service(c, cmd, j)).await,
     Command::Gateway(cmd) => gateway(c, cmd, j).await,
     Command::Route(cmd) => route(c, cmd, j).await,
     Command::Account(cmd) => account(c, cmd, j).await,
     Command::Secret(cmd) => secret(c, cmd, j).await,
     Command::Backup(cmd) => backup(c, cmd, j).await,
-    Command::Task(cmd) => crate::task::task(c, cmd, j).await,
+    Command::Task(cmd) => {
+      Box::pin(crate::task::task(c, cmd, j)).await
+    }
     Command::Edge(cmd) => crate::edge::edge(c, cmd, j).await,
     Command::Bookmark(cmd) => {
       crate::bookmark::bookmark(c, cmd, j).await
