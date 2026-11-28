@@ -199,6 +199,7 @@ fn merge_settings(
   spec.server.clone_from(&current.server);
   spec.backup.clone_from(&current.backup);
   spec.stopped = current.stopped;
+  spec.tags.clone_from(&current.tags);
   spec.start_timeout_secs = current.start_timeout_secs;
   spec.stop_grace_secs = current.stop_grace_secs;
   spec.stop_signal.clone_from(&current.stop_signal);

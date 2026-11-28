@@ -110,7 +110,7 @@ wharf service deploy blog --server <服务器> --from-run 'docker run -d -p 8080
 wharf service deploy blog --server <服务器> --compose-url https://github.com/x/blog/blob/main/compose.yml --json
 ```
 
-已存在的服务再执行 `service deploy` 只改给出的参数。部署后用 `wharf service show <服务> --json` 确认状态。
+已存在的服务再执行 `service deploy` 只改给出的参数。用 `--add-tag` 和 `--rm-tag` 增删标签，用 `service list --tag <标签>` 筛选。部署后用 `wharf service show <服务> --json` 确认状态。
 
 配置文件（应用靠配置文件而不是环境变量时用）：内容存在 Wharf 里，部署时放进容器，跟着部署历史和回滚走。
 不要让用户自己往数据目录里放配置文件。容器里是只读的，应用自己改写的内容下次部署会被覆盖。

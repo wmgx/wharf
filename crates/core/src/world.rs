@@ -365,6 +365,19 @@ impl World {
           server.settings = settings.clone();
         }
         Change::AdoptData { .. } => {}
+        Change::EditServiceTags { name, add, remove } => {
+          let row = self
+            .services
+            .get_mut(name)
+            .ok_or_else(|| crate::api::service_not_found(name))?;
+          for tag in remove {
+            row.spec.tags.remove(normalize_service_tag(tag)?);
+          }
+          for tag in add {
+            row.spec.tags.insert(normalize_service_tag(tag)?.into());
+          }
+          validate_tags(&row.spec.tags)?;
+        }
         Change::UpsertService {
           name,
           spec,
@@ -466,6 +479,11 @@ impl World {
           }
           // compose 来源没填端口时按 compose 里映射的端口补上，否则服务没有内网地址。
           let mut spec = spec.clone();
+          spec.tags = spec
+            .tags
+            .iter()
+            .map(|tag| normalize_service_tag(tag).map(str::to_owned))
+            .collect::<Result<_, _>>()?;
           validate_deploy_options(name, &spec)?;
           if let Some(signal) = &mut spec.stop_signal {
             *signal =
@@ -2014,6 +2032,34 @@ fn validate_deploy_options(
   Ok(())
 }
 
+pub(crate) fn normalize_service_tag(
+  tag: &str,
+) -> Result<&str, ApiError> {
+  let tag = tag.trim();
+  if !(1..=32).contains(&tag.chars().count())
+    || !tag
+      .chars()
+      .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
+  {
+    Err(
+      ApiError::invalid("标签长度须为 1 到 32 个字符")
+        .with_hint("使用字母、数字、连字符或下划线"),
+    )
+  } else {
+    Ok(tag)
+  }
+}
+
+fn validate_tags(tags: &BTreeSet<String>) -> Result<(), ApiError> {
+  if tags.len() > 32 {
+    return Err(ApiError::invalid("每个服务最多 32 个标签"));
+  }
+  for tag in tags {
+    normalize_service_tag(tag)?;
+  }
+  Ok(())
+}
+
 fn validate_service(
   world: &World,
   name: &str,
@@ -2028,6 +2074,7 @@ fn validate_service(
       "启动等待上限需在 10 到 1800 秒之间",
     ));
   }
+  validate_tags(&spec.tags)?;
   crate::updates::validate_ignore(spec)?;
   validate_deploy_options(name, spec)?;
   if name.starts_with(GATEWAY_PROJECT_PREFIX) {
@@ -2822,6 +2869,7 @@ mod tests {
       stop_signal: None,
       init_cmd: None,
       init_timeout_secs: None,
+      tags: Default::default(),
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

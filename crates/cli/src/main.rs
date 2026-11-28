@@ -237,6 +237,12 @@ pub enum Command {
       conflicts_with = "port"
     )]
     rm_port: Vec<String>,
+    /// 增加标签，可重复。
+    #[arg(long)]
+    add_tag: Vec<String>,
+    /// 移除标签，可重复。
+    #[arg(long)]
+    rm_tag: Vec<String>,
     #[arg(long, visible_alias = "add-env")]
     env: Vec<String>,
     #[arg(long, visible_alias = "rm-env")]
@@ -1343,6 +1349,12 @@ pub enum ServiceCmd {
       conflicts_with = "port"
     )]
     rm_port: Vec<String>,
+    /// 增加标签，可重复。
+    #[arg(long)]
+    add_tag: Vec<String>,
+    /// 移除标签，可重复。
+    #[arg(long)]
+    rm_tag: Vec<String>,
     #[arg(long, conflicts_with_all = ["port", "add_port", "rm_port"])]
     clear_ports: bool,
     /// 环境变量 `KEY=VALUE`，值里可以用 `[[SECRET]]`。可以多次使用。

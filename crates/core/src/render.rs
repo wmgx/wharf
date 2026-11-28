@@ -2430,6 +2430,7 @@ mod tests {
       stop_signal: None,
       init_cmd: None,
       init_timeout_secs: None,
+      tags: Default::default(),
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

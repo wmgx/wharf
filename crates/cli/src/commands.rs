@@ -394,6 +394,8 @@ async fn dispatch_command(
       port,
       add_port,
       rm_port,
+      add_tag,
+      rm_tag,
       env,
       unset_env,
       build,
@@ -416,6 +418,8 @@ async fn dispatch_command(
         port,
         add_port,
         rm_port,
+        add_tag,
+        rm_tag,
         clear_ports: false,
         env,
         unset_env,
@@ -1070,29 +1074,6 @@ async fn plan_and_maybe_apply(
   j: bool,
 ) -> CliResult<()> {
   plan_output(c, req, flags, j, Vec::new(), None).await
-}
-
-async fn deploy_plan(
-  c: &Client,
-  name: String,
-  spec: ServiceSpec,
-  flags: ApplyFlags,
-  j: bool,
-  warnings: Vec<String>,
-  detected: Option<crate::deploy::DetectResult>,
-) -> CliResult<()> {
-  let req = PlanRequest {
-    changes: vec![Change::UpsertService {
-      name,
-      spec,
-      adopt: None,
-      pins: None,
-      commit: None,
-      migrate: None,
-    }],
-    ..Default::default()
-  };
-  plan_output(c, req, flags, j, warnings, detected).await
 }
 
 async fn plan_output(
@@ -3365,6 +3346,8 @@ async fn service(
       port,
       add_port,
       rm_port,
+      add_tag,
+      rm_tag,
       clear_ports,
       env,
       unset_env,
@@ -3388,6 +3371,14 @@ async fn service(
         }
         Err(e) => return Err(e),
       };
+      let tags =
+        (!add_tag.is_empty() || !rm_tag.is_empty()).then(|| {
+          Change::EditServiceTags {
+            name: name.clone(),
+            add: add_tag,
+            remove: rm_tag,
+          }
+        });
       if let Some(view) = &mut existing
         && !(image.is_some()
           || compose.is_some()
@@ -3416,6 +3407,9 @@ async fn service(
           || ops.unset_init_cmd
           || ops.init_timeout.is_some())
       {
+        if let Some(tags) = tags {
+          return changes(c, vec![tags], apply, j).await;
+        }
         apply.check_read_only()?;
         wharf_api_types::filter_note(
           &mut view.note,
@@ -3529,6 +3523,7 @@ async fn service(
             stop_signal: None,
             init_cmd: None,
             init_timeout_secs: None,
+            tags: Default::default(),
           }
         }
       };
@@ -3647,7 +3642,20 @@ async fn service(
         spec.volumes.retain(|x| x.name != v.name);
         spec.volumes.push(v);
       }
-      deploy_plan(c, name, spec, apply, j, warnings, detected).await
+      let req = PlanRequest {
+        changes: std::iter::once(Change::UpsertService {
+          name,
+          spec,
+          adopt: None,
+          pins: None,
+          commit: None,
+          migrate: None,
+        })
+        .chain(tags)
+        .collect(),
+        ..Default::default()
+      };
+      plan_output(c, req, apply, j, warnings, detected).await
     }
     ServiceCmd::AdoptData {
       name,

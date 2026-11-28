@@ -3,7 +3,7 @@
 //! 资源名不放在 spec 里，由外层的 key（fleet.toml 的表名、API 路径）给出，
 //! 这样意图文件里不会出现"名字写了两遍还不一致"的问题。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -335,6 +335,8 @@ pub struct ServiceSpec {
   /// 运行在哪台服务器上。
   pub server: String,
   pub source: Source,
+  #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+  pub tags: BTreeSet<String>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub ports: Vec<PortSpec>,
   /// 环境变量。值里可以用 `[[SECRET_NAME]]` 引用密钥；compose 来源加到 `container` 指定的容器上，
@@ -1011,6 +1013,13 @@ pub enum Change {
     commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     migrate: Option<MigrateOptions>,
+  },
+  EditServiceTags {
+    name: String,
+    #[serde(default)]
+    add: Vec<String>,
+    #[serde(default)]
+    remove: Vec<String>,
   },
   AdoptData {
     service: String,

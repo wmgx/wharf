@@ -1205,6 +1205,7 @@ async fn remove_server(
 #[serde(default)]
 struct ServiceListQuery {
   server: Option<String>,
+  tag: Option<String>,
   status: Option<String>,
   no_backup: bool,
   has_update: bool,
@@ -1229,6 +1230,10 @@ fn matches_service(q: &ServiceListQuery, v: &ServiceView) -> bool {
   q.server
     .as_ref()
     .is_none_or(|server| v.spec.server == *server)
+    && q
+      .tag
+      .as_deref()
+      .is_none_or(|tag| v.spec.tags.contains(tag.trim()))
     && (!q.no_backup || v.spec.backup.is_none())
     && (!q.has_update || v.has_update)
     && q.status.as_deref().is_none_or(|status| {
@@ -1253,6 +1258,9 @@ async fn list_services(
   Query(q): Query<ServiceListQuery>,
 ) -> ApiResult<Vec<ServiceView>> {
   auth.require(Perm::Read)?;
+  if let Some(tag) = &q.tag {
+    crate::world::normalize_service_tag(tag)?;
+  }
   if let Some(status) = q.status.as_deref()
     && !SERVICE_LIST_STATES.contains(&status)
   {

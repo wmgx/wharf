@@ -3132,6 +3132,7 @@ export interface ServiceSpec {
    * 停止：容器保留但不运行，部署后也保持停止。不影响 compose，也就不会重建容器。
    */
   stopped?: boolean;
+  tags?: string[];
   /**
    * 镜像和构建版本的更新忽略规则。
    */

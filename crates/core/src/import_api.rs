@@ -285,6 +285,7 @@ pub async fn preview(
       stop_signal: None,
       init_cmd: None,
       init_timeout_secs: None,
+      tags: Default::default(),
     },
     adopt: converted.adopt,
     extracted_secrets,

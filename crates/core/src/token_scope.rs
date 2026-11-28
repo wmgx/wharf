@@ -399,6 +399,7 @@ pub fn require_plan_request(
   for change in &req.changes {
     let address = match change {
       Change::AdoptData { service: name, .. }
+      | Change::EditServiceTags { name, .. }
       | Change::UpsertService { name, .. }
       | Change::RemoveService { name, .. }
       | Change::RefreshImages { name, .. }

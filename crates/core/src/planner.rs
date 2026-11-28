@@ -559,6 +559,26 @@ pub(crate) async fn make_plan_inner(
   } else {
     desired.apply_changes(&req.changes)?;
   }
+  if !req.changes.is_empty()
+    && req.changes.iter().all(|change| {
+      matches!(
+        change,
+        wharf_api_types::spec::Change::EditServiceTags { .. }
+      )
+    })
+  {
+    let writes = desired.writes_from(&current);
+    let mut builder = Builder::default();
+    config_items(&mut builder, &current, &desired, &writes);
+    return Ok(finish_plan(
+      &snap,
+      &desired,
+      builder,
+      writes,
+      crate::render::service_account_refs(&desired),
+      req.note.as_deref(),
+    ));
+  }
   let mut adoption = snap.pending.adopt_data.clone();
   let mut adoption_warnings = Vec::new();
   for (name, job) in &adoption {
