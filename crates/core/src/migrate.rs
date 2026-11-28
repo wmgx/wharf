@@ -139,7 +139,9 @@ pub(crate) async fn check_space_from_report(
   to: &str,
 ) -> Result<(), ApiError> {
   use rusqlite::OptionalExtension;
-  let Some(disk) = snap.agent(to).and_then(|a| a.report.disk) else {
+  let Some(disk) =
+    snap.agent(to).and_then(|a| a.report.as_ref()?.disk)
+  else {
     return Ok(());
   };
   let service = service.to_string();

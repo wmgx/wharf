@@ -1,7 +1,4 @@
-use crate::{
-  client::{CliError, CliResult, Client, seg},
-  print,
-};
+use crate::client::{CliError, CliResult, Client, seg};
 use clap::{Args, Subcommand};
 use futures_util::{StreamExt, TryStreamExt};
 use sha2::{Digest, Sha256};
@@ -546,8 +543,8 @@ async fn sync(
     };
     let (read, write) = tokio::io::duplex(CHUNK);
     let body = reqwest::Body::wrap_stream(ReaderStream::new(read));
-    let upload =
-      c.data_push(&format!("{endpoint}/push"), &opts, body, timeout);
+    let path = format!("{endpoint}/push");
+    let upload = c.data_push(&path, &opts, body, timeout);
     let produce = send_frames(root, changed, plan.deleted, write);
     let (response, produced) = tokio::join!(upload, produce);
     let response = response?;

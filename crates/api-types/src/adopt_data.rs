@@ -42,7 +42,7 @@ pub struct AdoptSourceItem {
   pub read_only: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdoptDataJob {
   pub service: String,
   pub items: Vec<AdoptSourceItem>,

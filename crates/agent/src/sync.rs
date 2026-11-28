@@ -462,8 +462,8 @@ mod tests {
     assert!(live.contains(&"-aH".to_string()));
     assert!(final_pass.contains(&"-aH".to_string()));
     for arg in ["--delete", "--checksum"] {
-      assert!(!live.contains(&arg));
-      assert!(final_pass.contains(&arg));
+      assert!(!live.iter().any(|item| item == arg));
+      assert!(final_pass.iter().any(|item| item == arg));
     }
   }
 
