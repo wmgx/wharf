@@ -77,13 +77,19 @@ async fn run_fixture(
     .env("WHARF_FIXTURE_CLI_ENDPOINT", endpoint)
     .env("WHARF_FIXTURE_CLI_ARGS", json!(args).to_string())
     .kill_on_drop(true);
-  let (output, ()) =
-    tokio::time::timeout(Duration::from_secs(10), async {
-      tokio::join!(child.output(), server)
-    })
-    .await
-    .unwrap();
-  let output = output.unwrap();
+  let output = tokio::time::timeout(Duration::from_secs(10), async {
+    let command = child.output();
+    tokio::pin!(command, server);
+    tokio::select! {
+      biased;
+      () = &mut server => command.await.unwrap(),
+      output = &mut command => {
+        let output = output.unwrap();
+        panic!("命令提前退出：{args:?}，状态={}，输出={:?}，错误={:?}",
+          output.status, String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+      }
+    }
+  }).await.unwrap();
   let stdout = String::from_utf8(output.stdout).unwrap();
   let json =
     &stdout[stdout.find(['{', '[']).unwrap_or(stdout.len())..];
