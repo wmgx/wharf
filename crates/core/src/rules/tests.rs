@@ -1058,7 +1058,7 @@ async fn expired_service_mute_global_disable_and_subpath_suppress() {
   for name in ["web", "api"] {
     observe(&state, "req.err_pct_5m", name, 25.0, "").await;
   }
-  api::patch(
+  let _ = api::patch(
     axum::extract::State(state.clone()),
     crate::host_access::tests::auth(
       [wharf_api_types::view::Perm::Admin],

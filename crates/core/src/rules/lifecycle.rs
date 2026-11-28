@@ -275,11 +275,11 @@ pub(crate) async fn reconcile_world(
   });
   clear_matching(state, move |rule, subject| {
     if cfg.get(rule).is_some_and(|o| !o.enabled())
-      && !service_of_subject(rule, subject)
+      && service_of_subject(rule, subject)
         .and_then(|service| {
           overrides.get(&(rule.into(), service.into()))
         })
-        .is_some_and(|o| o.enabled == Some(true))
+        .is_none_or(|o| o.enabled != Some(true))
     {
       return true;
     }
