@@ -1117,11 +1117,20 @@ async fn wait_run(
   run_id: &str,
   j: bool,
 ) -> CliResult<Run> {
+  wait_run_with_interrupt(c, run_id, j, false).await
+}
+
+async fn wait_run_with_interrupt(
+  c: &Client,
+  run_id: &str,
+  j: bool,
+  cancel_on_interrupt: bool,
+) -> CliResult<Run> {
   let mut printed: Vec<(usize, bool)> = Vec::new();
   let path = format!("/api/runs/{}", seg(run_id));
   let mut retries = 0;
   let interrupted = || {
-    if !j {
+    if !j && !cancel_on_interrupt {
       eprintln!(
         "已停止等待，执行仍在继续。取消：wharf run cancel {run_id}"
       );
@@ -5747,7 +5756,30 @@ async fn backup(
         if no_wait {
           finish_task(c, &result.run_id, false, j).await?;
         } else {
-          let run = wait_run(c, &result.run_id, j).await?;
+          let run =
+            match wait_run_with_interrupt(c, &result.run_id, j, true)
+              .await
+            {
+              Err(CliError::Exit(130)) => {
+                let path =
+                  format!("/api/runs/{}/cancel", seg(&result.run_id));
+                c.post_timeout::<_, Value>(
+                  &path,
+                  &json!({}),
+                  Duration::from_secs(15),
+                )
+                .await?;
+                return Err(
+                  ApiError::new(
+                    ErrorCode::Cancelled,
+                    "已请求取消备份迁移",
+                  )
+                  .with_hint("取消结束后重跑原命令续传")
+                  .into(),
+                );
+              }
+              result => result?,
+            };
           out(j, &run, print::run_summary);
           if run.status != RunStatus::Succeeded {
             return Err(CliError::Exit(1));

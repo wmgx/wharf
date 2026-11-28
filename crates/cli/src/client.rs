@@ -336,6 +336,7 @@ fn local_http() -> CliResult<reqwest::Client> {
 }
 
 pub(crate) struct DownloadMeta {
+  pub filename: Option<String>,
   pub size: u64,
   pub sha256: String,
   pub format: String,
@@ -660,6 +661,20 @@ impl Client {
     let size = response.content_length().ok_or_else(missing)?;
     let sha256 = header("x-wharf-file-sha256")?;
     let format = header("x-wharf-export-format")?;
+    let filename =
+      header("content-disposition").ok().and_then(|value| {
+        value
+          .strip_prefix("attachment; filename=\"")
+          .and_then(|name| name.strip_suffix('"'))
+          .filter(|name| {
+            name.starts_with("wharf-core-")
+              && name.ends_with(".wharf-core.enc")
+              && name.bytes().all(|b| {
+                b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')
+              })
+          })
+          .map(str::to_owned)
+      });
     if format != "wharf-core-export-v1"
       || sha256.len() != 64
       || !sha256.bytes().all(|b| b.is_ascii_hexdigit())
@@ -687,6 +702,7 @@ impl Client {
       );
     }
     Ok(DownloadMeta {
+      filename,
       size,
       sha256,
       format,

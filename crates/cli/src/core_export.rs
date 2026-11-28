@@ -116,12 +116,11 @@ pub(crate) async fn download(
       chrono::Utc::now().format("%Y%m%d-%H%M%S")
     )
   };
-  let target = match output {
-    Some(path)
-      if fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) =>
-    {
-      path.join(basename())
-    }
+  let default_name = output.as_ref().is_none_or(|path| {
+    fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+  });
+  let mut target = match output {
+    Some(path) if default_name => path.join(basename()),
     Some(path) => path,
     None => PathBuf::from(basename()),
   };
@@ -138,6 +137,9 @@ pub(crate) async fn download(
     .await?;
   file.sync_all().map_err(io_error)?;
   drop(file);
+  if default_name && let Some(filename) = meta.filename {
+    target.set_file_name(filename);
+  }
   publish(&temp, &target, force)?;
   let output = target.display().to_string();
   let quoted = format!("'{}'", output.replace('\'', "'\\''"));
