@@ -5227,6 +5227,65 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn interrupted_purge_resumes_in_original_order() {
+    let state = crate::rules::tests::test_state();
+    state.db.call(|c| {
+      let steps = ["reader", "photos"].map(|service| StepPlan {
+        title: String::new(),
+        items: vec![],
+        step: Step::ServiceDown {
+          service: service.into(),
+          server: "s1".into(),
+          instance_id: Some(format!("svc_{service}")),
+          purge_data: true,
+          has_relative_mounts: false,
+        },
+      });
+      let plan = finish_plan(
+        &Snapshot::default(),
+        &World::default(),
+        Builder::default(),
+        vec![],
+        BTreeSet::new(),
+        None,
+      ).plan;
+      crate::pending::stage(c, "r_delete", &plan, &[], &steps)?;
+      c.execute(
+        "INSERT INTO runs (id, plan_id, status, body, started_at, retry_meta)
+         VALUES ('r_delete', ?1, 'failed', '{}', 0, ?2)",
+        rusqlite::params![plan.plan_id, json!({"steps":steps}).to_string()],
+      ).map_err(crate::db::sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    state.hub.mock_agent("s1", false, |op| match op {
+      wharf_api_types::agent::AgentOp::ProjectStatus {
+        projects,
+        ..
+      } => {
+        assert_eq!(projects, ["photos", "reader"]);
+        Ok(json!([]))
+      }
+      _ => panic!("plan 只应查询现状"),
+    });
+    let planned =
+      make_plan(&state, PlanRequest::default()).await.unwrap();
+    let deletes: Vec<_> = planned
+      .steps
+      .iter()
+      .filter_map(|p| match &p.step {
+        Step::ServiceDown {
+          service,
+          purge_data: true,
+          ..
+        } => Some(service.as_str()),
+        _ => None,
+      })
+      .collect();
+    assert_eq!(deletes, ["reader", "photos"]);
+    assert!(planned.writes.is_empty());
+  }
+
+  #[tokio::test]
   async fn plan_keeps_confirmed_non_purge_delete() {
     let state = crate::rules::tests::test_state();
     state

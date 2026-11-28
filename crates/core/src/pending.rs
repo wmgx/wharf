@@ -105,7 +105,24 @@ pub struct PendingState {
 }
 
 pub fn load(c: &Connection) -> Result<PendingState, ApiError> {
-  let mut stmt = c.prepare("SELECT kind, target_key, phase, payload FROM pending_steps ORDER BY target_key").map_err(sql_err)?;
+  // 服务配置已删除，续删从原执行记录恢复同批步骤的顺序。
+  let mut stmt = c
+    .prepare(
+      "SELECT p.kind, p.target_key, p.phase, p.payload
+     FROM pending_steps p
+     LEFT JOIN runs r ON p.kind = 'service_delete' AND r.id = p.run_id
+     ORDER BY r.started_at, r.id, (
+       SELECT CAST(s.key AS INTEGER)
+       FROM json_each(r.retry_meta, '$.steps') s
+       WHERE s.value ->> '$.step.kind' = 'service_down'
+         AND s.value ->> '$.step.service' = p.payload ->> '$.service'
+         AND s.value ->> '$.step.server' = p.payload ->> '$.server'
+         AND s.value ->> '$.step.instance_id' = p.instance_id
+       ORDER BY CAST(s.key AS INTEGER)
+       LIMIT 1
+     ), p.target_key",
+    )
+    .map_err(sql_err)?;
   let mut rows = stmt.query([]).map_err(sql_err)?;
   let mut pending = PendingState::default();
   while let Some(row) = rows.next().map_err(sql_err)? {

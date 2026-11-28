@@ -473,6 +473,75 @@ async fn backup_and_restore_block_shared_mounts_before_stopping_owner()
 }
 
 #[tokio::test]
+async fn backup_and_restore_keep_the_preflight_connection() {
+  let state = test_state();
+  seed_servers(&state).await;
+  seed_service(&state, "svc-a", true).await;
+  state.db.call(|c| db::apply_write(c, &db::Write::Upsert {
+    kind:"service".into(), name:"reader".into(),
+    spec:json!({"server":"s1","source":{"image":"fixture:1"},"volumes":[
+      {"name":"data","target":"/data","from_service":"svc-a:data","read_only":true}
+    ]}), meta:json!({}),
+  })).await.unwrap();
+  for restoring in [false, true] {
+    mock_backup_path(
+      &state,
+      |op| match op {
+        AgentOp::Probe { .. } => Ok(json!([true])),
+        AgentOp::Restic(job)
+          if matches!(job.action, ResticAction::Preflight(_)) =>
+        {
+          Ok(json!({}))
+        }
+        _ => panic!("原连接只应收到预检"),
+      },
+      None,
+    );
+    state.hub.mock_shared_volumes_agent("s1");
+    let restarted = Arc::new(AtomicBool::new(false));
+    let progress: ProgressFn = Arc::new({
+      let state = state.clone();
+      let restarted = restarted.clone();
+      move |msg| {
+        if msg == "停止 s1 上的 svc-a" {
+          let restarted = restarted.clone();
+          state.hub.mock_agent_with_backup(
+            "s1",
+            false,
+            true,
+            false,
+            move |op| match op {
+              AgentOp::ServiceStopForData { .. } => {
+                Ok(json!({"containers":["web"]}))
+              }
+              AgentOp::ProjectStart { containers, .. } => {
+                assert_eq!(containers, ["web"]);
+                restarted.store(true, Ordering::Relaxed);
+                Ok(json!(true))
+              }
+              _ => Err(ApiError::new(
+                ErrorCode::AgentFailed,
+                "不应在替代连接执行备份或恢复",
+              )),
+            },
+          );
+          state.hub.mock_safe_backup_agent("s1");
+        }
+      }
+    });
+    let cancel = CancellationToken::new();
+    let result = if restoring {
+      restore(&state, "svc-a", "abcd1234", None, progress, &cancel)
+        .await
+    } else {
+      backup(&state, "r_reconnect", "svc-a", progress, &cancel).await
+    };
+    assert_eq!(result.unwrap_err().code, ErrorCode::AgentOffline);
+    assert!(restarted.load(Ordering::Relaxed));
+  }
+}
+
+#[tokio::test]
 async fn preflight_failure_never_stops_service() {
   let state = test_state();
   seed_servers(&state).await;
