@@ -1418,6 +1418,12 @@ export interface ImageRow {
   used_by: string[];
 }
 
+export interface ImageVersionCheck {
+  error?: string | null;
+  latest?: string | null;
+  newer: boolean;
+}
+
 export interface ImagesView {
   errors: Record<string, string>;
   rows: ImageRow[];
@@ -3391,6 +3397,7 @@ export interface VersionCheck {
    * 这次没查到时的原因，`newer` 沿用上一次的结果。
    */
   error?: string | null;
+  images?: Record<string, ImageVersionCheck>;
   /**
    * 查到的最新版本（镜像 digest 或 commit）。
    */

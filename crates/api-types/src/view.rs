@@ -1289,8 +1289,21 @@ pub struct UpdatesView {
   pub pending: Option<PendingCheck>,
 }
 
+#[derive(
+  Debug, Clone, Default, Serialize, Deserialize, JsonSchema,
+)]
+pub struct ImageVersionCheck {
+  pub newer: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub latest: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct VersionCheck {
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub images: BTreeMap<String, ImageVersionCheck>,
   pub at: DateTime<Utc>,
   /// 仓库里有比固定版本新的。
   pub newer: bool,
