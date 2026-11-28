@@ -386,6 +386,10 @@ pub fn router(state: Arc<AppState>) -> Router {
       get(crate::service_render::get),
     )
     .route(
+      "/api/services/{name}/export-compose",
+      get(crate::service_render::export_compose),
+    )
+    .route(
       "/api/services/{name}/heartbeat/reports",
       get(heartbeat_reports),
     )

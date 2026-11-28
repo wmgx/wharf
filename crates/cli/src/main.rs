@@ -1138,6 +1138,13 @@ pub enum ServiceCmd {
   Render {
     name: String,
   },
+  /// 导出普通 Compose 和所需变量、文件清单。
+  ExportCompose {
+    name: String,
+    /// 将 YAML 写入新文件。
+    #[arg(short, long)]
+    output: Option<std::path::PathBuf>,
+  },
   /// 看日志。可以给多个服务，按时间合在一起看。支持按时间、关键字筛和用 `--errors` 合并同类报错。
   /// 例：`wharf service logs blog --since 2h --errors`、`wharf service logs blog --grep timeout --tail 50`。
   Logs {

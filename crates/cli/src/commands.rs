@@ -2884,6 +2884,39 @@ async fn service(
       )
       .await
     }
+    ServiceCmd::ExportCompose { name, output } => {
+      let view: wharf_api_types::view::ServiceComposeExport = c
+        .get(&format!("/api/services/{}/export-compose", seg(&name)))
+        .await?;
+      if let Some(path) = output {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+          .write(true)
+          .create_new(true)
+          .open(&path)
+          .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+              ApiError::new(ErrorCode::Conflict, "输出文件已存在")
+                .with_hint("更换输出路径")
+            } else {
+              ApiError::invalid(format!("无法创建输出文件：{error}"))
+            }
+          })?;
+        file.write_all(view.compose.as_bytes()).map_err(|error| {
+          ApiError::invalid(format!("写入输出文件失败：{error}"))
+        })?;
+        if j {
+          let mut result = json!(view);
+          result["path"] = json!(path);
+          out(j, &result, |_| {});
+        } else if !print::is_quiet() {
+          println!("{}", path.display());
+        }
+      } else {
+        out(j, &view, |view| print!("{}", view.compose));
+      }
+      Ok(())
+    }
     ServiceCmd::Render { name } => {
       let v: wharf_api_types::view::ServiceRenderView = c
         .get(&format!("/api/services/{}/render", seg(&name)))

@@ -177,6 +177,15 @@ pub struct ServerView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ServiceComposeExport {
+  pub service: String,
+  pub compose: String,
+  pub variables: BTreeMap<String, String>,
+  pub files: BTreeMap<String, String>,
+  pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ServiceRenderView {
   pub service: String,
   pub server: String,

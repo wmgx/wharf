@@ -934,10 +934,16 @@ async fn pending_import_retry_does_not_resolve_registry_images() {
   let mut desired = World::default();
   desired.services.insert("app".into(), row);
   // 没有在线 agent，误查询仓库会返回 AgentOffline。
-  let result =
-    resolve(&state, &snap, &mut desired, &BTreeSet::new(), false)
-      .await
-      .unwrap();
+  let result = resolve(
+    &state,
+    &snap,
+    &mut desired,
+    &BTreeSet::new(),
+    false,
+    None,
+  )
+  .await
+  .unwrap();
   assert!(result.image_ids.is_empty());
   assert!(desired.services["app"].pins.is_empty());
 }

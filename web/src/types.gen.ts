@@ -614,6 +614,11 @@ export type Change = {
   pins?: Record<string, string> | null;
   spec: ServiceSpec;
 } | {
+  add: string[];
+  name: string;
+  op: "edit_service_tags";
+  remove: string[];
+} | {
   mounts?: AdoptMountSpec[];
   op: "adopt_data";
   service: string;

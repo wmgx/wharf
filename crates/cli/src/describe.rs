@@ -237,6 +237,7 @@ fn effect(
       return ("plan", &["plan", "host", "admin"]);
     }
     "service import" => return ("plan", &["plan", "host"]),
+    "service export-compose" => return ("read", &["read"]),
     "import" => return ("plan", &["admin", "plan"]),
     _ => {}
   }
@@ -387,6 +388,7 @@ fn returns(command: &str) -> Option<&'static str> {
     "exec" => "host_exec",
     "service exec" => "service_exec",
     "service render" => "service_render",
+    "service export-compose" => "service_compose_export",
     "backup list" => "backup",
     "backup ls" => "backup_ls",
     "backup extract" => "backup_extract",
