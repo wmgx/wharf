@@ -1247,12 +1247,7 @@ pub async fn put(
     let rows = load_rows(c)?;
     let old = rows.iter().find(|(n, _, _)| n == &name).map(|(_, spec, _)| spec);
     if query.rotate_token {
-      match &mut spec.how {
-        TaskKind::Ping { token, .. } | TaskKind::Script { hook: Some(token), .. } => {
-          *token = crate::auth::new_token();
-        }
-        _ => return Err(ApiError::invalid("只有开启了 --hook 的脚本任务或 --ping 外部报到任务支持轮换口令")),
-      }
+      rotate_task_token(&mut spec.how)?;
     }
     if let TaskKind::Ping { token, .. } = &mut spec.how && token.is_empty() {
       *token = old.filter(|s| matches!(s.how, TaskKind::Ping { .. }))
@@ -1462,6 +1457,35 @@ fn validate_schedule(spec: &TaskSpec) -> Result<(), ApiError> {
     return Ok(());
   }
   Cron::parse(&spec.schedule).map(|_| ())
+}
+
+fn rotate_task_token(kind: &mut TaskKind) -> Result<(), ApiError> {
+  let token = match kind {
+    TaskKind::Ping { token, .. }
+    | TaskKind::Script {
+      hook: Some(token), ..
+    } => token,
+    _ => {
+      return Err(ApiError::invalid(
+        "只有开启了 --hook 的脚本任务或 --ping 外部报到任务支持轮换口令",
+      ));
+    }
+  };
+  *token = crate::auth::new_token();
+  Ok(())
+}
+
+#[test]
+fn task_disable_hook_and_rotate_token() {
+  assert_eq!(next_hook(Some("fixture".into()), None), None);
+  let mut kind = TaskKind::Ping {
+    token: "fixture".into(),
+    grace_mins: 5,
+  };
+  rotate_task_token(&mut kind).unwrap();
+  assert!(
+    matches!(kind, TaskKind::Ping { token, .. } if !token.is_empty() && token != "fixture")
+  );
 }
 
 fn next_hook(

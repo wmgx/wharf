@@ -90,10 +90,11 @@ pub async fn run(cli: Cli) -> CliResult<()> {
       let all = crate::describe::commands(&[]);
       crate::selfcmd::save_snapshot(&all);
       // 紧凑输出：全部命令有上百条，省掉缩进能少一半多的字符。
-      if prefix.is_empty() {
-        println!("{all}");
+      let output = if prefix.is_empty() { all } else { crate::describe::commands(&prefix) };
+      if j {
+        print::json(&output);
       } else {
-        println!("{}", crate::describe::commands(&prefix));
+        println!("{output}");
       }
       Ok(())
     }
@@ -4033,7 +4034,8 @@ async fn gateway(
           .layer4
           .iter()
           .filter(|f| {
-            listen.is_none_or(|port| f.listen == port && f.udp == udp)
+            listen.is_none_or(|port| f.listen == port)
+              && (!udp || f.udp)
           })
           .collect();
         out(j, &list, pretty);

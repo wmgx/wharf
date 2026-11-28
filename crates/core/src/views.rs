@@ -1013,39 +1013,6 @@ fn low_disk(d: wharf_api_types::agent::Disk) -> bool {
     || ((d.free as f64) < 5.0 * GB && d.free < d.total / 4)
 }
 
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn problems_text_keeps_hint_and_omits_info() {
-    let issues = vec![
-      Issue {
-        code: "gateway_drift".into(),
-        level: IssueLevel::Warn,
-        subject: None,
-        title: "网关 s1 和配置不一致".into(),
-        hint: Some("，执行 wharf plan 查看".into()),
-        ack: None,
-        alert: None,
-      },
-      Issue {
-        code: "update_available".into(),
-        level: IssueLevel::Info,
-        subject: None,
-        title: "s1 有新版本".into(),
-        hint: None,
-        ack: None,
-        alert: None,
-      },
-    ];
-    assert_eq!(
-      problems_text(&issues),
-      vec!["网关 s1 和配置不一致，执行 wharf plan 查看"]
-    );
-  }
-}
-
 pub fn compact_service(view: &mut ServiceView) {
   use wharf_api_types::spec::Source;
   let source = match &mut view.spec.source {
@@ -1102,4 +1069,51 @@ pub fn compact_status(status: &mut Status) {
   }
   status.problems.clear();
   status.health = None;
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn problems_text_keeps_hint_and_omits_info() {
+    let issues = vec![
+      Issue {
+        code: "gateway_drift".into(),
+        level: IssueLevel::Warn,
+        subject: None,
+        title: "网关 s1 和配置不一致".into(),
+        hint: Some("，执行 wharf plan 查看".into()),
+        ack: None,
+        alert: None,
+      },
+      Issue {
+        code: "update_available".into(),
+        level: IssueLevel::Info,
+        subject: None,
+        title: "s1 有新版本".into(),
+        hint: None,
+        ack: None,
+        alert: None,
+      },
+    ];
+    assert_eq!(
+      problems_text(&issues),
+      vec!["网关 s1 和配置不一致，执行 wharf plan 查看"]
+    );
+  }
+  #[test]
+  fn compact_service_preserves_status_and_file_paths() {
+    let mut view: ServiceView = serde_json::from_value(serde_json::json!({
+      "name":"app", "spec":{"server":"s1","source":{"compose":{"content":"services: {}"}},
+        "files":[{"path":"/etc/app.conf", "content":"text"}]},
+      "host_ports":{}, "addresses":{}, "version":1,
+      "status":{"want_running":true,"desired_hash":"h1","actual":"running","health":"none","tone":"ok","summary":"运行中"}
+    })).unwrap();
+    compact_service(&mut view);
+    assert_eq!(view.omitted["spec.source.compose.content"], 12);
+    assert_eq!(view.omitted["spec.files[/etc/app.conf]"], 4);
+    assert_eq!(view.spec.files[0].content, "");
+    assert_eq!(view.status.summary, "运行中");
+  }
 }

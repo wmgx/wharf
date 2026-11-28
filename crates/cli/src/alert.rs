@@ -249,23 +249,10 @@ fn preview(
   };
   let mut after = before.clone();
   if patch.reset {
-    if let Some(rule) = now.rules.iter().find(|rule| rule.id == id) {
-      if service.is_some() {
-        after = json!({"enabled": rule.enabled, "level": level_text(rule.level),
-          "threshold": rule.threshold, "for": rule.for_n, "muted_until": inherited_mute.map(fmt_ms)});
-      } else if let Some(defaults) = &rule.defaults {
-        after = json!({"enabled": defaults.enabled, "level": level_text(defaults.level),
-          "threshold": defaults.threshold, "for": defaults.for_n, "muted_until": null});
-      } else {
-        after["reset"] = json!("恢复默认值");
-      }
-    } else if let Some(level) = now
-      .notices
-      .iter()
-      .find(|notice| notice.id == id)
-      .and_then(|notice| notice.default_level)
+    if let Some(reset) =
+      reset_values(now, id, service, inherited_mute)
     {
-      after = json!({"enabled": true, "level": level_text(level), "muted_until": null});
+      after = reset;
     } else {
       after["reset"] = json!("恢复默认值");
     }
@@ -292,6 +279,53 @@ fn preview(
     after["muted_until"] = json!(inherited_mute.map(fmt_ms));
   }
   crate::preview::show(j, &label, &before, &after)
+}
+
+fn reset_values(
+  now: &AlertsView,
+  id: &str,
+  service: Option<&str>,
+  inherited_mute: Option<i64>,
+) -> Option<serde_json::Value> {
+  if let Some(rule) = now.rules.iter().find(|rule| rule.id == id) {
+    if service.is_some() {
+      return Some(
+        json!({"enabled": rule.enabled, "level": level_text(rule.level), "threshold": rule.threshold,
+        "for": rule.for_n, "muted_until": inherited_mute.map(fmt_ms)}),
+      );
+    }
+    let defaults = rule.defaults.as_ref()?;
+    return Some(
+      json!({"enabled": defaults.enabled, "level": level_text(defaults.level),
+      "threshold": defaults.threshold, "for": defaults.for_n, "muted_until": null}),
+    );
+  }
+  let level = now
+    .notices
+    .iter()
+    .find(|notice| notice.id == id)?
+    .default_level?;
+  Some(
+    json!({"enabled": true, "level": level_text(level), "muted_until": null}),
+  )
+}
+
+#[test]
+fn alert_reset_preview_uses_rule_default_or_parent() {
+  let now: AlertsView = serde_json::from_value(json!({
+    "rules":[{"id":"high_cpu","name":"CPU","metric":"cpu","condition":"test","op":">",
+      "threshold":95,"for_n":5,"threshold_editable":true,"enabled":false,
+      "customized":true,"defaults":{"enabled":true,"threshold":80,"for_n":3,"level":"urgent"}}],
+    "notices": [], "firing": [], "history": []
+  })).unwrap();
+  assert_eq!(
+    reset_values(&now, "high_cpu", None, None).unwrap()["threshold"],
+    80.0
+  );
+  assert_eq!(
+    reset_values(&now, "high_cpu", Some("app"), None).unwrap()["threshold"],
+    95.0
+  );
 }
 
 fn print_view(v: &AlertsView) {

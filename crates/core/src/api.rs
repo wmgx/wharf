@@ -2617,7 +2617,7 @@ mod tests {
       json!({"note": "新备注\nwharf-enc:v1:假的"}),
     )
     .unwrap();
-    crate::notes::service(
+    let _ = crate::notes::service(
       State(state.clone()),
       auth(false),
       Path("app".into()),

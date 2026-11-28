@@ -72,15 +72,14 @@ fn paths(root: &Value) -> Vec<Value> {
     active: &mut Vec<&'a str>,
     rows: &mut BTreeMap<String, Value>,
   ) {
-    if let Some(reference) = node["$ref"].as_str() {
-      if let Some(target) =
+    if let Some(reference) = node["$ref"].as_str()
+      && let Some(target) =
         reference.strip_prefix('#').and_then(|r| root.pointer(r))
-        && !active.contains(&reference)
-      {
-        active.push(reference);
-        walk(root, target, path, active, rows);
-        active.pop();
-      }
+      && !active.contains(&reference)
+    {
+      active.push(reference);
+      walk(root, target, path, active, rows);
+      active.pop();
     }
     let types: Vec<_> = match &node["type"] {
       Value::String(ty) => vec![ty.as_str()],
