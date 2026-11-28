@@ -41,6 +41,7 @@ const LONG_TIMEOUT: Duration = Duration::from_secs(6 * 3600);
 const SHORT_TIMEOUT: Duration = Duration::from_secs(120);
 /// restic 的退出码：仓库不存在。
 const NO_REPO: i32 = 10;
+const REPO_LOCKED: i32 = 11;
 const WRONG_PASSWORD: i32 = 12;
 static RESTIC_RUN: AtomicU64 = AtomicU64::new(0);
 /// 恢复时的临时目录和原目录的保留位置，和 `/srv/<service>` 在同一个文件系统上，改名是原子的。
@@ -147,11 +148,11 @@ impl Job<'_> {
       Ok((Some(NO_REPO), _)) => {
         Err(ApiError::not_found("没有找到备份仓库"))
       }
-      Ok((Some(11), _)) => self
+      Ok((Some(REPO_LOCKED), _)) => self
         .check(
           Output {
             success: false,
-            code: Some(11),
+            code: Some(REPO_LOCKED),
             stdout: String::new(),
             stderr: String::new(),
           },
@@ -697,9 +698,10 @@ fn missing_snapshot(stderr: &str) -> bool {
 
 fn restic_locked(out: &Output) -> bool {
   !out.success
-    && ["repository is already locked", "unable to create lock"]
-      .iter()
-      .any(|text| out.stderr.contains(text))
+    && (out.code == Some(REPO_LOCKED)
+      || ["repository is already locked", "unable to create lock"]
+        .iter()
+        .any(|text| out.stderr.contains(text)))
 }
 
 fn check_restic_output(
