@@ -443,6 +443,9 @@ pub(crate) fn decrypt_to_staging(
   {
     return Err(ApiError::invalid("灾备包有多余数据"));
   }
+  if !files.remove(MANIFEST) {
+    return Err(ApiError::invalid("灾备清单无效"));
+  }
   let manifest: Manifest = serde_json::from_reader(
     open_regular(&staging.join(MANIFEST)).map_err(io_error)?,
   )
@@ -450,7 +453,6 @@ pub(crate) fn decrypt_to_staging(
   if manifest.format != FORMAT {
     return Err(ApiError::invalid("灾备清单格式无效"));
   }
-  files.remove(MANIFEST);
   for artifact in &manifest.files {
     if !files.remove(&artifact.name)
       || Artifact::read(staging, &artifact.name)? != *artifact

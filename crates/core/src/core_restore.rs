@@ -100,7 +100,14 @@ pub(crate) fn validate_staging(
   let mut files = Vec::new();
   for name in REQUIRED.into_iter().chain(OPTIONAL) {
     match open_regular(&stage.join(name)) {
-      Ok(_) => files.push(name),
+      Ok(file) => {
+        if name == "secrets.key"
+          && file.metadata().map_err(io_error)?.len() != 32
+        {
+          return Err(ApiError::invalid("凭据主密钥格式无效"));
+        }
+        files.push(name);
+      }
       Err(e)
         if e.kind() == io::ErrorKind::NotFound
           && OPTIONAL.contains(&name) => {}

@@ -1126,8 +1126,26 @@ async fn wait_run_with_interrupt(
   j: bool,
   cancel_on_interrupt: bool,
 ) -> CliResult<Run> {
-  let mut printed: Vec<(usize, bool)> = Vec::new();
   let path = format!("/api/runs/{}", seg(run_id));
+  wait_run_until(
+    run_id,
+    j,
+    cancel_on_interrupt,
+    || c.get(&path),
+    tokio::signal::ctrl_c(),
+  )
+  .await
+}
+
+async fn wait_run_until<F: Future<Output = CliResult<Run>>>(
+  run_id: &str,
+  j: bool,
+  cancel_on_interrupt: bool,
+  mut fetch: impl FnMut() -> F,
+  interrupt: impl Future,
+) -> CliResult<Run> {
+  let mut printed: Vec<(usize, bool)> = Vec::new();
+  tokio::pin!(interrupt);
   let mut retries = 0;
   let interrupted = || {
     if !j && !cancel_on_interrupt {
@@ -1139,8 +1157,9 @@ async fn wait_run_with_interrupt(
   };
   loop {
     let result: CliResult<Run> = tokio::select! {
-      r = c.get(&path) => r,
-      _ = tokio::signal::ctrl_c() => return Err(interrupted()),
+      biased;
+      _ = &mut interrupt => return Err(interrupted()),
+      r = fetch() => r,
     };
     let run = match result {
       Ok(run) => {
@@ -1153,7 +1172,7 @@ async fn wait_run_with_interrupt(
         retries += 1;
         tokio::select! {
           _ = tokio::time::sleep(Duration::from_secs(retries.min(3))) => {}
-          _ = tokio::signal::ctrl_c() => return Err(interrupted()),
+          _ = &mut interrupt => return Err(interrupted()),
         }
         continue;
       }
@@ -1192,7 +1211,11 @@ async fn wait_run_with_interrupt(
     if run.status.finished() {
       return Ok(run);
     }
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    tokio::select! {
+      biased;
+      _ = &mut interrupt => return Err(interrupted()),
+      _ = tokio::time::sleep(Duration::from_millis(800)) => {}
+    }
   }
 }
 
@@ -6070,6 +6093,40 @@ fn parse_volume_arg(raw: &str) -> Result<VolumeSpec, ApiError> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn backup_move_wait_is_interruptible_between_polls() {
+    let polls = std::cell::Cell::new(0);
+    let run = Run {
+      run_id: "r1".into(),
+      plan_id: "p1".into(),
+      status: RunStatus::Running,
+      started_at: chrono::Utc::now(),
+      actor: None,
+      retry_of: None,
+      finished_at: None,
+      steps: vec![],
+    };
+    let result = tokio::time::timeout(
+      Duration::from_secs(2),
+      wait_run_until(
+        "r1",
+        true,
+        true,
+        || {
+          polls.set(polls.get() + 1);
+          std::future::ready(Ok(run.clone()))
+        },
+        async {
+          tokio::task::yield_now().await;
+          assert_eq!(polls.get(), 1);
+        },
+      ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(CliError::Exit(130))));
+  }
 
   #[test]
   fn source_switch_refreshes_compose_ports_only_when_requested() {

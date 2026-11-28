@@ -280,7 +280,7 @@ fn returns(command: &str) -> Option<&'static str> {
     "alert list" => "alerts",
     "task ls" | "task show" => "task",
     "task logs" => "task_run",
-    "backup move" => "apply_response",
+    "backup move" => "run",
     "backup list" => "backup",
     "service history" => "deployment",
     "edge list" | "edge show" => "edge",
@@ -368,6 +368,17 @@ pub fn commands(prefix: &[String]) -> Value {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn backup_move_declares_wait_and_no_wait_results() {
+    let v = super::commands(&["backup".into(), "move".into()]);
+    let command = &v["commands"][0];
+    assert_eq!(command["returns"], "run");
+    assert_eq!(
+      command["returns_by_flag"]["--no-wait"],
+      "apply_response"
+    );
+  }
+
   #[test]
   fn usable_respects_host_and_baseline_permissions() {
     use serde_json::json;

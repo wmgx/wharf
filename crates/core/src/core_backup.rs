@@ -139,10 +139,8 @@ pub async fn show(
   });
   let history = crate::data::history(&s.db).await?;
   let repo_empty = to.as_ref().is_some_and(|target| {
-    let last_ok = history
-      .get(&(REPO.into(), target.clone()))
-      .and_then(|h| h.ok);
-    crate::data::repo_verified_empty(&s, &snap, target, REPO, last_ok)
+    let h = history.get(&(REPO.into(), target.clone()));
+    crate::data::repo_verified_empty(&s, &snap, target, REPO, h)
   });
   Ok(Json(CoreBackupView {
     user_key_current,

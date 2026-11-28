@@ -23,13 +23,19 @@ async fn backup_move_resumes_verifies_snapshots_and_retains_old_repo()
   let s = test_state();
   seed_servers(&s).await;
   seed_service(&s, "app", true).await;
-  s.db.call(|c| {
+  let old = now_ms() - 3_600_000;
+  s.db.call(move |c| {
       db::apply_write(c, &db::Write::Upsert {
         kind: "server".into(), name: "s3".into(),
         spec: json!({"private_addr":{"ip":"100.64.0.3","network":"lan"}}), meta: json!({}),
       })?;
       c.execute("INSERT INTO backups(service, server, target, run_id, ok, body, created_at)
-        VALUES ('app','s1','s2','original',1,'{}',1234)", []).map_err(sql_err)?;
+        VALUES ('app','s1','s2','original',1,'{}',?1)", [old]).map_err(sql_err)?;
+      let report = serde_json::to_string(&wharf_api_types::agent::AgentReport {
+        backup_repos: Some(Default::default()), ..Default::default()
+      }).map_err(json_err)?;
+      c.execute("INSERT INTO agents(server, report, last_seen)
+        VALUES ('s3', ?1, ?2)", params![report, now_ms()]).map_err(sql_err)?;
       Ok(())
     }).await.unwrap();
   backup::ensure_service_creds(&s, "app").await.unwrap();
@@ -112,8 +118,14 @@ async fn backup_move_resumes_verifies_snapshots_and_retains_old_repo()
     "s3"
   );
   assert!(!snap.pending.backup_moves.contains_key("app"));
+  let view = crate::data::overview(&s).await.unwrap();
+  assert!(!view.services[0].repo_empty);
+  assert_eq!(
+    view.services[0].status,
+    wharf_api_types::view::DataStatus::Ok
+  );
   s.db
-    .call(|c| {
+    .call(move |c| {
       assert!(
         db::setting(c, "backup_move.retired.app@s2")?.is_some()
       );
@@ -124,11 +136,65 @@ async fn backup_move_resumes_verifies_snapshots_and_retains_old_repo()
           |r| r.get(0),
         )
         .map_err(sql_err)?;
-      assert_eq!(original, 1234);
+      assert_eq!(original, old);
+      c.execute(
+        "UPDATE agents SET last_seen=?1 WHERE server='s3'",
+        [now_ms() + 120_000],
+      )
+      .map_err(sql_err)?;
       Ok(())
     })
     .await
     .unwrap();
+  let view = crate::data::overview(&s).await.unwrap();
+  assert!(view.services[0].repo_empty);
+}
+
+#[tokio::test]
+async fn backup_move_preserves_disabled_backup_and_restore_target() {
+  let s = test_state();
+  seed_service(&s, "app", false).await;
+  let before = snapshot::load(&s.db).await.unwrap();
+  s.db.call(|c| {
+    c.execute("INSERT INTO backups(service, server, target, run_id, ok, body, created_at)
+      VALUES ('app','s1','s2','original',1,'{}',1000)", []).map_err(sql_err)?;
+    finish(c, &Move {service: "app".into(), is_core: false,
+      from: "s2".into(), to: "s3".into()}, "r1", 1)
+  }).await.unwrap();
+  let snap = snapshot::load(&s.db).await.unwrap();
+  let row = &snap.world.services["app"];
+  assert!(row.spec.backup.is_none());
+  assert_eq!(row.version, before.world.services["app"].version);
+  assert_eq!(
+    backup::restore_target(&s, &snap, "app", None)
+      .await
+      .unwrap(),
+    "s3"
+  );
+}
+
+#[tokio::test]
+async fn backup_move_ignores_replaced_target_failures_only() {
+  let s = test_state();
+  seed_service(&s, "app", true).await;
+  s.db.call(|c| {
+    c.execute("INSERT INTO backups(service, server, target, run_id, ok, body, created_at)
+      VALUES ('app','s1','s2','original',1,'{}',1000),
+             ('app','s1','s3','old',0,'{}',2000)", []).map_err(sql_err)?;
+    finish(c, &Move {service: "app".into(), is_core: false,
+      from: "s2".into(), to: "s3".into()}, "r1", 1)
+  }).await.unwrap();
+  let h = crate::data::history(&s.db).await.unwrap();
+  let target = ("app".into(), "s3".into());
+  assert_eq!(h[&target].ok, Some(1000));
+  assert_eq!(h[&target].failed, None);
+  s.db.call(|c| {
+    c.execute("INSERT INTO backups(service, server, target, run_id, ok, body, created_at)
+      VALUES ('app','s1','s3','new',0,'{}',3000)", []).map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
+  let h = crate::data::history(&s.db).await.unwrap();
+  assert_eq!(h[&target].failed, Some(3000));
 }
 
 #[tokio::test]

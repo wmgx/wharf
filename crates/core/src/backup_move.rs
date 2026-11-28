@@ -710,26 +710,48 @@ fn finish(
   snapshot_count: usize,
 ) -> Result<(), ApiError> {
   let tx = c.transaction().map_err(sql_err)?;
+  let now = now_ms();
   if m.is_core {
     core_backup::switch_move_target(&tx, &m.from, &m.to)?;
   } else {
     let count = tx.execute(
-      "UPDATE resources SET spec=json_set(spec,'$.backup',
-       json_set(COALESCE(json_extract(spec,'$.backup'),'{}'),'$.to',?2)),
-       version=version+1, updated_at=?3 WHERE kind='service' AND name=?1",
-       params![m.service, m.to, now_ms()],
+      "UPDATE resources SET spec=json_set(spec,'$.backup.to',?2),
+       version=version+1, updated_at=?3 WHERE kind='service' AND name=?1
+       AND json_type(spec,'$.backup')='object'",
+       params![m.service, m.to, now],
     ).map_err(sql_err)?;
-    if count != 1 {
+    if count == 0 && !tx.query_row(
+      "SELECT EXISTS(SELECT 1 FROM resources WHERE kind='service' AND name=?1)",
+      [&m.service], |r| r.get::<_, bool>(0),
+    ).map_err(sql_err)? {
       return Err(crate::api::service_not_found(&m.service));
     }
   }
+  let previous_id: i64 = tx.query_row(
+    "SELECT COALESCE(MAX(id),0) FROM backups WHERE service=?1 AND target=?2",
+    params![m.service, m.to], |r| r.get(0),
+  ).map_err(sql_err)?;
+  let arrival =
+    |host: &str| format!("backup_move.arrived.{}@{host}", m.service);
+  db::set_setting(
+    &tx,
+    &arrival(&m.to),
+    Some(
+      &json!({
+        "service": m.service, "target": m.to,
+        "moved_at": now, "previous_id": previous_id,
+      })
+      .to_string(),
+    ),
+  )?;
   tx.execute(
     "INSERT INTO backups (service, server, target, run_id, ok, body, created_at)
      SELECT service, server, ?3, ?4, ok, body, created_at
-     FROM backups WHERE service=?1 AND target=?2 AND ok=1 ORDER BY created_at DESC,id DESC LIMIT 1",
-    params![m.service, m.from, m.to, run_id],
+     FROM backups WHERE service=?1 AND target=?2 AND ok=1
+       AND id > COALESCE((SELECT json_extract(value,'$.previous_id') FROM settings WHERE key=?5),0)
+     ORDER BY created_at DESC,id DESC LIMIT 1",
+    params![m.service, m.from, m.to, run_id, arrival(&m.from)],
   ).map_err(sql_err)?;
-  let now = now_ms();
   let retired = json!({
     "service": m.service, "is_core": m.is_core, "server": m.from,
     "moved_to": m.to, "path": m.repo_path(), "snapshot_count": snapshot_count,

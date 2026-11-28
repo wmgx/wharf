@@ -38,6 +38,41 @@ fn fixture(root: &Path, password: &str) -> PathBuf {
 }
 
 #[test]
+fn core_restore_rejects_truncated_secrets_key_for_empty_db() {
+  let dir = tempfile::tempdir().unwrap();
+  let stage = dir.path();
+  drop(crate::db::Db::open(&stage.join("wharf.db")).unwrap());
+  fs::write(stage.join("core.key"), hex::encode([19; 32])).unwrap();
+  assert!(crate::core_restore::validate_staging(stage).is_ok());
+  fs::write(stage.join("secrets.key"), []).unwrap();
+  let error =
+    crate::core_restore::validate_staging(stage).unwrap_err();
+  assert_eq!(error.code, ErrorCode::InvalidInput);
+  assert_eq!(error.message, "凭据主密钥格式无效");
+}
+
+#[test]
+fn core_export_rejects_authenticated_archive_without_manifest() {
+  let dir = tempfile::tempdir().unwrap();
+  let stage = TempDir::new(dir.path(), "test-").unwrap();
+  let output = dir.path().join("export.enc");
+  let password = crate::backup::random_hex();
+  let header = new_header().unwrap();
+  let mut file = File::create(&output).unwrap();
+  file.write_all(&header).unwrap();
+  let frames = Frames::new(file, header, &password).unwrap();
+  let tar =
+    tar::Builder::new(GzEncoder::new(frames, Compression::default()));
+  let mut frames = tar.into_inner().unwrap().finish().unwrap();
+  frames.emit(true).unwrap();
+  drop(frames);
+  let error =
+    decrypt_to_staging(&output, &password, &stage.0).unwrap_err();
+  assert_eq!(error.code, ErrorCode::InvalidInput);
+  assert_eq!(error.message, "灾备清单无效");
+}
+
+#[test]
 fn core_export_contains_no_plaintext_and_rejects_tamper_or_wrong_password()
  {
   let dir = tempfile::tempdir().unwrap();

@@ -75,7 +75,7 @@ fn publish(
   if force {
     fs::rename(&temp.0, target).map_err(io_error)
   } else {
-    fs::hard_link(&temp.0, target).map_err(|e| {
+    publish_new(&temp.0, target).map_err(|e| {
       if e.kind() == io::ErrorKind::AlreadyExists {
         ApiError::new(ErrorCode::Conflict, "输出文件已存在")
       } else {
@@ -83,6 +83,50 @@ fn publish(
       }
     })
   }
+}
+
+fn publish_new(temp: &Path, target: &Path) -> io::Result<()> {
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  {
+    let source =
+      std::ffi::CString::new(temp.as_os_str().as_encoded_bytes())?;
+    let dest =
+      std::ffi::CString::new(target.as_os_str().as_encoded_bytes())?;
+    // 两个路径都由存活的 CString 持有，系统调用不会覆写已有目标。
+    #[cfg(target_os = "linux")]
+    let result = unsafe {
+      libc::syscall(
+        libc::SYS_renameat2,
+        libc::AT_FDCWD,
+        source.as_ptr(),
+        libc::AT_FDCWD,
+        dest.as_ptr(),
+        libc::RENAME_NOREPLACE,
+      )
+    };
+    #[cfg(target_os = "macos")]
+    let result = unsafe {
+      libc::renamex_np(
+        source.as_ptr(),
+        dest.as_ptr(),
+        libc::RENAME_EXCL,
+      )
+    };
+    if result == 0 {
+      return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    let errno = error.raw_os_error();
+    if errno != Some(libc::ENOTSUP)
+      && !matches!(
+        errno,
+        Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP)
+      )
+    {
+      return Err(error);
+    }
+  }
+  fs::hard_link(temp, target)
 }
 
 pub(crate) async fn download(
@@ -164,6 +208,25 @@ pub(crate) async fn download(
 mod tests {
   use super::*;
   use std::os::unix::fs::{PermissionsExt, symlink};
+
+  #[cfg(any(target_os = "linux", target_os = "macos"))]
+  #[test]
+  fn core_export_publishes_with_noreplace_rename() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("export.enc");
+    let (_, temp) = temporary(&target).unwrap();
+    fs::write(&temp.0, b"encrypted").unwrap();
+    fs::write(&target, b"existing").unwrap();
+    assert_eq!(
+      publish_new(&temp.0, &target).unwrap_err().kind(),
+      io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"existing");
+    fs::remove_file(&target).unwrap();
+    publish(&temp, &target, false).unwrap();
+    assert!(!temp.0.exists());
+    assert_eq!(fs::read(&target).unwrap(), b"encrypted");
+  }
 
   #[test]
   fn core_export_cli_writes_0600_and_refuses_symlink() {
