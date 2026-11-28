@@ -27,8 +27,11 @@ use crate::{
 const QUICK: Duration = Duration::from_secs(5);
 const WRAPPER: &str = r#"
 umask 077
-if ! command -v setsid >/dev/null 2>&1 || ! mkdir "$2"; then
-  [ "$4" = legacy ] || exit 125
+if ! command -v setsid >/dev/null 2>&1 || ! mkdir "$2" 2>/dev/null; then
+  if [ "$4" != legacy ]; then
+    printf '%s\n' '容器内执行需要 setsid 和可写的 /tmp' >&2
+    exit 125
+  fi
   # shortcut: 旧任务继续在极简镜像运行，镜像有 setsid 和可写 /tmp 后才能即时取消整个进程组。
   script='sh -c "$1"; rc=$?; printf "\n%s:DONE:%d\n" "$2" "$rc" >&2; exit "$rc"'
   if command -v timeout >/dev/null 2>&1; then
@@ -50,8 +53,23 @@ setsid sh -c '
   exit "$rc"
 ' _ "$1" "$2" "$3" "$4" <&3 3<&- &
 pid=$!
-wait "$pid"
+watchdog=
+if [ "$5" -gt 0 ]; then
+  (
+    timer=
+    trap '[ -z "$timer" ] || kill "$timer" 2>/dev/null; exit 0' TERM
+    sleep "$5" &
+    timer=$!
+    wait "$timer" && kill -KILL "-$pid"
+  ) </dev/null >/dev/null 2>&1 &
+  watchdog=$!
+fi
+wait "$pid" 2>/dev/null
 rc=$?
+if [ -n "$watchdog" ]; then
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+fi
 kill -KILL "-$pid" 2>/dev/null || true
 printf '\n%s:WRAP:%d\n' "$3" "$rc" >&2
 exit "$rc"
@@ -266,8 +284,9 @@ impl Session {
   ) -> Result<(crate::host_shell::Captured, i32), ApiError> {
     let wrap = format!("\n{}:WRAP:", self.marker);
     let done = format!("\n{}:DONE:", self.marker);
+    let startup_error = exec_start_error(err.tail());
     let (err, _) = finish_stderr(err, wrap.as_bytes())
-      .map_err(|_| no_exec_status())?;
+      .map_err(|_| startup_error.unwrap_or_else(no_exec_status))?;
     finish_stderr(err, done.as_bytes()).map_err(|_| no_exec_status())
   }
 
@@ -285,6 +304,22 @@ impl Session {
   }
 }
 
+fn exec_start_error(stderr: &[u8]) -> Option<ApiError> {
+  let stderr = String::from_utf8_lossy(stderr);
+  stderr.lines().find_map(|line| {
+    let (_, reason) = line.split_once("exec: \"sh\":")?;
+    (reason.contains("executable file not found")
+      || reason.contains("no such file or directory"))
+    .then(|| {
+      ApiError::new(
+        ErrorCode::AgentFailed,
+        "容器内没有 sh，无法执行 shell 命令",
+      )
+      .with_hint("请使用包含 /bin/sh 的镜像")
+    })
+  })
+}
+
 fn no_exec_status() -> ApiError {
   ApiError::new(ErrorCode::AgentFailed, "容器命令没有返回退出状态")
     .with_hint("确认镜像包含 sh、setsid 且容器内 /tmp 可写")
@@ -299,13 +334,10 @@ pub(crate) async fn run_task(
   ctx: &Ctx,
 ) -> Result<(Output, bool), ApiError> {
   let session = Session::new();
+  let seconds = timeout.as_secs().to_string();
   let mut cmd = docker.cmd().arg("exec");
   let cmd = if env.is_empty() {
-    cmd.arg(id).args(session.args(
-      command,
-      "legacy",
-      &timeout.as_secs().to_string(),
-    ))
+    cmd.arg(id).args(session.args(command, "legacy", &seconds))
   } else {
     // 通过标准输入传入，值既不进 argv，也不进入本地 Docker CLI 的环境。
     let mut script = String::from("{\n");
@@ -329,10 +361,11 @@ pub(crate) async fn run_task(
     cmd = cmd.arg("-i");
     cmd
       .arg(id)
-      .args(session.args("", "stdin", "0"))
+      .args(session.args("", "stdin", &seconds))
       .input(script.into_bytes())
   }
-  .timeout(timeout);
+  // 留出 docker exec 启动及回收输出的时间，由容器内的超时先结束命令。
+  .timeout(timeout + QUICK);
   let result =
     crate::task::run_wrapped(cmd, &session.marker, ctx).await;
   if result.is_err()
@@ -350,6 +383,85 @@ fn shell_quote(value: &str) -> String {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn exec_task_timeout_preserves_output_and_classifies_exit_137()
+   {
+    let temp = tempfile::tempdir().unwrap();
+    let session = Session {
+      dir: temp.path().join("exec").to_string_lossy().into_owned(),
+      marker: "__WHARF_SE_fixture__".into(),
+    };
+    for (command, expired) in [
+      (
+        "printf 'before timeout\\n'; printf 'detail\\n' >&2; sleep 30",
+        true,
+      ),
+      (
+        "printf 'before timeout\\n'; printf 'detail\\n' >&2; exit 137",
+        false,
+      ),
+    ] {
+      let cmd = crate::exec::Cmd::new("sh")
+        .args(
+          session.args(command, "legacy", "1").into_iter().skip(1),
+        )
+        .timeout(Duration::from_secs(6));
+      let (output, timed_out) = crate::task::run_wrapped(
+        cmd,
+        &session.marker,
+        &Ctx::detached(),
+      )
+      .await
+      .unwrap();
+      assert_eq!(timed_out, expired);
+      assert_eq!(output.code, (!expired).then_some(137));
+      assert!(output.stdout.contains("before timeout"), "{output:?}");
+      assert!(output.stderr.contains("detail"), "{output:?}");
+      assert!(!output.stderr.contains(&session.marker));
+    }
+  }
+
+  #[tokio::test]
+  async fn exec_task_reports_unwritable_session_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let session = Session {
+      dir: temp
+        .path()
+        .join("missing/exec")
+        .to_string_lossy()
+        .into_owned(),
+      marker: "__WHARF_SE_fixture__".into(),
+    };
+    let cmd = crate::exec::Cmd::new("sh")
+      .args(session.args("", "stdin", "1").into_iter().skip(1))
+      .input(b"echo unexpected".to_vec())
+      .timeout(Duration::from_secs(6));
+    let (output, expired) = crate::task::run_wrapped(
+      cmd,
+      &session.marker,
+      &Ctx::detached(),
+    )
+    .await
+    .unwrap();
+    assert!(!expired);
+    assert_eq!(output.code, Some(125));
+    assert!(output.stdout.is_empty());
+    assert!(
+      output
+        .stderr
+        .contains("容器内执行需要 setsid 和可写的 /tmp")
+    );
+  }
+
+  #[tokio::test]
+  async fn service_exec_reports_missing_sh() {
+    let session = Session::new();
+    let stderr = &b"OCI runtime exec failed: exec failed: unable to start container process: exec: \"sh\": executable file not found in $PATH: unknown"[..];
+    let err = capture(Some(stderr), None, true).await;
+    let error = session.finish(err).err().unwrap();
+    assert_eq!(error.message, "容器内没有 sh，无法执行 shell 命令");
+  }
 
   #[tokio::test]
   async fn cancelled_exec_kills_its_process_group() {

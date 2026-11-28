@@ -3352,12 +3352,12 @@ async fn service(
       if clear_env {
         spec.env.clear();
       }
+      for k in &unset_env {
+        spec.env.remove(k);
+      }
       for e in &env {
         let (k, v) = parse_kv(e, "--env")?;
         spec.env.insert(k, v);
-      }
-      for k in &unset_env {
-        spec.env.remove(k);
       }
       for name in unset_volume {
         let index = spec

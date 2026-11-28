@@ -121,7 +121,10 @@ fn validate_task_token(
   Ok(())
 }
 
-struct RunGuard(String);
+struct RunGuard {
+  name: String,
+  cancel: CancellationToken,
+}
 
 impl RunGuard {
   fn acquire(name: &str) -> Option<Self> {
@@ -132,25 +135,28 @@ impl RunGuard {
     else {
       return None;
     };
+    let cancel = CancellationToken::new();
     slot.insert(ActiveRun {
       id: 0,
-      cancel: CancellationToken::new(),
+      cancel: cancel.clone(),
     });
-    Some(Self(name.into()))
+    Some(Self {
+      name: name.into(),
+      cancel,
+    })
   }
 
-  fn bind(&self, id: i64) -> CancellationToken {
+  fn bind(&self, id: i64) {
     let mut running =
       RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-    let run = running.get_mut(&self.0).expect("任务持有运行锁");
+    let run = running.get_mut(&self.name).expect("任务持有运行锁");
     run.id = id;
-    run.cancel.clone()
   }
 }
 
 impl Drop for RunGuard {
   fn drop(&mut self) {
-    release(&self.0);
+    release(&self.name);
   }
 }
 
@@ -273,13 +279,14 @@ async fn tick(
       let server = match target {
         Ok(server) => server,
         Err(reason) => {
-          let id = insert_run_at(
+          let (id, _) = insert_run_at(
             state,
             &name,
             TaskStatus::Skipped,
             "catch_up",
             due.timestamp_millis(),
             service,
+            None,
           )
           .await?;
           finish(state, id, TaskStatus::Skipped, None, &reason, None)
@@ -298,13 +305,14 @@ async fn tick(
         server,
       );
       // 这条记录对应未执行的旧计划点，用实际写入时间会挡住后续补跑。
-      let id = insert_run_at(
+      let (id, _) = insert_run_at(
         state,
         &name,
         TaskStatus::Failed,
         "catch_up",
         due.timestamp_millis(),
         service,
+        None,
       )
       .await?;
       finish(state, id, TaskStatus::Failed, None, &output, None)
@@ -563,7 +571,16 @@ async fn start_with_guard(
   } else {
     TaskStatus::Running
   };
-  let id = insert_run(state, name, status, trigger, service).await?;
+  let (id, guard) = insert_run_at(
+    state,
+    name,
+    status,
+    trigger,
+    now_ms(),
+    service,
+    guard.filter(|_| skip.is_none()),
+  )
+  .await?;
   if let Some(reason) = skip {
     finish(state, id, TaskStatus::Skipped, None, &reason, None).await;
     return Ok((id, true));
@@ -571,7 +588,8 @@ async fn start_with_guard(
   let server = target.expect("可执行任务已有目标").to_string();
   let mut spec = spec;
   spec.server = server;
-  let cancel = guard.as_ref().expect("任务持有运行锁").bind(id);
+  let guard = guard.expect("任务持有运行锁");
+  let cancel = guard.cancel.clone();
   let state = state.clone();
   let name = name.to_string();
   tokio::spawn(async move {
@@ -714,7 +732,8 @@ async fn execute(
       .flat_map(|(_, value)| {
         let resolved = render::substitute(value, Some(&secrets)).ok();
         std::iter::once(value.clone()).chain(resolved)
-      }),
+      })
+      .filter(|value| value.len() >= 6),
   );
   let redact = |s: String| {
     crate::log_redact::redact_text(&wharf_api_types::mask_values(
@@ -918,7 +937,9 @@ pub(crate) async fn insert_run(
   trigger: &str,
   service: Option<(&str, Option<&str>)>,
 ) -> Result<i64, ApiError> {
-  insert_run_at(state, name, status, trigger, now_ms(), service).await
+  insert_run_at(state, name, status, trigger, now_ms(), service, None)
+    .await
+    .map(|(id, _)| id)
 }
 
 async fn insert_run_at(
@@ -928,7 +949,8 @@ async fn insert_run_at(
   trigger: &str,
   started_at: i64,
   service: Option<(&str, Option<&str>)>,
-) -> Result<i64, ApiError> {
+  guard: Option<RunGuard>,
+) -> Result<(i64, Option<RunGuard>), ApiError> {
   let (name, trigger) = (name.to_string(), trigger.to_string());
   let status = enc(status);
   let (service, instance) = service.unzip();
@@ -952,7 +974,11 @@ async fn insert_run_at(
       )
       .map_err(sql_err)?;
       tx.commit().map_err(sql_err)?;
-      Ok(id)
+      // 数据库锁释放前绑定 ID，取消请求看到 running 时就能找到句柄。
+      if let Some(guard) = &guard {
+        guard.bind(id);
+      }
+      Ok((id, guard))
     })
     .await
 }
@@ -2309,7 +2335,7 @@ async fn expired_schedule_does_not_hide_next_catch_up() {
 
 #[cfg(test)]
 #[tokio::test]
-async fn cancelled_task_history_keeps_previous_failure() {
+async fn task_is_cancellable_as_soon_as_run_record_is_visible() {
   use crate::host_access::tests::auth;
   let state = crate::rules::tests::test_state();
   state.db.call(|c| {
@@ -2337,16 +2363,18 @@ async fn cancelled_task_history_keeps_previous_failure() {
   )
   .await;
   let guard = RunGuard::acquire("cancel-fixture").unwrap();
-  let id = insert_run(
+  let token = guard.cancel.clone();
+  let (id, _guard) = insert_run_at(
     &state,
     "cancel-fixture",
     TaskStatus::Running,
     "manual",
+    now_ms(),
     None,
+    Some(guard),
   )
   .await
   .unwrap();
-  let token = guard.bind(id);
   let permissions =
     || auth([Perm::Read, Perm::Apply, Perm::Exec], false);
   let Json(receipt) =
@@ -2415,7 +2443,7 @@ fn temporary_env_rejects_reserved_names_and_restricted_values() {
 
 #[cfg(test)]
 #[tokio::test]
-async fn temporary_env_binds_to_runtime_agent_and_stays_out_of_task_config()
+async fn temporary_env_masks_only_long_values_without_persisting_settings()
  {
   use crate::host_access::tests::auth;
   use serde_json::json;
@@ -2443,9 +2471,10 @@ async fn temporary_env_binds_to_runtime_agent_and_stays_out_of_task_config()
     let AgentOp::TaskRun(TaskRunJob { how: TaskHow::Exec { env, .. }, .. }) = op else {
       panic!("意外请求");
     };
-    assert_eq!(env.get("DRY").map(String::as_str), Some("1"));
+    assert_eq!(env.get("AUTH_MODE").map(String::as_str), Some("1"));
+    assert_eq!(env.get("AUTH_TOKEN").map(String::as_str), Some("fixture-long"));
     let _ = sent.take().unwrap().send(());
-    Ok(json!({"output":"","exit_code":0,"timed_out":false,"duration_ms":0}))
+    Ok(json!({"output":"mode 1 fixture-long","exit_code":0,"timed_out":false,"duration_ms":0}))
   });
   let start = || {
     run_now(
@@ -2453,7 +2482,10 @@ async fn temporary_env_binds_to_runtime_agent_and_stays_out_of_task_config()
       auth([Perm::Apply, Perm::Exec], false),
       Path("env-fixture".into()),
       Some(Json(RunTaskRequest {
-        env: BTreeMap::from([("DRY".into(), "1".into())]),
+        env: BTreeMap::from([
+          ("AUTH_MODE".into(), "1".into()),
+          ("AUTH_TOKEN".into(), "fixture-long".into()),
+        ]),
         conn: None,
       })),
     )
@@ -2466,6 +2498,26 @@ async fn temporary_env_binds_to_runtime_agent_and_stays_out_of_task_config()
     .await
     .unwrap()
     .unwrap();
+  let id = receipt["id"].as_i64().unwrap();
+  let output = tokio::time::timeout(Duration::from_secs(2), async {
+    loop {
+      let Json(run) = run_detail(
+        State(state.clone()),
+        auth([Perm::Read], false),
+        Path(("env-fixture".into(), id)),
+      )
+      .await
+      .map_err(|error| error.0)
+      .unwrap();
+      if run.status != TaskStatus::Running {
+        break run.output;
+      }
+      tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+  })
+  .await
+  .unwrap();
+  assert_eq!(output, "mode 1 ***");
   let after = load_one(&state, "env-fixture").await.unwrap();
   assert_eq!(
     serde_json::to_value(after).unwrap(),

@@ -550,6 +550,10 @@ pub(crate) struct Captured {
 }
 
 impl Captured {
+  pub(crate) fn tail(&self) -> &[u8] {
+    &self.tail
+  }
+
   fn push(&mut self, chunk: &[u8]) {
     self.total = self.total.saturating_add(chunk.len() as u64);
     let remaining = OUTPUT_LIMIT.saturating_sub(self.kept.len());

@@ -182,6 +182,9 @@ fn effect(
     return ("plan", &["plan"]);
   }
   let leaf = cmd.get_name();
+  if matches!(command, "task run" | "task cancel") {
+    return ("direct", &["apply", "exec"]);
+  }
   if matches!(command, "connect" | "service exec") {
     return ("direct", &["exec"]);
   }
@@ -265,7 +268,7 @@ fn returns(command: &str) -> Option<&'static str> {
     "server exposure" => "exposure",
     "alert list" => "alerts",
     "task ls" | "task show" => "task",
-    "task logs" | "task run" => "task_run",
+    "task logs" => "task_run",
     "exec" => "host_exec",
     "service exec" => "service_exec",
     "service render" => "service_render",
@@ -356,6 +359,32 @@ pub fn commands(prefix: &[String]) -> Value {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn usable_keeps_ping_task_edits_with_apply_permission() {
+    use serde_json::json;
+    let prefix = ["task".into()];
+    let apply =
+      super::usable(&prefix, &json!({"perms": ["read", "apply"]}));
+    let read = super::usable(&prefix, &json!({"perms": ["read"]}));
+    let task = |result: &serde_json::Value, name: &str| {
+      result["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["command"] == name)
+        .cloned()
+    };
+    for name in
+      ["wharf task enable", "wharf task disable", "wharf task set"]
+    {
+      assert!(task(&apply, name).is_some(), "{name}");
+    }
+    assert_eq!(
+      task(&read, "wharf task set").unwrap()["usable_mode"],
+      "read_only"
+    );
+  }
+
   #[test]
   fn usable_respects_host_and_baseline_permissions() {
     use serde_json::json;

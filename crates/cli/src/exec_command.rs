@@ -176,10 +176,15 @@ pub(crate) async fn run(
   tokio::select! {
     result = request => result,
     _ = tokio::signal::ctrl_c() => {
+      if !j {
+        eprintln!("正在取消，等待远端清理。再按一次 Ctrl-C 立即退出");
+      }
+      tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+        _ = tokio::signal::ctrl_c() => {}
+      }
       if j {
-        print::error(&ApiError::new(ErrorCode::Cancelled, "正在取消远端命令"), true);
-      } else {
-        eprintln!("正在取消，等待远端清理…");
+        print::error(&ApiError::new(ErrorCode::Cancelled, "已中止等待远端命令"), true);
       }
       Err(CliError::Exit(130))
     }

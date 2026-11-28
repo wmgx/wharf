@@ -172,10 +172,7 @@ fn preview(
     }
     value
   };
-  let mut compose: Value = serde_yaml_ng::from_str(&compose)
-    .map_err(|_| {
-      ApiError::invalid("渲染预览不是有效的 Compose YAML")
-    })?;
+  let mut compose = render::parse_compose(&compose)?;
   mask_yaml(&mut compose, &redact);
   Ok(ServiceRenderView {
     service: name.into(),
@@ -219,6 +216,38 @@ mod tests {
     host_access::tests::auth,
   };
   use serde_json::json;
+
+  #[tokio::test]
+  async fn service_render_expands_compose_merge_keys() {
+    let state = crate::rules::tests::test_state();
+    state.db.call(|c| {
+      for (kind, name, spec) in [
+        ("server", "s1", json!({})),
+        ("service", "anchored", json!({"server":"s1", "source":{"compose":{
+          "content":"x-base: &base { image: alpine, command: base }\nservices:\n  web:\n    <<: *base\n    command: local\n"}}})),
+      ] {
+        db::apply_write(c, &Write::Upsert {
+          kind: kind.into(), name: name.into(), spec, meta: json!({}),
+        })?;
+      }
+      Ok(())
+    }).await.unwrap();
+    let result = get(
+      State(state),
+      auth([Perm::Read], false),
+      Path("anchored".into()),
+    )
+    .await
+    .map_err(|error| error.0)
+    .unwrap()
+    .0;
+    let doc: Value =
+      serde_yaml_ng::from_str(&result.compose).unwrap();
+    let web = &doc["services"]["web"];
+    assert_eq!(web["image"].as_str(), Some("alpine"));
+    assert_eq!(web["command"].as_str(), Some("local"));
+    assert!(web.get("<<").is_none());
+  }
 
   #[tokio::test]
   async fn service_render_masks_secret_files_and_scopes_access() {
