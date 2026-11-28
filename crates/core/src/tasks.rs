@@ -2287,10 +2287,12 @@ async fn cancelled_task_history_keeps_previous_failure() {
   let token = guard.bind(id);
   let permissions =
     || auth([Perm::Read, Perm::Apply, Perm::Exec], false);
-  cancel_run(State(state.clone()), permissions(), Path(id))
-    .await
-    .map_err(|error| error.0)
-    .unwrap();
+  let Json(receipt) =
+    cancel_run(State(state.clone()), permissions(), Path(id))
+      .await
+      .map_err(|error| error.0)
+      .unwrap();
+  assert_eq!(receipt["cancelled"], true);
   assert!(token.is_cancelled());
   finish(&state, id, TaskStatus::Cancelled, None, "已手动取消", None)
     .await;
