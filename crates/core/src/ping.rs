@@ -178,18 +178,19 @@ async fn handle(
     matches!(&spec.how, TaskKind::Ping { token: t, .. } if !t.is_empty() && tasks::constant_time_eq(t, token))
   });
   let Some((name, spec, _)) = found else {
-    match heartbeat::has_token(s, token).await {
-      Ok(true) if accept_token(token) => {
+    match heartbeat::service_for_token(s, token).await {
+      Ok(Some(name)) if accept_token(token) => {
         return heartbeat::ping(
           s,
+          &name,
           token,
           status == TaskStatus::Succeeded,
           &body,
         )
         .await;
       }
-      Ok(true) => return LIMITED,
-      Ok(false) => {
+      Ok(Some(_)) => return LIMITED,
+      Ok(None) => {
         if !INVALID
           .lock()
           .unwrap_or_else(|e| e.into_inner())
@@ -210,7 +211,7 @@ async fn handle(
   if !spec.enabled {
     return (StatusCode::FORBIDDEN, "任务已停用\n");
   }
-  let mut output = body;
+  let mut output = body.replace(token, "…");
   if output.len() > MAX_OUTPUT {
     let mut cut = MAX_OUTPUT;
     while !output.is_char_boundary(cut) {
@@ -314,7 +315,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn ping_early_tolerance_rate_limit_and_route_url() {
+  async fn ping_invalid_token_rate_limit() {
     let state = crate::rules::tests::test_state();
     let token = crate::auth::new_token();
     for _ in 0..30 {

@@ -718,6 +718,7 @@ export type TaskStatus =
   "running" | "succeeded" | "failed" | "timed_out" | "skipped";
 
 export interface TaskRunView {
+  service?: string;
   mem_peak?: number;
   id: number;
   task: string;
@@ -730,6 +731,8 @@ export interface TaskRunView {
 }
 
 export interface TaskView {
+  target_server?: string;
+  migrating?: boolean;
   data_bytes?: number;
   name: string;
   spec: TaskSpec;

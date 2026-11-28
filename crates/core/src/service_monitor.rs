@@ -140,6 +140,12 @@ pub fn config_only(old: &ServiceRow, new: &ServiceRow) -> bool {
   if let (Some(old), Some(new)) =
     (&old.spec.heartbeat, &mut stripped.spec.heartbeat)
     && old.token == new.token
+    && (old.targeted == new.targeted
+      || stripped.spec.container.is_none()
+      || !matches!(
+        stripped.spec.source,
+        wharf_api_types::spec::Source::Compose { .. }
+      ))
   {
     new.clone_from(old);
   }
