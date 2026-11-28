@@ -28,6 +28,8 @@ mod files;
 mod fleet;
 mod gh;
 mod lint_cmd;
+mod list_filters;
+mod log_options;
 mod note;
 mod pack;
 mod plan_cmd;
@@ -58,6 +60,9 @@ pub struct Cli {
   /// 输出 JSON（给程序和 AI 用）。
   #[arg(long, global = true)]
   pub json: bool,
+  /// 列表、计划和执行只输出主键，等待时静默。
+  #[arg(short, long, global = true, conflicts_with_all = ["json", "fields", "page_size", "changed"])]
+  pub quiet: bool,
   /// 只输出这些字段，逗号分隔，`a.b` 取嵌套字段，列表按每一项取；隐含 `--json`。
   /// 例：`wharf service list --fields name,status.summary`。
   #[arg(long, global = true)]
@@ -538,6 +543,8 @@ pub struct LogArgs {
   /// 每行最多多少字符，超出截断（筛选时默认 500）。
   #[arg(long)]
   pub max_line: Option<usize>,
+  #[command(flatten)]
+  pub filters: Box<log_options::LogOptions>,
 }
 
 #[derive(Subcommand)]
@@ -552,6 +559,28 @@ pub enum WaitCmd {
   },
   /// 域名从解析到容器各层都通（和 `wharf doctor <域名>` 一样的检查）。
   Route {
+    hostname: String,
+    #[arg(long, default_value = "10m")]
+    timeout: String,
+  },
+  /// 等 agent 在线，且网关、链路和运行中的容器正常。
+  Server {
+    name: String,
+    #[arg(long)]
+    online_only: bool,
+    #[arg(long, default_value = "10m")]
+    timeout: String,
+  },
+  /// 等公共 DNS 解析生效。
+  Dns {
+    hostname: String,
+    #[arg(long)]
+    all: bool,
+    #[arg(long, default_value = "10m")]
+    timeout: String,
+  },
+  /// 等 HTTPS 证书可用。
+  Cert {
     hostname: String,
     #[arg(long, default_value = "10m")]
     timeout: String,
@@ -765,7 +794,7 @@ pub enum ServerCmd {
     #[arg(long)]
     unack: Option<String>,
   },
-  List,
+  List(list_filters::ServerFilters),
   Show {
     name: String,
   },
@@ -985,7 +1014,9 @@ pub enum ServiceCmd {
   /// 从服务容器的网络探测一个目标。
   Probe(probe::ServiceProbeArgs),
   /// 查看服务的代码包来自哪台服务器的哪个目录。
-  Origin { name: String },
+  Origin {
+    name: String,
+  },
   /// 删除未纳管的容器或 Compose 项目。
   UnmanagedRemove {
     server: String,
@@ -1040,10 +1071,7 @@ pub enum ServiceCmd {
     #[arg(long)]
     before: Option<i64>,
   },
-  List {
-    #[arg(long)]
-    brief: bool,
-  },
+  List(list_filters::ServiceFilters),
   Show {
     name: String,
     /// 显示完整的心跳报到地址。
@@ -1062,7 +1090,9 @@ pub enum ServiceCmd {
     command: Vec<String>,
   },
   /// 预览展开后的 Compose，密钥自动打码。
-  Render { name: String },
+  Render {
+    name: String,
+  },
   /// 看日志。可以给多个服务，按时间合在一起看。支持按时间、关键字筛和用 `--errors` 合并同类报错。
   /// 例：`wharf service logs blog --since 2h --errors`、`wharf service logs blog --grep timeout --tail 50`。
   Logs {
@@ -1076,13 +1106,13 @@ pub enum ServiceCmd {
     #[arg(long, num_args = 0..=1, default_missing_value = "1", conflicts_with = "follow")]
     previous: Option<u32>,
     /// 列出当前服务留存的重建前日志。
-    #[arg(long, conflicts_with_all = ["follow", "previous"])]
+    #[arg(long, conflicts_with_all = ["follow", "previous", "until", "exclude", "regex", "after_context", "before_context", "context", "where_exprs", "cols"])]
     previous_list: bool,
     /// 最多输出多少行（`--errors` 时是多少种报错）。
     #[arg(long, default_value_t = 200)]
     tail: u32,
     /// 持续输出单个服务的新日志，Ctrl-C 结束。不能与时间范围、关键字、报错筛选或行长限制同用。
-    #[arg(short, long, conflicts_with_all = ["since", "grep", "errors", "max_line"])]
+    #[arg(short, long, conflicts_with_all = ["since", "grep", "errors", "max_line", "until", "exclude", "regex", "after_context", "before_context", "context", "where_exprs", "cols"])]
     follow: bool,
     /// 只看这段时间内的：30m、2h、3d，或 RFC 3339 时间。
     #[arg(long)]
@@ -1096,13 +1126,16 @@ pub enum ServiceCmd {
     /// 每行最多多少字符，超出截断（筛选时默认 500）。
     #[arg(long)]
     max_line: Option<usize>,
+    #[command(flatten)]
+    filters: Box<log_options::LogOptions>,
   },
   /// 列出服务数据目录（`/srv/<服务>/`）里的文件。例：`wharf service files blog config`。
+  #[command(args_conflicts_with_subcommands = true)]
   Files {
-    name: String,
-    /// 数据目录下的相对路径，不给是根目录。
-    #[arg(default_value = "")]
-    path: String,
+    #[command(subcommand)]
+    cmd: Option<files::FilesCmd>,
+    name: Option<String>,
+    path: Option<String>,
   },
   /// 从服务数据目录下载一个文件。例：`wharf service download blog config/app.ini -o app.ini`。
   Download {
@@ -1123,7 +1156,9 @@ pub enum ServiceCmd {
     path: String,
   },
   /// 部署历史。
-  History { name: String },
+  History {
+    name: String,
+  },
   /// 设置备注，直接生效。
   Note {
     name: String,
@@ -1197,7 +1232,9 @@ pub enum ServiceCmd {
     apply: ApplyFlags,
   },
   /// 列出服务器上还没纳管的容器（compose 项目或 `docker run` 起的容器）。
-  Discover { server: String },
+  Discover {
+    server: String,
+  },
   /// 把服务器上已有的 compose 项目或容器导入成服务。
   Import {
     server: String,
@@ -1433,7 +1470,7 @@ pub enum ServiceCmd {
 
 #[derive(Subcommand)]
 pub enum GatewayCmd {
-  List,
+  List(list_filters::GatewayFilters),
   Show {
     name: String,
   },
@@ -1581,7 +1618,7 @@ pub enum GatewayCmd {
 
 #[derive(Subcommand)]
 pub enum RouteCmd {
-  List,
+  List(list_filters::RouteFilters),
   /// 查看主备状态，或手动切备、切回、解除锁定。
   Failover {
     hostname: String,
@@ -2119,6 +2156,8 @@ pub enum RunCmd {
     /// 每行最多多少字符。
     #[arg(long)]
     max_line: Option<usize>,
+    #[command(flatten)]
+    search: Box<log_options::SearchArgs>,
   },
   /// 等待执行结束。
   Wait {
@@ -2235,10 +2274,80 @@ fn wants_json() -> bool {
     })
 }
 
+fn quiet_supported(
+  app: &clap::Command,
+  matches: &clap::ArgMatches,
+) -> bool {
+  let mut path = Vec::new();
+  let mut cmd = app;
+  let mut args = matches;
+  while let Some((sub, nested)) = args.subcommand() {
+    path.push(sub);
+    cmd = cmd.find_subcommand(sub).expect("已解析的子命令");
+    args = nested;
+  }
+  let flag = |id| {
+    args
+      .try_get_one::<bool>(id)
+      .ok()
+      .flatten()
+      .copied()
+      .unwrap_or_default()
+  };
+  if flag("print_dockerfile") || flag("detect_only") {
+    return false;
+  }
+  if path == ["gateway", "rotate-link"]
+    || matches!(path.as_slice(), ["secret", "rotate" | "rollback"])
+  {
+    return flag("apply");
+  }
+  if cmd.get_arguments().any(|arg| arg.get_id() == "apply")
+    && cmd.get_arguments().any(|arg| arg.get_id() == "note")
+  {
+    return true;
+  }
+  (path == ["backup", "core"] && flag("run"))
+    || matches!(
+      path.as_slice(),
+      ["apply"]
+        | ["wait", _]
+        | ["run", "list" | "retry" | "wait"]
+        | ["service", "files" | "history" | "restart" | "rebuild"]
+        | ["service", "files", "ls"]
+        | ["core", "snapshot", "list"]
+        | ["backup", "run" | "restore" | "list"]
+        | ["alert", "suppress", "list"]
+        | ["task", "ls"]
+        | ["sso", "account", "list"]
+        | ["notify" | "gate", "key", "list"]
+        | [
+          "server"
+            | "service"
+            | "route"
+            | "gateway"
+            | "account"
+            | "edge"
+            | "token"
+            | "secret"
+            | "bookmark"
+            | "external",
+          "list"
+        ]
+        | ["plan", "list"]
+    )
+}
+
 #[tokio::main]
 async fn main() {
-  let mut cli = match Cli::try_parse() {
-    Ok(cli) => cli,
+  use clap::{CommandFactory, FromArgMatches};
+  let app = Cli::command();
+  let parse = app.clone().try_get_matches().and_then(|matches| {
+    let cli = Cli::from_arg_matches(&matches)?;
+    Ok((cli, matches))
+  });
+  let (mut cli, matches) = match parse {
+    Ok(parsed) => parsed,
     Err(err) => {
       use clap::error::ErrorKind;
       if matches!(
@@ -2269,6 +2378,11 @@ async fn main() {
       std::process::exit(1);
     }
   };
+  if cli.quiet && !quiet_supported(&app, &matches) {
+    print::error(&print::quiet_unsupported(), false);
+    std::process::exit(1);
+  }
+  print::set_quiet(cli.quiet);
   if let Some(fields) = &cli.fields {
     print::set_fields(fields);
     cli.json = true;
@@ -2385,5 +2499,74 @@ fn limits_autoupdate_serverset_watchunit_readonly() {
       std::iter::once("wharf").chain(args.iter().copied()),
     );
     assert!(cli.is_ok(), "{args:?}");
+  }
+}
+
+#[cfg(test)]
+mod quiet_arg_tests {
+  use clap::CommandFactory;
+
+  #[test]
+  fn quiet_support_for_21_2_commands() {
+    let app = super::Cli::command();
+    for (args, supported) in [
+      (
+        &["service", "restart", "app", "--container", "db"][..],
+        true,
+      ),
+      (
+        &[
+          "service",
+          "deploy",
+          "app",
+          "--container",
+          "db",
+          "--add-env",
+          "X=1",
+        ][..],
+        true,
+      ),
+      (&["exec", "s1", "--script", "fixture.sh"][..], false),
+      (
+        &["service", "exec", "app", "--script", "fixture.sh"][..],
+        false,
+      ),
+      (&["service", "render", "app"][..], false),
+      (&["service", "logs", "app", "--container", "db"][..], false),
+      (&["task", "set", "fixture"][..], false),
+      (&["task", "enable", "fixture"][..], false),
+      (&["task", "disable", "fixture"][..], false),
+      (&["task", "cancel", "1"][..], false),
+      (&["task", "run", "fixture"][..], false),
+      (&["task", "logs", "fixture", "--run", "1"][..], false),
+    ] {
+      let matches = app
+        .clone()
+        .try_get_matches_from(
+          ["wharf", "-q"].into_iter().chain(args.iter().copied()),
+        )
+        .unwrap();
+      assert_eq!(
+        super::quiet_supported(&app, &matches),
+        supported,
+        "{args:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn quiet_rejects_json_and_unsupported_commands_before_dispatch() {
+    let app = super::Cli::command();
+    let parse =
+      |args: &[&str]| app.clone().try_get_matches_from(args);
+    assert!(
+      parse(&["wharf", "service", "list", "-q", "--json"]).is_err()
+    );
+    let status = parse(&["wharf", "status", "-q"]).unwrap();
+    assert!(!super::quiet_supported(&app, &status));
+    let plan = parse(&["wharf", "-q", "plan"]).unwrap();
+    assert!(super::quiet_supported(&app, &plan));
+    let plans = parse(&["wharf", "plan", "list", "-q"]).unwrap();
+    assert!(super::quiet_supported(&app, &plans));
   }
 }

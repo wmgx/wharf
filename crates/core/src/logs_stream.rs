@@ -123,6 +123,7 @@ fn follow(
           tail,
           follow: true,
           since: None,
+          until: None,
         },
         FOLLOW_TIMEOUT,
         Some(progress),

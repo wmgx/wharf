@@ -7,8 +7,15 @@ use std::{
   time::Duration,
 };
 
+use clap::Subcommand;
 use serde_json::{Value, json};
-use wharf_api_types::{ApiError, agent::FileEntry};
+use wharf_api_types::{
+  ApiError,
+  agent::{
+    FileEntry, FileGrepResult, FileMkdirResult, FileMvResult,
+    FileRmResult, FileTailResult,
+  },
+};
 
 use crate::{
   client::{CliResult, Client, seg},
@@ -19,6 +26,171 @@ use crate::{
 const MAX_UPLOAD: u64 = 100 << 20;
 pub(crate) const DOWNLOAD_TIMEOUT: Duration =
   Duration::from_secs(30 * 60);
+
+#[derive(Subcommand)]
+pub enum FilesCmd {
+  /// 列出目录内容。
+  Ls {
+    name: String,
+    #[arg(default_value = "")]
+    path: String,
+  },
+  /// 查看文本文件的末尾。
+  Tail {
+    name: String,
+    path: String,
+    #[arg(short = 'n', long, default_value_t = 100)]
+    lines: u32,
+  },
+  /// 在指定文件或目录内搜索文本。
+  Grep {
+    name: String,
+    pattern: String,
+    #[arg(default_value = "")]
+    path: String,
+    #[arg(long)]
+    regex: bool,
+    #[arg(long, default_value_t = 100)]
+    limit: u32,
+  },
+  /// 删除文件或目录，需要 exec 权限。
+  Rm {
+    name: String,
+    path: String,
+    #[arg(short, long)]
+    recursive: bool,
+  },
+  /// 在同一服务目录内移动文件或目录，需要 exec 权限。
+  Mv {
+    name: String,
+    from: String,
+    to: String,
+    #[arg(long)]
+    force: bool,
+  },
+  /// 建目录，需要 exec 权限。
+  Mkdir {
+    name: String,
+    path: String,
+    #[arg(short, long)]
+    parents: bool,
+  },
+}
+
+pub async fn run(
+  c: &Client,
+  cmd: FilesCmd,
+  j: bool,
+) -> CliResult<()> {
+  let base =
+    |name: &str| format!("/api/services/{}/files", seg(name));
+  match cmd {
+    FilesCmd::Ls { name, path } => {
+      return list(c, &name, &path, j).await;
+    }
+    FilesCmd::Tail { name, path, lines } => {
+      let r: FileTailResult = c
+        .get(&format!(
+          "{}/tail?path={}&lines={lines}",
+          base(&name),
+          seg(&path)
+        ))
+        .await?;
+      out(j, &r, |r| {
+        print!("{}", r.content);
+        if r.truncated {
+          eprintln!("已按大小上限截断");
+        }
+      });
+    }
+    FilesCmd::Grep {
+      name,
+      pattern,
+      path,
+      regex,
+      limit,
+    } => {
+      let r: FileGrepResult = c
+        .get(&format!(
+          "{}/grep?path={}&pattern={}&regex={regex}&limit={limit}",
+          base(&name),
+          seg(&path),
+          seg(&pattern)
+        ))
+        .await?;
+      out(j, &r, |r| {
+        for hit in &r.matches {
+          println!("{}:{}: {}", hit.path, hit.line, hit.text);
+        }
+        eprintln!(
+          "命中 {} 处（扫了 {} 个文件，跳过二进制 {} 个、超大文件 {} 个、软链 {} 个）",
+          r.matches.len(),
+          r.scanned_files,
+          r.skipped_binary,
+          r.skipped_large,
+          r.skipped_links
+        );
+        if r.truncated {
+          eprintln!("搜索达到上限");
+        }
+      });
+    }
+    FilesCmd::Rm {
+      name,
+      path,
+      recursive,
+    } => {
+      let r: FileRmResult = c
+        .delete(&format!(
+          "{}?path={}&recursive={recursive}",
+          base(&name),
+          seg(&path)
+        ))
+        .await?;
+      out(j, &r, |r| {
+        println!("已删除 {name}:{}（{} 项）", r.path, r.removed)
+      });
+    }
+    FilesCmd::Mv {
+      name,
+      from,
+      to,
+      force,
+    } => {
+      let r: FileMvResult = c
+        .post(
+          &format!("{}/mv", base(&name)),
+          &json!({ "from": from, "to": to, "force": force }),
+        )
+        .await?;
+      out(j, &r, |r| println!("已移动 {name}:{} → {}", r.from, r.to));
+    }
+    FilesCmd::Mkdir {
+      name,
+      path,
+      parents,
+    } => {
+      let r: FileMkdirResult = c
+        .post(
+          &format!("{}/mkdir", base(&name)),
+          &json!({ "path": path, "parents": parents }),
+        )
+        .await?;
+      out(j, &r, |r| {
+        println!(
+          "{} {name}:{}",
+          if r.created {
+            "已创建目录"
+          } else {
+            "目录已存在"
+          },
+          r.path
+        )
+      });
+    }
+  }
+  Ok(())
+}
 
 pub async fn list(
   c: &Client,

@@ -17,6 +17,8 @@ async fn fixture_cli() {
     Cli::try_parse_from(std::iter::once("wharf".into()).chain(args))
       .unwrap();
   let client = Client::test_endpoint(endpoint);
+  print::set_quiet(cli.quiet);
+  println!("WHARF_FIXTURE_STDOUT");
   if let Some(fields) = &cli.fields {
     print::set_fields(fields);
   }
@@ -49,6 +51,20 @@ async fn fixture_requests(
   args: &[&str],
   replies: Vec<(&'static str, Value)>,
 ) -> (i32, Value, Vec<Value>) {
+  let (code, stdout, stderr, requests) =
+    fixture_output(args, replies).await;
+  let json =
+    &stdout[stdout.find(['{', '[']).unwrap_or(stdout.len())..];
+  let value = serde_json::from_str(json).unwrap_or_else(|error| {
+    panic!("{error}: {stdout:?}, stderr={stderr:?}")
+  });
+  (code, value, requests)
+}
+
+async fn fixture_output(
+  args: &[&str],
+  replies: Vec<(&'static str, Value)>,
+) -> (i32, String, String, Vec<Value>) {
   let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
   let endpoint = format!("http://{}", listener.local_addr().unwrap());
   let server = async move {
@@ -102,6 +118,11 @@ async fn fixture_requests(
     .env("WHARF_FIXTURE_CLI_ENDPOINT", endpoint)
     .env("WHARF_FIXTURE_CLI_ARGS", json!(args).to_string())
     .kill_on_drop(true);
+  if args.starts_with(&["secret", "rotate"]) {
+    let input = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(input.path(), "fixture-value\n").unwrap();
+    child.stdin(input.reopen().unwrap());
+  }
   let (output, requests) =
     tokio::time::timeout(Duration::from_secs(10), async {
       let output = child.output();
@@ -124,15 +145,20 @@ async fn fixture_requests(
     .unwrap();
   let output = output.unwrap();
   let stdout = String::from_utf8(output.stdout).unwrap();
-  let json =
-    &stdout[stdout.find(['{', '[']).unwrap_or(stdout.len())..];
-  let value = serde_json::from_str(json).unwrap_or_else(|error| {
-    panic!(
-      "{error}: {stdout:?}, stderr={:?}",
-      String::from_utf8_lossy(&output.stderr)
-    )
-  });
-  (output.status.code().unwrap(), value, requests)
+  let (_, stdout) = stdout
+    .split_once("WHARF_FIXTURE_STDOUT\n")
+    .unwrap_or_else(|| {
+      panic!(
+        "CLI 未执行分发：{stdout:?}, stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+      )
+    });
+  (
+    output.status.code().unwrap(),
+    stdout.to_owned(),
+    String::from_utf8(output.stderr).unwrap(),
+    requests,
+  )
 }
 
 fn service_view() -> Value {
@@ -572,4 +598,90 @@ async fn artifact_download_returns_manifest_fields() {
   assert_eq!(code, 0);
   assert_eq!(body["artifacts"], artifacts);
   assert_eq!(std::fs::read(file).unwrap(), b"123");
+}
+
+#[tokio::test]
+async fn quiet_secret_rotation_finishes_apply_or_exits_silently() {
+  for (action, endpoint, status, exit) in [
+    (
+      "rotate",
+      "POST /api/secrets/KEY/rotate ",
+      Some("succeeded"),
+      0,
+    ),
+    (
+      "rollback",
+      "POST /api/secrets/KEY/rollback ",
+      Some("failed"),
+      4,
+    ),
+    ("rollback", "POST /api/secrets/KEY/rollback ", None, 0),
+  ] {
+    let mut replies = vec![(
+      endpoint,
+      json!({
+        "secret": {"name": "KEY", "updated_at": "2026-11-28T00:00:00Z"},
+        "needs_plan": status.is_some(), "affected_services": [],
+        "affected_gateways": [], "other_refs": [], "suggest": []
+      }),
+    )];
+    if let Some(status) = status {
+      replies.extend([
+        ("POST /api/plan ", plan_response()),
+        ("POST /api/apply ", json!({"run_id": "r_fixture"})),
+        ("GET /api/runs/r_fixture ", run_response(status)),
+      ]);
+    }
+    let (code, stdout, stderr, _) = fixture_output(
+      &["secret", action, "KEY", "--apply", "-q"],
+      replies,
+    )
+    .await;
+    assert_eq!(code, exit, "{action}: {stderr}");
+    assert_eq!(
+      stdout,
+      if status.is_some() { "r_fixture\n" } else { "" }
+    );
+    assert!(stderr.is_empty(), "{stderr}");
+  }
+}
+
+#[tokio::test]
+async fn quiet_history_prints_deployment_id() {
+  let (code, stdout, stderr, _) = fixture_output(
+    &["service", "history", "app", "-q"],
+    vec![("GET /api/services/app/deployments ", json!([{
+      "id": 42, "run_id": "r_fixture", "service": "app", "server": "s1",
+      "compose": "", "hash": "", "images": [], "created_at": "2026-11-28T00:00:00Z"
+    }]))],
+  ).await;
+  assert_eq!(code, 0, "{stderr}");
+  assert_eq!(stdout, "42\n");
+}
+
+#[tokio::test]
+async fn quiet_import_and_link_rotation_print_only_ids() {
+  let (code, stdout, stderr, _) = fixture_output(
+    &["service", "import", "s1", "--project", "app", "--print", "-q"],
+    vec![
+      ("POST /api/import ", json!({
+        "name": "app", "spec": {"server": "s1", "source": {"compose": {"content": "services: {}"}}},
+        "warnings": ["导入提醒"]
+      })),
+      ("POST /api/plan ", plan_response()),
+    ],
+  ).await;
+  assert_eq!(code, 0, "{stderr}");
+  assert_eq!(stdout, "p_fixture\n");
+  let (code, stdout, stderr, _) = fixture_output(
+    &["gateway", "rotate-link", "gw", "--apply", "-q"],
+    vec![
+      ("POST /api/gateways/gw/link/rotate ", json!({"gateway": "gw", "server": "s1", "rotated_token": true})),
+      ("POST /api/plan ", plan_response()),
+      ("POST /api/apply ", json!({"run_id": "r_fixture"})),
+      ("GET /api/runs/r_fixture ", run_response("succeeded")),
+    ],
+  ).await;
+  assert_eq!(code, 0, "{stderr}");
+  assert_eq!(stdout, "r_fixture\n");
 }
