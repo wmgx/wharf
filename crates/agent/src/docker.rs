@@ -1358,7 +1358,7 @@ impl Docker {
       .compose(project)
       .arg("restart")
       .args(args)
-      .timeout(Duration::from_secs(180))
+      .timeout(stop_timeout(self.grace_secs(project)))
       .stream(true)
       .run(ctx)
       .await?

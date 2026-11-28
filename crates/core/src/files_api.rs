@@ -296,10 +296,24 @@ async fn read_v2<T: serde::de::DeserializeOwned>(
   name: &str,
   op: FilesOp,
 ) -> Result<(T, Vec<String>), ApiError> {
-  let snap = snapshot::load(&s.db).await?;
-  let server = snapshot::service_runtime_server(&snap, name)
+  read_from_snapshot(s, &snapshot::load(&s.db).await?, name, op).await
+}
+
+pub(super) async fn read_from_snapshot<
+  T: serde::de::DeserializeOwned,
+>(
+  s: &AppState,
+  snap: &snapshot::Snapshot,
+  name: &str,
+  op: FilesOp,
+) -> Result<(T, Vec<String>), ApiError> {
+  let server = snapshot::service_runtime_server(snap, name)
     .ok_or_else(|| service_not_found(name))?;
-  let conn = s.hub.files_v2_conn_id(server, "文件查看")?;
+  let conn = if matches!(op, FilesOp::ExtraLog { .. }) {
+    s.hub.extra_logs_conn_id(server)?
+  } else {
+    s.hub.files_v2_conn_id(server, "文件查看")?
+  };
   let mut values: Vec<_> = snap
     .render_values(&snap.world, name)
     .into_values()

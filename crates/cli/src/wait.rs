@@ -9,10 +9,9 @@ use serde_json::json;
 use wharf_api_types::{
   ApiError, ErrorCode,
   external::{DnsCheck, DnsVerdict},
-  service_checks::PortCheckSpec,
   view::{
-    Actual, CertState, CertStatus, CheckStatus, DoctorReport, Health,
-    Issue, IssueLevel, ServerView, ServiceView, Status,
+    CertState, CertStatus, CheckStatus, DoctorReport, Issue,
+    IssueLevel, ServerView, ServiceView, Status,
   },
 };
 
@@ -45,78 +44,6 @@ pub fn parse_timeout(s: &str) -> Result<Duration, String> {
 
 /// 一次检查的结果：满足了没有，以及现在的情况（一句话）。
 type Check = (bool, String);
-
-fn service_base(v: &ServiceView) -> Check {
-  let Some(st) = &v.status else {
-    return (false, "还查不到现状".into());
-  };
-  let synced = st
-    .desired_hash
-    .as_ref()
-    .is_none_or(|d| st.actual_hash.as_ref() == Some(d));
-  let ok = if st.want_running {
-    st.actual == Actual::Running
-      && matches!(st.health, Health::Healthy | Health::None)
-      && synced
-  } else {
-    st.actual == Actual::Stopped
-  };
-  (ok, st.summary.clone())
-}
-
-fn fresh_monitor(
-  v: &ServiceView,
-) -> Option<&wharf_api_types::view::MonitorView> {
-  let monitor = v.monitor.as_ref()?;
-  v.status
-    .as_ref()
-    .and_then(|status| status.applied.as_ref())
-    .is_none_or(|a| monitor.at >= a.at.timestamp_millis())
-    .then_some(monitor)
-}
-
-fn pending_port(v: &ServiceView) -> Option<&str> {
-  if v.port_checks_supported == Some(false) {
-    return None;
-  }
-  v.spec.ports.iter().find_map(|p| {
-    let enabled = match v.spec.port_checks.get(&p.name) {
-      Some(PortCheckSpec::Off) => false,
-      None => !p.udp,
-      _ => true,
-    };
-    (enabled
-      && (v.host_ports.contains_key(&p.name) || p.host.is_some())
-      && v.port_checks.get(&p.name) != Some(&true))
-    .then_some(p.name.as_str())
-  })
-}
-
-fn service_ready(v: &ServiceView) -> Check {
-  let base = service_base(v);
-  if !base.0 || !v.status.as_ref().is_some_and(|st| st.want_running) {
-    return base;
-  }
-  if v.spec.monitor.is_some() {
-    match fresh_monitor(v) {
-      Some(m) if !m.ok => return (false, m.detail.clone()),
-      Some(_) => {}
-      None => return (false, "等待自定义监控结果".into()),
-    }
-  }
-  if let Some(port) = pending_port(v) {
-    return (false, format!("端口 {port} 尚未通过探测"));
-  }
-  base
-}
-
-fn needs_service_probe(v: &ServiceView) -> bool {
-  service_base(v).0
-    && v.status.as_ref().is_some_and(|st| st.want_running)
-    && ((v.spec.monitor.is_some()
-      && !fresh_monitor(v).is_some_and(|m| m.ok))
-      || pending_port(v).is_some())
-}
 
 fn route_pending(report: &DoctorReport) -> Result<(), Vec<String>> {
   if report.routes.is_empty() {
@@ -282,12 +209,12 @@ async fn check(c: &Client, cmd: &WaitCmd) -> CliResult<Check> {
       let name = crate::client::seg(name);
       let path = format!("/api/services/{name}");
       let v: ServiceView = c.get(&path).await?;
-      if needs_service_probe(&v) {
+      if v.needs_service_probe() {
         let _: DoctorReport =
           c.get(&format!("/api/doctor?service={name}")).await?;
-        service_ready(&c.get(&path).await?)
+        c.get::<ServiceView>(&path).await?.service_ready()
       } else {
-        service_ready(&v)
+        v.service_ready()
       }
     }
     WaitCmd::Route { hostname, .. } => {
@@ -574,7 +501,7 @@ mod tests {
 
   #[test]
   fn service_unsynced_when_actual_hash_missing() {
-    assert!(!service_base(&service_fixture()).0);
+    assert!(!service_fixture().base_readiness().0);
   }
 
   #[test]
@@ -595,17 +522,17 @@ mod tests {
       .unwrap(),
     );
     service.port_checks.insert("http".into(), false);
-    assert!(!service_ready(&service).0);
+    assert!(!service.service_ready().0);
     service.monitor.as_mut().unwrap().at = 1000;
-    assert!(!service_ready(&service).0);
+    assert!(!service.service_ready().0);
     service.port_checks.insert("http".into(), true);
-    assert!(service_ready(&service).0);
+    assert!(service.service_ready().0);
     service.monitor.as_mut().unwrap().ok = false;
-    assert!(!service_ready(&service).0);
-    assert!(needs_service_probe(&service));
+    assert!(!service.service_ready().0);
+    assert!(service.needs_service_probe());
     service.monitor.as_mut().unwrap().ok = true;
-    assert!(service_ready(&service).0);
-    assert!(!needs_service_probe(&service));
+    assert!(service.service_ready().0);
+    assert!(!service.needs_service_probe());
   }
 
   #[test]
@@ -614,12 +541,12 @@ mod tests {
     let status = service.status.as_mut().unwrap();
     status.actual_hash = status.desired_hash.clone();
     service.spec.monitor = None;
-    assert!(!service_ready(&service).0);
+    assert!(!service.service_ready().0);
     service.port_checks_supported = Some(true);
-    assert!(needs_service_probe(&service));
+    assert!(service.needs_service_probe());
     service.port_checks_supported = Some(false);
-    assert!(service_ready(&service).0);
-    assert!(!needs_service_probe(&service));
+    assert!(service.service_ready().0);
+    assert!(!service.needs_service_probe());
   }
 
   #[test]

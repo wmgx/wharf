@@ -21,6 +21,7 @@ mod connect;
 mod core_export;
 mod data_cleanup;
 mod data_sync;
+mod defaults;
 mod deploy;
 mod describe;
 mod dotenv;
@@ -255,7 +256,7 @@ pub enum Command {
     #[command(flatten)]
     build: BuildOpts,
     #[command(flatten)]
-    ops: DeployOps,
+    ops: Box<DeployOps>,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -370,6 +371,8 @@ pub enum Command {
     #[command(subcommand)]
     cmd: Option<config_cmd::ConfigCmd>,
   },
+  /// 查看或修改新建服务的默认值。
+  Defaults(Box<defaults::Args>),
   /// 宿主机终端和命令执行审计。
   ShellLog {
     #[arg(long)]
@@ -439,6 +442,9 @@ pub enum Command {
     /// 文件是局部的：没写到的服务、网关、路由保持原样，不会被删除。
     #[arg(long, requires = "file")]
     partial: bool,
+    /// 跳过新建模板及已有的冻结值。
+    #[arg(long, requires = "file")]
+    no_defaults: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -549,8 +555,29 @@ pub enum CoreSnapshotCmd {
 
 #[derive(Args)]
 pub struct DeployOps {
+  /// 新建时跳过服务默认值。
+  #[arg(long)]
+  pub no_defaults: bool,
   #[command(flatten)]
   pub runtime: Box<runtime_options::RuntimeOptions>,
+  /// 启动前等待，写作 KEY=service:NAME、KEY=tcp:NAME.PORT 或 KEY=dns:HOST。
+  #[arg(long, conflicts_with = "clear_wait_for")]
+  pub add_wait_for: Vec<String>,
+  #[arg(long, conflicts_with = "clear_wait_for")]
+  pub rm_wait_for: Vec<String>,
+  #[arg(long)]
+  pub clear_wait_for: bool,
+  #[arg(long, conflicts_with = "unset_wait_for_timeout")]
+  pub wait_for_timeout: Option<u32>,
+  #[arg(long)]
+  pub unset_wait_for_timeout: bool,
+  /// 声明服务托管目录中的日志文件，可多次使用。
+  #[arg(long, conflicts_with = "clear_extra_logs")]
+  pub add_extra_log: Vec<String>,
+  #[arg(long, conflicts_with = "clear_extra_logs")]
+  pub rm_extra_log: Vec<String>,
+  #[arg(long)]
+  pub clear_extra_logs: bool,
   /// 优雅停机等待秒数（1 到 600），0 恢复 Docker 默认。
   #[arg(long)]
   pub stop_grace: Option<u32>,
@@ -1185,6 +1212,22 @@ pub enum ServiceCmd {
   Render {
     name: String,
   },
+  /// 查看或修改服务的定时重启。
+  RestartSchedule {
+    name: String,
+    #[arg(long, conflicts_with = "off")]
+    cron: Option<String>,
+    #[arg(long, action = clap::ArgAction::Set, conflicts_with = "off")]
+    skip_if_stopped: Option<bool>,
+    #[arg(long, conflicts_with_all = ["off", "unset_catch_up"])]
+    catch_up: Option<u32>,
+    #[arg(long, conflicts_with = "off")]
+    unset_catch_up: bool,
+    #[arg(long)]
+    off: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
+  },
   /// 为已停止且依赖可核实的服务生成改名计划。
   Rename {
     source: String,
@@ -1212,6 +1255,9 @@ pub enum ServiceCmd {
     /// 服务名，可给 1～10 个。
     #[arg(required = true, num_args = 1..=10)]
     names: Vec<String>,
+    /// 仅看这个已声明的日志文件。
+    #[arg(long, conflicts_with_all = ["follow", "container", "previous", "previous_list"])]
+    file: Option<String>,
     /// 仅看指定 Compose 子容器。
     #[arg(long, conflicts_with_all = ["previous", "previous_list"])]
     container: Option<String>,

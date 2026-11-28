@@ -223,6 +223,10 @@ fn merge_settings(
       .filter(|v| v.host_path.is_some())
       .cloned(),
   );
+  spec.extra_logs.clone_from(&current.extra_logs);
+  spec.wait_for.clone_from(&current.wait_for);
+  spec.wait_for_timeout_secs = current.wait_for_timeout_secs;
+  spec.restart_schedule.clone_from(&current.restart_schedule);
   spec.stop_grace_secs = current.stop_grace_secs;
   spec.stop_signal.clone_from(&current.stop_signal);
   spec.init_cmd.clone_from(&current.init_cmd);
@@ -468,6 +472,7 @@ mod tests {
     let mut world = crate::world::World::default();
     world
       .apply_changes(&[Change::UpsertService {
+        no_defaults: false,
         name: "app".into(),
         spec: spec.clone(),
         adopt: None,
@@ -514,6 +519,7 @@ mod tests {
     let mut world = crate::world::World::default();
     world
       .apply_changes(&[Change::UpsertService {
+        no_defaults: false,
         name: "app".into(),
         spec: spec.clone(),
         adopt: None,
@@ -649,6 +655,7 @@ mod tests {
     })).unwrap();
     spec.heartbeat.as_mut().unwrap().token = crate::auth::new_token();
     let change = |spec| Change::UpsertService {
+      no_defaults: false,
       name: "app".into(),
       spec,
       adopt: None,

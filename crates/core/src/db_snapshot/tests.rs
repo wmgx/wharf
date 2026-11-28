@@ -28,6 +28,9 @@ fn test_plan(address: &str, impact: Impact) -> Plan {
     reason: String::new(),
     changes: vec![],
     host_access: vec![],
+    dependents: vec![],
+    hidden_dependents: 0,
+    stopping_service: false,
   };
   let needs_confirm = if item.needs_confirm() {
     vec![address.into()]

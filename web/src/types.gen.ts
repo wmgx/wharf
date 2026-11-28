@@ -617,6 +617,7 @@ export type Change = {
   commit?: string | null;
   migrate?: MigrateOptions | null;
   name: string;
+  no_defaults?: boolean;
   op: "upsert_service";
   pins?: Record<string, string> | null;
   spec: ServiceSpec;
@@ -984,6 +985,15 @@ export interface DbSnapshotInfo {
   size_bytes: number;
   trigger: string;
 }
+
+export interface Dependent {
+  address: string;
+  disposition: DependentDisposition;
+  field: string;
+  kind: string;
+}
+
+export type DependentDisposition = "retained" | "detached" | "removed" | "stopping";
 
 export interface DeploymentView {
   /**
@@ -2325,6 +2335,8 @@ export interface PlanItem {
    * 修改时具体改了哪些字段，由 `before`、`after` 算出。旧计划里没有。
    */
   changes?: FieldChange[];
+  dependents?: Dependent[];
+  hidden_dependents?: number;
   /**
    * 触达宿主机的原因；非空时 apply 阶段需要 host 权限且目标服务器开启对应开关。旧计划里没有。
    */
@@ -2336,6 +2348,7 @@ export interface PlanItem {
   impacts: Impact[];
   layer: Layer;
   reason: string;
+  stopping_service?: boolean;
 }
 
 export type PlanStatus = "pending" | "applied" | "expired";
@@ -2539,6 +2552,12 @@ export interface ResolvedImage {
    * 镜像支持的平台，例如 `linux/amd64`。
    */
   platforms?: string[] | null;
+}
+
+export interface RestartSchedule {
+  catch_up_mins?: number | null;
+  cron: string;
+  skip_if_stopped: boolean;
 }
 
 /**
@@ -2877,6 +2896,7 @@ export interface ServerSettings {
    * 构建时传给内置模板的参数，例如 `PIP_INDEX_URL`、`GOPROXY`（国内机器配镜像源）。
    */
   build_env?: Record<string, string>;
+  defaults?: ServiceDefaults | null;
   /**
    * 这台提供出口：agent 在内网地址上起 HTTP 代理（要口令），规则决定哪些域名经它出去。
    */
@@ -3054,6 +3074,12 @@ export interface ServiceData {
   target?: string | null;
 }
 
+export interface ServiceDefaults {
+  limits?: Limits;
+  log_max?: LogMax | null;
+  timezone?: string | null;
+}
+
 /**
  * 从 `docker run` 命令转出的服务配置草稿，还没选服务器。
  * 端口、环境变量、数据卷、资源上限能表达的转成镜像来源，用了别的参数时转成 compose 来源。
@@ -3159,6 +3185,7 @@ export interface ServiceSpec {
    */
   env?: Record<string, string>;
   extra_hosts?: Record<string, string>;
+  extra_logs?: string[];
   /**
    * 配置文件：内容存在 Wharf 里，部署时放进容器（只读，属主 root），跟着部署历史和回滚走。
    * 应用自己改写的内容下次部署会被覆盖。
@@ -3191,6 +3218,7 @@ export interface ServiceSpec {
   port_checks?: Record<string, PortCheckSpec>;
   ports?: PortSpec[];
   pull_policy?: ImagePullMode | null;
+  restart_schedule?: RestartSchedule | null;
   self_refs?: boolean;
   /**
    * 运行在哪台服务器上。
@@ -3225,6 +3253,8 @@ export interface ServiceSpec {
   use_egress?: boolean;
   user?: string | null;
   volumes?: VolumeSpec[];
+  wait_for?: Record<string, WaitCondition>;
+  wait_for_timeout_secs?: number | null;
 }
 
 /**
@@ -3825,3 +3855,15 @@ export interface VolumeSpec {
   read_only?: boolean;
   target: string;
 }
+
+export type WaitCondition = {
+  kind: "service";
+  service: string;
+} | {
+  kind: "tcp";
+  port: string;
+  service: string;
+} | {
+  host: string;
+  kind: "dns";
+};

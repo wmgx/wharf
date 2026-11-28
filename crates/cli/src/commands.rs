@@ -435,7 +435,7 @@ async fn dispatch_command(
           opts: build,
           ..Default::default()
         }),
-        ops: Box::new(ops),
+        ops,
         apply,
       };
       service(c, cmd, j).await
@@ -607,6 +607,9 @@ async fn dispatch_command(
     Command::Tree(args) => crate::catalog::tree(c, args, j).await,
     Command::Lint(args) => crate::lint_cmd::run(c, args, j).await,
     Command::Search(args) => crate::catalog::search(c, args, j).await,
+    Command::Defaults(args) => {
+      crate::defaults::run(c, *args, j).await
+    }
     Command::Config { cmd } => {
       crate::config_cmd::run(c, cmd, j).await
     }
@@ -859,12 +862,14 @@ async fn dispatch_command(
       cmd,
       file,
       partial,
+      no_defaults,
       apply,
     } => {
       if let Some(cmd) = cmd {
         apply.check_read_only()?;
         if file.is_some()
           || partial
+          || no_defaults
           || apply.brief
           || apply.dns_verify.mode().is_some()
         {
@@ -893,11 +898,13 @@ async fn dispatch_command(
           if partial {
             PlanRequest {
               partial: Some(fleet),
+              no_defaults,
               ..Default::default()
             }
           } else {
             PlanRequest {
               fleet: Some(fleet),
+              no_defaults,
               ..Default::default()
             }
           }
@@ -3164,6 +3171,7 @@ async fn service(
       let context = extract_secrets.then(|| ("import", json!(&v)));
       let req = PlanRequest {
         changes: vec![Change::UpsertService {
+          no_defaults: true,
           pins: None,
           commit: None,
           migrate: None,
@@ -3251,6 +3259,7 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: None,
@@ -3324,6 +3333,7 @@ async fn service(
         && target.commit.is_none()
         && matches!(&target.spec.source, Source::Build(build) if build.git.is_some());
       let mut edits = vec![Change::UpsertService {
+        no_defaults: false,
         migrate: None,
         name: name.clone(),
         spec: target.spec,
@@ -3373,6 +3383,7 @@ async fn service(
       tail,
       follow: false,
       container,
+      file,
       previous,
       previous_list,
       since,
@@ -3381,6 +3392,11 @@ async fn service(
       max_line,
       filters,
     } => {
+      if file.is_some() && names.len() != 1 {
+        return Err(
+          ApiError::invalid("--file 每次只能查询一个服务").into(),
+        );
+      }
       if (previous.is_some() || previous_list) && names.len() != 1 {
         return Err(
           ApiError::invalid("查看重建前日志每次只能指定一个服务")
@@ -3432,6 +3448,8 @@ async fn service(
         } else if let Some(container) = container {
           c.require_exec_v2_core().await?;
           path.push_str(&format!("?container={}", seg(&container)));
+        } else if let Some(file) = file {
+          path.push_str(&format!("?file={}", seg(&file)));
         }
         path
       } else {
@@ -3441,6 +3459,73 @@ async fn service(
         )
       };
       show_logs(c, &path, &args, j).await
+    }
+    ServiceCmd::RestartSchedule {
+      name,
+      cron,
+      skip_if_stopped,
+      catch_up,
+      unset_catch_up,
+      off,
+      apply,
+    } => {
+      use wharf_api_types::{
+        spec::RestartSchedule, view::RestartScheduleView,
+      };
+      let base = format!("/api/services/{}", seg(&name));
+      if !(off
+        || cron.is_some()
+        || skip_if_stopped.is_some()
+        || catch_up.is_some()
+        || unset_catch_up)
+      {
+        apply.check_read_only()?;
+        let view: RestartScheduleView =
+          c.get(&format!("{base}/restart-schedule")).await?;
+        out(j, &view, pretty);
+        return Ok(());
+      }
+      let mut spec = c.get::<ServiceView>(&base).await?.spec;
+      if off {
+        spec.restart_schedule = None;
+      } else {
+        let mut schedule =
+          spec.restart_schedule.take().unwrap_or(RestartSchedule {
+            cron: String::new(),
+            skip_if_stopped: true,
+            catch_up_mins: None,
+          });
+        if let Some(cron) = cron {
+          schedule.cron = cron;
+        }
+        if schedule.cron.is_empty() {
+          return Err(
+            ApiError::invalid("用 --cron 设置重启时间表").into(),
+          );
+        }
+        if let Some(skip) = skip_if_stopped {
+          schedule.skip_if_stopped = skip;
+        }
+        if catch_up.is_some() || unset_catch_up {
+          schedule.catch_up_mins = catch_up;
+        }
+        spec.restart_schedule = Some(schedule);
+      }
+      changes(
+        c,
+        vec![Change::UpsertService {
+          no_defaults: false,
+          name,
+          spec,
+          adopt: None,
+          pins: None,
+          commit: None,
+          migrate: None,
+        }],
+        apply,
+        j,
+      )
+      .await
     }
     ServiceCmd::Env(args) => crate::env_sync::run(c, args, j).await,
     ServiceCmd::Files { cmd: Some(cmd), .. } => {
@@ -3552,6 +3637,7 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: None,
@@ -3687,6 +3773,14 @@ async fn service(
           || ops.init_cmd.is_some()
           || ops.unset_init_cmd
           || ops.init_timeout.is_some()
+          || !ops.add_extra_log.is_empty()
+          || !ops.rm_extra_log.is_empty()
+          || ops.clear_extra_logs
+          || !ops.add_wait_for.is_empty()
+          || !ops.rm_wait_for.is_empty()
+          || ops.clear_wait_for
+          || ops.wait_for_timeout.is_some()
+          || ops.unset_wait_for_timeout
           || ops.lan
           || ops.no_lan
           || ops.inherit_lan
@@ -3706,6 +3800,7 @@ async fn service(
           || !ops.unset_volume_owner.is_empty()
           || ops.use_egress
           || ops.no_use_egress
+          || ops.no_defaults
           || ops.runtime.has_edits())
       {
         if let Some(tags) = tags {
@@ -3845,6 +3940,10 @@ async fn service(
             pull_policy: Default::default(),
             log_max: Default::default(),
             container_limits: Default::default(),
+            extra_logs: Vec::new(),
+            wait_for: Default::default(),
+            wait_for_timeout_secs: None,
+            restart_schedule: None,
           }
         }
       };
@@ -3888,6 +3987,75 @@ async fn service(
             &signal,
           )?)
         };
+      }
+      spec.wait_for.retain(|key, _| {
+        !ops.clear_wait_for && !ops.rm_wait_for.contains(key)
+      });
+      for key in &ops.rm_wait_for {
+        wharf_api_types::validate_name("等待条件", key)?;
+      }
+      for raw in &ops.add_wait_for {
+        use wharf_api_types::spec::WaitCondition;
+        let invalid = || {
+          ApiError::invalid(
+            "等待条件须写成 KEY=service:NAME、KEY=tcp:NAME.PORT 或 KEY=dns:HOST",
+          )
+        };
+        let (key, value) = raw.split_once('=').ok_or_else(invalid)?;
+        let (kind, value) =
+          value.split_once(':').ok_or_else(invalid)?;
+        if ops.rm_wait_for.iter().any(|removed| removed == key) {
+          return Err(
+            ApiError::invalid(format!(
+              "不能同时添加和删除等待条件 {key}"
+            ))
+            .into(),
+          );
+        }
+        let condition = match kind {
+          "service" => WaitCondition::Service {
+            service: value.into(),
+          },
+          "tcp" => {
+            let (service, port) =
+              value.split_once('.').ok_or_else(invalid)?;
+            WaitCondition::Tcp {
+              service: service.into(),
+              port: port.into(),
+            }
+          }
+          "dns" => WaitCondition::Dns { host: value.into() },
+          _ => return Err(invalid().into()),
+        };
+        spec.wait_for.insert(key.into(), condition);
+      }
+      if ops.unset_wait_for_timeout || ops.wait_for_timeout.is_some()
+      {
+        spec.wait_for_timeout_secs = ops.wait_for_timeout;
+      }
+      wharf_api_types::spec::validate_wait_for(&spec)?;
+      for path in ops.add_extra_log.iter().chain(&ops.rm_extra_log) {
+        wharf_api_types::spec::validate_extra_log_path(path)?;
+      }
+      if let Some(path) = ops
+        .add_extra_log
+        .iter()
+        .find(|path| ops.rm_extra_log.contains(path))
+      {
+        return Err(
+          ApiError::invalid(format!(
+            "不能同时添加和删除日志文件 {path}"
+          ))
+          .into(),
+        );
+      }
+      spec.extra_logs.retain(|path| {
+        !ops.clear_extra_logs && !ops.rm_extra_log.contains(path)
+      });
+      for path in &ops.add_extra_log {
+        if !spec.extra_logs.contains(path) {
+          spec.extra_logs.push(path.clone());
+        }
       }
       if let Some(secs) = ops.init_timeout {
         spec.init_timeout_secs = (secs != 0).then_some(secs);
@@ -3988,6 +4156,7 @@ async fn service(
       )?;
       let req = PlanRequest {
         changes: std::iter::once(Change::UpsertService {
+          no_defaults: ops.no_defaults || from_run.is_some(),
           name,
           spec,
           adopt: None,
@@ -4076,6 +4245,7 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: bwlimit.map(|value| {
@@ -4141,6 +4311,7 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: None,
@@ -4261,6 +4432,7 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: None,
@@ -4375,6 +4547,7 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: None,
@@ -4501,6 +4674,7 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: None,
@@ -6498,6 +6672,7 @@ async fn backup(
     async move { c.get::<ServiceView>(&url).await }
   };
   let change = |name, spec| Change::UpsertService {
+    no_defaults: false,
     pins: None,
     commit: None,
     migrate: None,

@@ -179,24 +179,20 @@ async fn run_probe(
   has_egress: bool,
 ) -> Result<NetProbeReport, ApiError> {
   let container = job.container.is_some();
-  state.hub.supports_net_probe(server, container)?;
-  let _permit = reserve(server)?;
   // 容器探测还有 ps、inspect、查镜像、启动与失败清理的开销。
   let overhead = if container { 35 } else { 5 };
   let timeout =
     Duration::from_secs(u64::from(job.timeout_secs) + overhead);
   let kind = job.kind;
   let egress = job.egress;
-  let mut result: NetProbeResult = state
-    .hub
-    .call(
-      server,
-      AgentOp::NetProbe(job),
-      timeout,
-      None,
-      &CancellationToken::new(),
-    )
-    .await?;
+  let mut result = agent_probe(
+    state,
+    server,
+    job,
+    timeout,
+    &CancellationToken::new(),
+  )
+  .await?;
 
   let host = url
     .as_ref()
@@ -229,6 +225,62 @@ async fn run_probe(
     certificate: certificate.map(|(info, _)| info),
     result,
   })
+}
+
+async fn agent_probe(
+  state: &AppState,
+  server: &str,
+  job: NetProbeJob,
+  timeout: Duration,
+  cancel: &CancellationToken,
+) -> Result<NetProbeResult, ApiError> {
+  let conn = state
+    .hub
+    .net_probe_conn_id(server, job.container.is_some())?;
+  let _permit = reserve(server)?;
+  state
+    .hub
+    .call_bound(
+      (server, conn),
+      AgentOp::NetProbe(job),
+      timeout,
+      None,
+      cancel,
+    )
+    .await
+}
+
+pub(crate) async fn wait_probe(
+  state: &AppState,
+  server: &str,
+  kind: NetProbeKind,
+  target: String,
+  timeout: Duration,
+  cancel: &CancellationToken,
+) -> Result<(bool, String), ApiError> {
+  let (job, _) = prepare(NetProbeRequest {
+    target,
+    kind: Some(kind),
+    timeout_secs: Some(timeout.as_secs().clamp(1, 5) as u32),
+    egress: None,
+    component: None,
+  })?;
+  let result =
+    agent_probe(state, server, job, timeout, cancel).await?;
+  if let Some(error) = &result.error
+    && error.kind == NetProbeErrorKind::Blocked
+  {
+    return Err(ApiError::invalid(crate::log_redact::redact_text(
+      &error.message,
+    )));
+  }
+  let (ok, _, _) =
+    conclude(kind, false, &result, None, "", false, false);
+  let detail = result.error.map_or_else(
+    || "未返回可用结果".into(),
+    |e| crate::log_redact::redact_text(&e.message),
+  );
+  Ok((ok, detail))
 }
 
 fn prepare(

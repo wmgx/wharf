@@ -28,6 +28,9 @@ pub struct PlanRequest {
   /// 局部期望状态：只新建或修改文件里写到的对象，没写到的不动，也不会删除。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub partial: Option<Fleet>,
+  /// Fleet 或局部 Fleet 跳过新建默认值和冻结值。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub no_defaults: bool,
   /// 计划备注，随计划保存，执行时记进操作记录。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub note: Option<String>,
@@ -203,6 +206,54 @@ pub struct PlanItem {
   /// 触达宿主机的原因；非空时 apply 阶段需要 host 权限且目标服务器开启对应开关。旧计划里没有。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub host_access: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub dependents: Vec<Dependent>,
+  #[serde(default, skip_serializing_if = "count_zero")]
+  pub hidden_dependents: usize,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub stopping_service: bool,
+}
+
+fn count_zero(n: &usize) -> bool {
+  *n == 0
+}
+
+#[derive(
+  Debug,
+  Clone,
+  PartialEq,
+  Eq,
+  PartialOrd,
+  Ord,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+pub struct Dependent {
+  pub address: String,
+  pub kind: String,
+  pub field: String,
+  pub disposition: DependentDisposition,
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  PartialOrd,
+  Ord,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DependentDisposition {
+  Retained,
+  Detached,
+  Removed,
+  Stopping,
 }
 
 /// 配置里改动的一个字段。
@@ -347,14 +398,16 @@ impl PlanItem {
 
   /// 要 `--confirm <address>`：丢数据、覆盖、公开，以及删除服务。
   pub fn needs_confirm(&self) -> bool {
-    self.impacts.iter().any(|i| match i {
-      Impact::DataLoss
-      | Impact::Overwrite
-      | Impact::Public
-      | Impact::Privilege => true,
-      Impact::Remove => self.address.starts_with("service/"),
-      _ => false,
-    })
+    (self.stopping_service
+      && (!self.dependents.is_empty() || self.hidden_dependents > 0))
+      || self.impacts.iter().any(|i| match i {
+        Impact::DataLoss
+        | Impact::Overwrite
+        | Impact::Public
+        | Impact::Privilege => true,
+        Impact::Remove => self.address.starts_with("service/"),
+        _ => false,
+      })
   }
 }
 
@@ -434,7 +487,8 @@ pub fn confirm_details(plan: &Plan, missing: &[&String]) -> Value {
     .map(|item| serde_json::json!({
       "id": item.id, "address": item.address, "layer": item.layer,
       "action": item.action, "impacts": item.impacts, "reason": item.reason,
-      "host_access": item.host_access,
+      "host_access": item.host_access, "dependents": item.dependents,
+      "hidden_dependents": item.hidden_dependents, "stopping_service": item.stopping_service,
     })).collect();
   serde_json::json!({
     "plan_id": plan.plan_id, "expires_at": plan.expires_at, "needs_confirm": missing,
@@ -570,6 +624,9 @@ mod tests {
       reason: String::new(),
       changes: vec![],
       host_access: vec![],
+      dependents: vec![],
+      hidden_dependents: 0,
+      stopping_service: false,
     };
     assert!(item("service/a", vec![Impact::Remove]).needs_confirm());
     // 删除网关、隧道只提示，不用确认。

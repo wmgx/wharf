@@ -200,6 +200,7 @@ pub(crate) async fn plan(
   }
   let mut desired = current.clone();
   desired.apply_changes(&[Change::UpsertService {
+    no_defaults: true,
     name: target.clone(),
     spec,
     adopt: None,
@@ -927,7 +928,7 @@ pub(crate) async fn execute(
         return Err(occupied());
       }
       crate::pending::clear(tx,"clone_data",&job.target)?;
-      let effects = crate::apply::apply_writes(tx,&plan,&[job.write],true)?;
+      let effects = crate::apply::apply_writes(tx,&plan,&[job.write],true,None)?;
       effects.clear_storage(tx)?;
       Ok(())
     })

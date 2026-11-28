@@ -35,6 +35,7 @@ const BACKLOG: usize = 2000;
 pub struct FollowQuery {
   #[serde(default)]
   container: Option<String>,
+  file: Option<String>,
   #[serde(default = "default_tail")]
   tail: u32,
 }
@@ -50,6 +51,12 @@ pub async fn service(
   Query(q): Query<FollowQuery>,
 ) -> Result<Response, AppError> {
   auth.require(Perm::Read)?;
+  if q.file.is_some() {
+    return Err(
+      wharf_api_types::ApiError::invalid("--file 不支持持续跟随")
+        .into(),
+    );
+  }
   let snap = snapshot::load(&s.db).await?;
   let (server, project) =
     crate::multi_logs::service_target(&snap, &name)?;

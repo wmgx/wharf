@@ -179,7 +179,9 @@ pub async fn layer(
     && path.starts_with("/api/")
     && !matches!(path.as_str(), "/api/login" | "/api/setup");
   if rejected
-    || (!skipped && actor.is_some() && should_record(&method, &path))
+    || (!skipped
+      && actor.is_some()
+      && (required || should_record(&method, &path)))
   {
     let (actor, detail) = rejection.map_or_else(
       || (actor.unwrap_or_else(|| "anonymous".into()), detail),

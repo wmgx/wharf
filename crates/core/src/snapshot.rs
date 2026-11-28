@@ -28,6 +28,8 @@ pub const PULL_ATTEMPT_SECS: u64 = 30 * 60;
 #[derive(Default)]
 pub struct Snapshot {
   pub world: World,
+  pub global_defaults: wharf_api_types::spec::ServiceDefaults,
+  pub container_timezone: Option<String>,
   pub core_server: Option<String>,
   pub api_via: Option<String>,
   pub heartbeat_url: Option<String>,
@@ -217,6 +219,8 @@ pub(crate) async fn load_inner(
       Snapshot {
         recovery: crate::crash_guard::load(c, &world)?,
         world,
+        global_defaults: crate::service_defaults::load(c)?,
+        container_timezone: db::setting(c, "core.timezone")?,
         agents,
         core_server,
         api_via: db::setting(c, crate::egress::API_VIA)?,
@@ -1439,6 +1443,7 @@ mod tests {
     world.services.insert(
       "app".to_string(),
       ServiceRow {
+        frozen_defaults: Default::default(),
         host_groups: Default::default(),
         instance_id: "svc_fixture".into(),
         spec,
@@ -1506,9 +1511,23 @@ mod tests {
       serde_json::json!({"compose": {"content": raw}}),
     )
     .unwrap();
-    let old = serde_json::to_value(&*spec).unwrap();
+    let before = serde_json::to_value(&*spec).unwrap();
+    let mut legacy = before.clone();
+    let object = legacy.as_object_mut().unwrap();
+    for key in [
+      "wait_for",
+      "wait_for_timeout_secs",
+      "restart_schedule",
+      "extra_logs",
+    ] {
+      assert!(object.remove(key).is_none());
+    }
+    let restored: wharf_api_types::spec::ServiceSpec =
+      serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(restored).unwrap(), legacy);
     assert!(
-      old.get("tags").is_none() && old.get("crash_guard").is_none()
+      legacy.get("tags").is_none()
+        && legacy.get("crash_guard").is_none()
     );
     spec.tags.insert("试验".into());
     spec.crash_guard = true;

@@ -405,6 +405,7 @@ pub fn service_view(
     .and_then(|states| states.get(name))
     .map(|p| p.containers.clone())
     .unwrap_or_default();
+  let silenced = crate::rules::op_silence::service_busy(state, name);
   Some(ServiceView {
     has_update: false,
     omitted: Default::default(),
@@ -437,15 +438,21 @@ pub fn service_view(
     data: crate::data::observed_mounts(name, &row.spec, history),
     import: import_record(snap, name),
     status,
-    monitor: crate::monitor::last_for(state, snap, name, row),
+    monitor: if silenced {
+      None
+    } else {
+      crate::monitor::last_for(state, snap, name, row)
+    },
     log_alerts: crate::service_monitor::log_views(name, &row.spec),
     port_checks_supported: crate::snapshot::service_runtime_server(
       snap, name,
     )
     .and_then(|server| state.hub.service_checks_support(server)),
-    port_checks: crate::service_monitor::port_views(
-      state, snap, name, row,
-    ),
+    port_checks: if silenced {
+      Default::default()
+    } else {
+      crate::service_monitor::port_views(state, snap, name, row)
+    },
     heartbeat: crate::service_monitor::heartbeat::view(
       snap,
       name,

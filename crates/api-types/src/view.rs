@@ -361,6 +361,82 @@ pub struct ServiceView {
   pub has_update: bool,
 }
 
+impl ServiceView {
+  pub fn base_readiness(&self) -> (bool, String) {
+    let Some(st) = &self.status else {
+      return (false, "还查不到现状".into());
+    };
+    let synced = st
+      .desired_hash
+      .as_ref()
+      .is_none_or(|d| st.actual_hash.as_ref() == Some(d));
+    let ok = if st.want_running {
+      st.actual == Actual::Running
+        && matches!(st.health, Health::Healthy | Health::None)
+        && synced
+    } else {
+      st.actual == Actual::Stopped
+    };
+    (ok, st.summary.clone())
+  }
+
+  fn fresh_monitor(self: &ServiceView) -> Option<&MonitorView> {
+    let monitor = self.monitor.as_ref()?;
+    self
+      .status
+      .as_ref()
+      .and_then(|status| status.applied.as_ref())
+      .is_none_or(|a| monitor.at >= a.at.timestamp_millis())
+      .then_some(monitor)
+  }
+
+  fn pending_port(&self) -> Option<&str> {
+    if self.port_checks_supported == Some(false) {
+      return None;
+    }
+    self.spec.ports.iter().find_map(|p| {
+      let enabled = match self.spec.port_checks.get(&p.name) {
+        Some(crate::service_checks::PortCheckSpec::Off) => false,
+        None => !p.udp,
+        _ => true,
+      };
+      (enabled
+        && (self.host_ports.contains_key(&p.name)
+          || p.host.is_some())
+        && self.port_checks.get(&p.name) != Some(&true))
+      .then_some(p.name.as_str())
+    })
+  }
+
+  pub fn service_ready(&self) -> (bool, String) {
+    let base = self.base_readiness();
+    if !base.0
+      || !self.status.as_ref().is_some_and(|st| st.want_running)
+    {
+      return base;
+    }
+    if self.spec.monitor.is_some() {
+      match self.fresh_monitor() {
+        Some(m) if !m.ok => return (false, m.detail.clone()),
+        Some(_) => {}
+        None => return (false, "等待自定义监控结果".into()),
+      }
+    }
+    if let Some(port) = self.pending_port() {
+      return (false, format!("端口 {port} 尚未通过探测"));
+    }
+    base
+  }
+
+  pub fn needs_service_probe(&self) -> bool {
+    self.base_readiness().0
+      && self.status.as_ref().is_some_and(|st| st.want_running)
+      && ((self.spec.monitor.is_some()
+        && !self.fresh_monitor().is_some_and(|m| m.ok))
+        || self.pending_port().is_some())
+  }
+}
+
 /// 服务的分层状态：期望、已应用、实际、健康、执行，加上按优先级挑出的一句话。
 #[derive(
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
@@ -1808,6 +1884,25 @@ pub enum TaskStatus {
   TimedOut,
   Skipped,
   Cancelled,
+}
+
+#[derive(
+  Debug, Clone, Default, Serialize, Deserialize, JsonSchema,
+)]
+pub struct RestartScheduleView {
+  pub spec: Option<crate::spec::RestartSchedule>,
+  pub next_at: Option<chrono::DateTime<chrono::Utc>>,
+  pub last: Option<RestartScheduleRun>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RestartScheduleRun {
+  pub status: TaskStatus,
+  pub trigger: String,
+  pub due_at: chrono::DateTime<chrono::Utc>,
+  pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+  pub run_id: Option<String>,
+  pub detail: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

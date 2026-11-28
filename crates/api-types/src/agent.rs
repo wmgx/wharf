@@ -216,6 +216,8 @@ pub enum AgentMsg {
     project_files_v2: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     workload_egress_v1: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    extra_logs_v1: bool,
   },
   KeyReady {
     core_public_key: String,
@@ -818,6 +820,11 @@ pub enum FilesOp {
     lines: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_bytes: Option<u32>,
+  },
+  ExtraLog {
+    service: String,
+    path: String,
+    lines: u32,
   },
   Grep {
     service: String,

@@ -131,6 +131,15 @@ pub fn validate(
 
 pub fn config_only(old: &ServiceRow, new: &ServiceRow) -> bool {
   let mut stripped = new.clone();
+  stripped.frozen_defaults.clone_from(&old.frozen_defaults);
+  stripped.spec.wait_for.clone_from(&old.spec.wait_for);
+  stripped.spec.wait_for_timeout_secs =
+    old.spec.wait_for_timeout_secs;
+  stripped
+    .spec
+    .restart_schedule
+    .clone_from(&old.spec.restart_schedule);
+  stripped.spec.extra_logs.clone_from(&old.spec.extra_logs);
   stripped.spec.tags.clone_from(&old.spec.tags);
   stripped.spec.crash_guard = old.spec.crash_guard;
   stripped.spec.log_alerts.clone_from(&old.spec.log_alerts);
@@ -398,9 +407,6 @@ pub fn port_views(
     .applied
     .get(service)
     .map_or(0, |applied| applied.at.timestamp_millis());
-  if rules::op_silence::service_busy(state, service) {
-    return BTreeMap::new();
-  }
   let Some((server, conn_id)) =
     probe_server(state, snap, service, row)
   else {

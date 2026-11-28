@@ -492,6 +492,7 @@ pub async fn restart_now(
       title,
       crate::planner::Step::ServiceRestart {
         service: name,
+        scheduled: None,
         container,
       },
       Some(crate::apply::format_actor(&auth)),
@@ -533,6 +534,7 @@ mod tests {
     snap.world.services.insert(
       "app".into(),
       crate::world::ServiceRow {
+        frozen_defaults: Default::default(),
         host_groups: Default::default(),
         spec,
         instance_id: "svc_fixture".into(),

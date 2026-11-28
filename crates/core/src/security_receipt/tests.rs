@@ -28,6 +28,9 @@ fn config_item(
     reason: String::new(),
     changes: vec![],
     host_access: vec![],
+    dependents: vec![],
+    hidden_dependents: 0,
+    stopping_service: false,
   }
 }
 

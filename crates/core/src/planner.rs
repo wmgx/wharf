@@ -307,6 +307,9 @@ pub enum Step {
     service: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     container: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scheduled:
+      Option<crate::tasks::restart_schedule::RestartIdentity>,
   },
   /// 控制面自身备份。`user_key`：开启时输入的登录密码，加成仓库的恢复口令。
   CoreBackup {
@@ -489,6 +492,9 @@ impl Builder {
       reason: reason.into(),
       changes,
       host_access: vec![],
+      dependents: vec![],
+      hidden_dependents: 0,
+      stopping_service: false,
     });
     id
   }
@@ -603,22 +609,9 @@ async fn select_planned_service_images(
   Ok(())
 }
 
-fn service_needs_default_timezone(
-  previous: Option<&crate::world::ServiceRow>,
-  row: &crate::world::ServiceRow,
-) -> bool {
-  !matches!(row.spec.source, Source::Compose { .. })
-    && (row.spec.timezone.as_deref() == Some("default")
-      || (row.spec.timezone.is_none()
-        && row.import.is_none()
-        && !row.spec.env.contains_key("TZ")
-        && previous
-          .is_none_or(|old| old.instance_id != row.instance_id)))
-}
-
 pub(crate) async fn make_plan_inner(
   state: &AppState,
-  req: PlanRequest,
+  mut req: PlanRequest,
   mut snap: Snapshot,
   check_migrated_images: bool,
   admin: bool,
@@ -637,6 +630,10 @@ pub(crate) async fn make_plan_inner(
       "changes、fleet、partial 只能给一个",
     ));
   }
+  if req.no_defaults && req.fleet.is_none() && req.partial.is_none() {
+    return Err(ApiError::invalid("计划 no_defaults 仅用于 Fleet"));
+  }
+  let frozen = crate::service_defaults::prepare(&mut req, &snap);
   if let Some(fleet) = &req.fleet {
     desired.replace_with(fleet)?;
   } else if let Some(fleet) = &req.partial {
@@ -718,27 +715,7 @@ pub(crate) async fn make_plan_inner(
       }
     }
   }
-  if desired.services.iter().any(|(name, row)| {
-    service_needs_default_timezone(current.services.get(name), row)
-  }) {
-    let timezone = state
-      .db
-      .call(|conn| crate::config_api::container_timezone(conn))
-      .await?;
-    for (name, row) in &mut desired.services {
-      if service_needs_default_timezone(
-        current.services.get(name),
-        row,
-      ) {
-        row.spec.timezone = Some(timezone.clone());
-      }
-    }
-  }
-  for row in desired.services.values_mut() {
-    if row.spec.timezone.as_deref() == Some("off") {
-      row.spec.timezone = None;
-    }
-  }
+  crate::service_defaults::finish(&mut desired, &snap, frozen);
   // 换了服务器的服务在新机器上重新分配宿主机端口，不和那里已有的服务抢。
   for (name, svc) in desired.services.iter_mut() {
     if current
@@ -813,12 +790,31 @@ pub(crate) async fn make_plan_inner(
   desired.validate_against(&current)?;
   crate::link::validate_new_admin_port_bindings(&current, &desired)?;
   for (name, row) in &desired.services {
-    if current
-      .services
-      .get(name)
-      .is_none_or(|old| old.spec != row.spec)
-    {
+    let before = current.services.get(name).map(|old| &old.spec);
+    if before != Some(&row.spec) {
       crate::monitor::require_agent(state, &row.spec)?;
+      let server = &row.spec.server;
+      if row.spec.restart_schedule.is_some()
+        && before.is_none_or(|old| {
+          old.server != *server
+            || old.restart_schedule != row.spec.restart_schedule
+        })
+      {
+        state.hub.scheduled_restart_conn_id(server)?;
+      }
+      if before.is_none_or(|old| {
+        old.server != *server || old.wait_for != row.spec.wait_for
+      }) {
+        crate::wait_for::require_agent(state, server, &row.spec)?;
+      }
+      if !row.spec.extra_logs.is_empty()
+        && before.is_none_or(|old| {
+          old.server != *server
+            || old.extra_logs != row.spec.extra_logs
+        })
+      {
+        state.hub.extra_logs_conn_id(server)?;
+      }
       if let Some(mode) = row.spec.pull_policy
         && current
           .services
@@ -863,7 +859,7 @@ pub(crate) async fn make_plan_inner(
   crate::secret_policy::require_plan_git_secrets(
     &current, &desired, admin,
   )?;
-  // 只改日志、端口监控或心跳时间时，计划只写配置，离线和现存漂移都不触发部署。
+  // 只改不参与部署的服务设置时，计划只写配置。
   if req.changes.iter().all(|c| {
     matches!(
       c,
@@ -1486,6 +1482,7 @@ pub(crate) async fn make_plan_inner(
     timing.join("，")
   );
 
+  crate::wait_for::validate_steps(&desired, &b.steps)?;
   Ok(finish_plan(
     &snap,
     &desired,
@@ -1539,6 +1536,12 @@ fn finish_plan(
       }
     }
   }
+  crate::dependent_confirm::mark(
+    &snap.world,
+    desired,
+    &mut b.items,
+    &b.steps,
+  );
   let (needs_host, host_requirements) = crate::host_access::mark_plan(
     &snap.world,
     desired,
@@ -5005,25 +5008,6 @@ mod tests {
     assert!(warnings[0].contains("/api/*"));
   }
 
-  #[test]
-  fn default_timezone_only_for_new_instances_without_explicit_environment()
-   {
-    let world = world();
-    let before = &world.services["app"];
-    let mut after = before.clone();
-    assert!(service_needs_default_timezone(None, &after));
-    assert!(!service_needs_default_timezone(Some(before), &after));
-    after.spec.env.insert("TZ".into(), String::new());
-    assert!(!service_needs_default_timezone(None, &after));
-    after.spec.timezone = Some("default".into());
-    assert!(service_needs_default_timezone(Some(before), &after));
-    after.spec.source = Source::Compose {
-      content: None,
-      file: None,
-    };
-    assert!(!service_needs_default_timezone(None, &after));
-  }
-
   #[tokio::test]
   async fn upgrade_keeps_baseline_services_and_legacy_wire_data_without_drift()
    {
@@ -5079,6 +5063,7 @@ mod tests {
       move |c| {
         use rusqlite::params;
         c.execute("INSERT INTO resources VALUES ('server','s1','{}','{}',1,0,0)", []).map_err(db::sql_err)?;
+        db::set_setting(c, crate::service_defaults::KEY, Some(r#"{"timezone":"UTC","limits":{"memory_mb":256}}"#))?;
         for (service, _, compose, hash, spec) in rows {
           let instance = format!("svc_{service}");
           let mut meta = json!({"instance_id": instance});
@@ -5505,6 +5490,7 @@ mod tests {
       &state,
       PlanRequest {
         changes: vec![wharf_api_types::spec::Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: None,
@@ -5664,6 +5650,7 @@ mod tests {
       &state,
       PlanRequest {
         changes: vec![Change::UpsertService {
+          no_defaults: false,
           name: "app".into(),
           spec,
           pins: None,
@@ -5720,6 +5707,7 @@ mod tests {
       &state,
       PlanRequest {
         changes: vec![Change::UpsertService {
+          no_defaults: false,
           name: "app".into(),
           spec,
           pins: Some(BTreeMap::new()),
@@ -5877,6 +5865,7 @@ mod tests {
     }))
     .unwrap();
     let service = Change::UpsertService {
+      no_defaults: false,
       name: "app".into(),
       spec,
       adopt: None,
@@ -6133,6 +6122,116 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn offline_wait_settings_plan_only_writes_config() {
+    let state = crate::rules::tests::test_state();
+    let mut world = world();
+    world
+      .services
+      .get_mut("app")
+      .unwrap()
+      .pins
+      .insert("nginx:1".into(), format!("sha256:{}", "a".repeat(64)));
+    let mut provider = world.services["app"].clone();
+    provider.spec.ports.clear();
+    provider.host_ports.clear();
+    world.services.insert("db".into(), provider);
+    let mut spec = world.services["app"].spec.clone();
+    spec.wait_for.insert(
+      "db".into(),
+      wharf_api_types::spec::WaitCondition::Service {
+        service: "db".into(),
+      },
+    );
+    let planned = make_plan_inner(
+      &state,
+      PlanRequest {
+        changes: vec![wharf_api_types::spec::Change::UpsertService {
+          no_defaults: false,
+          name: "app".into(),
+          spec,
+          adopt: None,
+          pins: None,
+          commit: None,
+          migrate: None,
+        }],
+        ..Default::default()
+      },
+      Snapshot {
+        world,
+        ..Default::default()
+      },
+      false,
+      true,
+    )
+    .await
+    .unwrap();
+    assert!(planned.steps.is_empty());
+    assert_eq!(planned.writes.len(), 1);
+    assert_eq!(planned.plan.items.len(), 1);
+    assert_eq!(planned.plan.items[0].layer, Layer::Config);
+  }
+
+  #[tokio::test]
+  async fn legacy_running_services_have_no_plan_drift() {
+    let state = crate::rules::tests::test_state();
+    let raw = "services: {legacy-compose: {image: alpine:3}}\n";
+    let world = World::from_rows(vec![
+      crate::db::ResourceRow { kind: "server".into(), name: "s1".into(),
+        version: 1, spec: json!({}), meta: json!({}) },
+      crate::db::ResourceRow { kind: "service".into(), name: "app".into(),
+        version: 1, spec: json!({"server":"s1","source":{"image":"nginx:1"},
+          "ports":[{"name":"http","container":80,"host":21000}]}),
+        meta: json!({"host_ports":{"http":21000}}) },
+      crate::db::ResourceRow { kind: "service".into(), name: "legacy-compose".into(),
+        version: 1, spec: json!({"server":"s1","source":{"compose":{"content":raw}}}),
+        meta: json!({}) },
+    ]).unwrap();
+    let legacy_image = concat!(
+      "# 由 Wharf 生成，不要手改。\n",
+      "name: app\nservices:\n  app:\n    image: nginx:1\n    restart: unless-stopped\n",
+      "    ports:\n    - 127.0.0.1:21000:80\n    labels:\n      wharf.service: app\n",
+    );
+    use wharf_api_types::agent::AgentOp;
+    state.hub.mock_agent("s1", false, move |op| match op {
+      AgentOp::ProjectStatus { .. } => Ok(json!([
+        {"project":"app","hash":crate::render::hash(legacy_image),"containers":[container("running")]},
+        {"project":"legacy-compose","hash":crate::render::hash(raw),"containers":[
+          {"name":"legacy-compose-1","service":"legacy-compose","state":"running"}]}
+      ])),
+      AgentOp::ResolveImages(job) => Ok(json!(job.images.into_iter().map(|image| json!({
+        "image":image, "digest":format!("sha256:{}", "a".repeat(64)), "config":"new-image",
+      })).collect::<Vec<_>>())),
+      _ => panic!("计划期发了意外请求"),
+    });
+    let applied = [("app", "nginx:1", legacy_image), ("legacy-compose", "alpine:3", raw)]
+      .map(|(name, image, compose)| (name.into(), serde_json::from_value(json!({
+        "hash":crate::render::hash(compose), "at":"2026-01-01T00:00:00Z",
+        "image":image, "image_id":"old-image",
+      })).unwrap()))
+      .into_iter().collect();
+    let planned = make_plan_inner(
+      &state,
+      PlanRequest::default(),
+      Snapshot {
+        world,
+        applied,
+        ..Default::default()
+      },
+      false,
+      true,
+    )
+    .await
+    .unwrap();
+    assert!(planned.writes.is_empty());
+    assert!(planned.steps.is_empty());
+    assert!(
+      planned.plan.items.is_empty(),
+      "{:?}",
+      planned.plan.items
+    );
+  }
+
+  #[tokio::test]
   async fn plan_stops_and_updates_monitoring_with_legacy_jsonc() {
     let state = crate::rules::tests::test_state();
     let mut world = world();
@@ -6168,6 +6267,7 @@ mod tests {
         PlanRequest {
           changes: vec![
             wharf_api_types::spec::Change::UpsertService {
+              no_defaults: false,
               pins: None,
               commit: None,
               migrate: None,
@@ -6234,6 +6334,7 @@ mod tests {
     });
     let spec = |name: &str, item| PlanRequest {
       changes: vec![wharf_api_types::spec::Change::UpsertService {
+        no_defaults: false,
         pins: None,
         commit: None,
         migrate: None,
@@ -7894,6 +7995,7 @@ mod tests {
       &state,
       PlanRequest {
         changes: vec![Change::UpsertService {
+          no_defaults: false,
           pins: None,
           commit: None,
           migrate: None,
@@ -8242,6 +8344,7 @@ mod tests {
     world.services.insert(
       "app".to_string(),
       ServiceRow {
+        frozen_defaults: Default::default(),
         host_groups: Default::default(),
         instance_id: "svc_fixture".into(),
         spec,

@@ -42,6 +42,8 @@ use crate::{
   state::AppState,
 };
 
+pub(crate) mod restart_schedule;
+
 const TICK: Duration = Duration::from_secs(15);
 const KEEP_RUNS: i64 = 50;
 const HOST_MAX: u64 = 600;
@@ -193,6 +195,12 @@ async fn tick(
   let rows = load(state).await?;
   let offset =
     state.db.call(|c| crate::config_api::offset(c)).await?;
+  if let Err(error) =
+    restart_schedule::tick(state, after, until, resumed_at, offset)
+      .await
+  {
+    tracing::warn!("检查定时重启失败：{error}");
+  }
   let snap = if rows.iter().any(|(_, spec, _)| {
     spec.enabled && matches!(spec.how, TaskKind::Exec { .. })
   }) {
@@ -1311,7 +1319,11 @@ pub async fn recover(state: &AppState) -> Result<(), ApiError> {
     .db
     .call(|c| {
       c.execute(
-        "UPDATE task_runs SET status = 'failed', output = '控制面重启，执行中断', ended_at = ?1 WHERE status = 'running'",
+        "UPDATE task_runs SET status = 'failed',
+          output = CASE WHEN task LIKE '@restart/%' AND json_valid(output)
+                        THEN json_set(output, '$.detail', '控制面重启，执行中断')
+                        ELSE '控制面重启，执行中断' END,
+          ended_at = ?1 WHERE status = 'running'",
         params![now_ms()],
       )
       .map_err(sql_err)
@@ -1955,6 +1967,9 @@ async fn check_run_scope(
   name: &str,
 ) -> Result<(), crate::api::AppError> {
   auth.require(Perm::Read)?;
+  if name.starts_with("@restart/") {
+    return Err(ApiError::not_found("没有这个定时任务").into());
+  }
   if let Some(allowed) = &auth.services {
     match load_one(s, name).await {
       Ok(spec) if matches!(&spec.how, TaskKind::Exec { service, .. } if allowed.contains(service)) =>

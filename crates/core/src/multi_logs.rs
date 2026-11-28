@@ -136,6 +136,11 @@ pub(super) async fn fetch(
   services: Services,
   q: LogsQuery,
 ) -> Result<Value, AppError> {
+  if q.file.is_some() {
+    return Err(
+      ApiError::invalid("--file 每次只能查询一个服务").into(),
+    );
+  }
   let names = service_names(&services.services)?;
   for name in &names {
     crate::token_scope::require_service(auth, name)?;

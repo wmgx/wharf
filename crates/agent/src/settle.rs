@@ -356,7 +356,7 @@ fn problem(state: &ProjectState) -> Option<String> {
     .filter_map(|c| {
       if c.health.as_deref() == Some("unhealthy") {
         Some(format!("{} 健康检查不通过", c.service))
-      } else if c.state != "running" {
+      } else if !c.is_healthy_state(has_running) {
         Some(format!("{} {}（{}）", c.service, c.state, c.status))
       } else {
         None

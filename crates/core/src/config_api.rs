@@ -21,6 +21,7 @@ enum Kind {
   Bool,
   Number(u16, u16, u16),
   Timezone,
+  Defaults,
   Url,
   Email,
   Server,
@@ -30,6 +31,11 @@ enum Kind {
 struct Item(&'static str, Kind, &'static str);
 
 static CONFIG_ITEMS: &[Item] = &[
+  Item(
+    crate::service_defaults::KEY,
+    Kind::Defaults,
+    "新建服务的全局默认值",
+  ),
   Item(
     "egress.api_via",
     Kind::Server,
@@ -90,6 +96,7 @@ fn view(
     Kind::Bool => (json!(false), "bool"),
     Kind::Number(_, _, default) => (json!(default), "integer"),
     Kind::Timezone => (json!("Asia/Shanghai"), "timezone"),
+    Kind::Defaults => (json!({}), "service_defaults"),
     Kind::Url => (Value::Null, "url"),
     Kind::Email => (Value::Null, "email"),
     Kind::Server | Kind::Readonly => (Value::Null, "server"),
@@ -99,6 +106,9 @@ fn view(
     (Kind::Number(..), Some(value)) => value
       .parse::<u16>()
       .map_or_else(|_| default_value.clone(), |v| json!(v)),
+    (Kind::Defaults, Some(value)) => {
+      serde_json::from_str(value).map_err(db::json_err)?
+    }
     (_, Some(value)) => json!(value),
     (_, None) => default_value.clone(),
   };
@@ -144,6 +154,29 @@ pub async fn set(
   auth.require(Perm::Admin)?;
   let config = item(&key)?;
   writable(config)?;
+  if matches!(config.1, Kind::Defaults) {
+    require_unscoped_defaults(&auth)?;
+    return Ok(Json(
+      s.db
+        .call(move |c| {
+          let tx = c.transaction().map_err(db::sql_err)?;
+          let mut defaults = crate::service_defaults::load(&tx)?;
+          defaults.patch(value)?;
+          crate::service_defaults::validate(&defaults)?;
+          let saved =
+            serde_json::to_string(&defaults).map_err(db::json_err)?;
+          db::set_setting(
+            &tx,
+            config.0,
+            (!defaults.is_empty()).then_some(saved.as_str()),
+          )?;
+          let result = view(&tx, config)?;
+          tx.commit().map_err(db::sql_err)?;
+          Ok(result)
+        })
+        .await?,
+    ));
+  }
   let invalid = || ApiError::invalid(format!("{key} 的值格式不对"));
   let saved = match config.1 {
     Kind::Bool => match value
@@ -209,7 +242,20 @@ pub async fn unset(
   auth.require(Perm::Admin)?;
   let config = item(&key)?;
   writable(config)?;
+  if matches!(config.1, Kind::Defaults) {
+    require_unscoped_defaults(&auth)?;
+  }
   save(&s, config, None).await
+}
+
+fn require_unscoped_defaults(auth: &Auth) -> Result<(), ApiError> {
+  if auth.services.is_some() {
+    return Err(ApiError::new(
+      wharf_api_types::ErrorCode::Forbidden,
+      "修改默认值需要不限服务的令牌",
+    ));
+  }
+  Ok(())
 }
 
 fn writable(config: &Item) -> Result<(), ApiError> {
@@ -273,15 +319,6 @@ fn parse_offset(value: &str) -> Result<FixedOffset, ApiError> {
     }
   };
   Ok(FixedOffset::east_opt(hours * 3600).unwrap())
-}
-
-pub(crate) fn container_timezone(
-  c: &Connection,
-) -> Result<String, ApiError> {
-  Ok(
-    db::setting(c, "core.timezone")?
-      .unwrap_or_else(|| "Asia/Shanghai".into()),
-  )
 }
 
 pub(crate) fn validate_container_timezone(

@@ -282,6 +282,97 @@ fn secret_matches(text: &str, name: &str) -> bool {
   })
 }
 
+pub(crate) fn direct_dependents(
+  world: &crate::world::World,
+  target: &str,
+) -> std::collections::BTreeSet<wharf_api_types::plan::Dependent> {
+  use wharf_api_types::plan::{Dependent, DependentDisposition};
+  let mut out = std::collections::BTreeSet::new();
+  let mut add = |address: String, kind: &str, field: String| {
+    out.insert(Dependent {
+      address,
+      kind: kind.into(),
+      field,
+      disposition: DependentDisposition::Retained,
+    });
+  };
+  for (service, row) in &world.services {
+    if service == target {
+      continue;
+    }
+    let address = format!("service/{service}");
+    for (field, text) in service_texts(&row.spec) {
+      if placeholders(text)
+        .filter_map(parse_service_ref)
+        .any(|r| r.service == target)
+      {
+        add(address.clone(), "service_ref", field);
+      }
+    }
+    for v in &row.spec.volumes {
+      if v
+        .from_service
+        .as_deref()
+        .and_then(|raw| crate::shared_volumes::parse_ref(raw).ok())
+        .is_some_and(|(owner, _)| owner == target)
+      {
+        add(
+          address.clone(),
+          "shared_volume",
+          format!("volume:{}", v.name),
+        );
+      }
+    }
+    for (key, wait) in &row.spec.wait_for {
+      if wait.service() == Some(target) {
+        add(address.clone(), "wait_for", format!("wait_for.{key}"));
+      }
+    }
+  }
+  for (host, row) in &world.routes {
+    let address = format!("route/{host}");
+    if row.spec.service == target {
+      add(address.clone(), "route_target", "service".into());
+    }
+    for path in &row.spec.paths {
+      if path.service.as_deref() == Some(target) {
+        add(
+          address.clone(),
+          "route_target",
+          format!("paths[{}]", path.path),
+        );
+      }
+    }
+  }
+  for (name, row) in &world.gateways {
+    for rule in &row.spec.layer4 {
+      if rule.service.as_deref() == Some(target) {
+        add(
+          format!("gateway/{name}"),
+          "layer4",
+          format!("layer4:{}", rule.listen),
+        );
+      }
+    }
+  }
+  out
+}
+
+pub(crate) fn dependent_visible(
+  world: &crate::world::World,
+  allowed: &BTreeSet<String>,
+  address: &str,
+) -> bool {
+  match address.split_once('/') {
+    Some(("service", name)) => allowed.contains(name),
+    Some(("route", name)) => world
+      .routes
+      .get(name)
+      .is_some_and(|route| route_visible(Some(allowed), &route.spec)),
+    _ => false,
+  }
+}
+
 fn collect_refs(
   snap: &Snapshot,
   tasks: &Tasks,
@@ -305,6 +396,17 @@ fn collect_refs(
         detail: None,
       });
     };
+  if kind == "service" {
+    for dep in direct_dependents(world, name) {
+      if scope.is_none_or(|allowed| {
+        dependent_visible(world, allowed, &dep.address)
+      }) && let Some((kind, resource)) =
+        dep.address.split_once('/')
+      {
+        add(kind, resource, &dep.field, &dep.kind);
+      }
+    }
+  }
   let hidden_secret = scope.is_some()
     && kind == "secret"
     && (crate::secret_policy::is_system_secret(name)
@@ -318,33 +420,6 @@ fn collect_refs(
     }
     let spec = &row.spec;
     match kind {
-      "service" => {
-        for (field, text) in service_texts(spec) {
-          if placeholders(text)
-            .filter_map(parse_service_ref)
-            .any(|r| r.service == name)
-          {
-            add("service", service, &field, "service_ref");
-          }
-        }
-        for v in &spec.volumes {
-          if v
-            .from_service
-            .as_deref()
-            .and_then(|raw| {
-              crate::shared_volumes::parse_ref(raw).ok()
-            })
-            .is_some_and(|(owner, _)| owner == name)
-          {
-            add(
-              "service",
-              service,
-              &format!("volume:{}", v.name),
-              "shared_volume",
-            );
-          }
-        }
-      }
       "var" if scope.is_none() => {
         for (field, text) in service_texts(spec) {
           if placeholders(text).any(|p| {
@@ -440,21 +515,6 @@ fn collect_refs(
       continue;
     }
     match kind {
-      "service" => {
-        if spec.service == name {
-          add("route", host, "service", "route_target");
-        }
-        for path in &spec.paths {
-          if path.service.as_deref() == Some(name) {
-            add(
-              "route",
-              host,
-              &format!("paths[{}]", path.path),
-              "route_target",
-            );
-          }
-        }
-      }
       "gateway" => {
         let gateway = if scope.is_none() {
           world.route_gateway(spec)

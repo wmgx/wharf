@@ -247,7 +247,7 @@ pub fn route_spec_in_scope(
     })
 }
 
-fn route_in_scope(
+pub(crate) fn route_in_scope(
   services: &BTreeSet<String>,
   host: &str,
   item: &PlanItem,
@@ -434,6 +434,32 @@ pub fn require_plan_request(
         .then(|| format!("route/{host}")),
       )
     };
+  let submitted = req
+    .partial
+    .iter()
+    .flat_map(|fleet| &fleet.services)
+    .chain(req.changes.iter().filter_map(|change| match change {
+      Change::UpsertService { name, spec, .. } => Some((name, spec)),
+      _ => None,
+    }));
+  for (name, spec) in submitted {
+    for (key, wait) in &spec.wait_for {
+      if current
+        .services
+        .get(name)
+        .and_then(|row| row.spec.wait_for.get(key))
+        == Some(wait)
+      {
+        continue;
+      }
+      if wait.service().is_none_or(|dep| !services.contains(dep)) {
+        return Err(ApiError::new(
+          ErrorCode::Forbidden,
+          "启动等待条件超出令牌范围",
+        ));
+      }
+    }
+  }
   let shared_refs = req
     .partial
     .iter()
@@ -842,6 +868,7 @@ fn scoped_token_cannot_mount_out_of_scope_service_volume() {
   .unwrap();
   let req = PlanRequest {
     changes: vec![Change::UpsertService {
+      no_defaults: false,
       name: "reader".into(),
       spec,
       adopt: None,

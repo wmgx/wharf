@@ -107,6 +107,8 @@ pub struct ServerSettings {
   /// 后台传输限速，例如 3M 或 500K。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub bg_bwlimit: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub defaults: Option<ServiceDefaults>,
 }
 
 /// 机器基线（P9）。字段不填就不管；去掉某项只是不再管，不会改回去。
@@ -451,6 +453,189 @@ pub struct ServiceSpec {
   pub user: Option<String>,
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub use_egress: bool,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub extra_logs: Vec<String>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub wait_for: BTreeMap<String, WaitCondition>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub wait_for_timeout_secs: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub restart_schedule: Option<RestartSchedule>,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct RestartSchedule {
+  pub cron: String,
+  #[serde(default = "skip_stopped_by_default")]
+  pub skip_if_stopped: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub catch_up_mins: Option<u32>,
+}
+
+fn skip_stopped_by_default() -> bool {
+  true
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WaitCondition {
+  Service { service: String },
+  Tcp { service: String, port: String },
+  Dns { host: String },
+}
+
+impl WaitCondition {
+  pub fn service(&self) -> Option<&str> {
+    match self {
+      Self::Service { service } | Self::Tcp { service, .. } => {
+        Some(service)
+      }
+      Self::Dns { .. } => None,
+    }
+  }
+
+  pub fn valid_port(spec: &ServiceSpec, port: &str) -> bool {
+    spec.ports.iter().any(|p| p.name == port && !p.udp)
+  }
+}
+
+pub fn validate_service_dependencies<'a>(
+  services: impl IntoIterator<Item = (&'a str, &'a ServiceSpec)>,
+) -> Result<(), crate::ApiError> {
+  let mut has_wait = false;
+  let mut dependencies = BTreeMap::<&str, BTreeSet<&str>>::new();
+  for (name, spec) in services {
+    let waits =
+      spec.wait_for.values().filter_map(WaitCondition::service);
+    let owners = spec.volumes.iter().filter_map(|volume| {
+      let (owner, _) =
+        volume.from_service.as_deref()?.split_once(':')?;
+      Some(owner)
+    });
+    for dep in waits.inspect(|_| has_wait = true).chain(owners) {
+      dependencies.entry(name).or_default().insert(dep);
+    }
+  }
+  while !dependencies.is_empty() {
+    let ready: Vec<_> = dependencies
+      .iter()
+      .filter(|(_, owners)| {
+        owners.iter().all(|owner| !dependencies.contains_key(owner))
+      })
+      .map(|(&service, _)| service)
+      .collect();
+    if ready.is_empty() {
+      if !has_wait {
+        let services =
+          dependencies.keys().copied().collect::<Vec<_>>();
+        return Err(
+          crate::ApiError::invalid(format!(
+            "共享卷依赖成环：{}",
+            services.join("、")
+          ))
+          .with_hint("解除其中一个共享卷引用后再试")
+          .with_details(
+            serde_json::json!({"dependency_cycle": services}),
+          ),
+        );
+      }
+      let mut chain = Vec::new();
+      let mut next = *dependencies.keys().next().unwrap();
+      loop {
+        if let Some(start) =
+          chain.iter().position(|&name| name == next)
+        {
+          chain.push(next);
+          let cycle = &chain[start..];
+          return Err(
+            crate::ApiError::invalid(format!(
+              "启动等待成环：{}",
+              cycle.join(" → ")
+            ))
+            .with_hint("移除一条启动等待关系")
+            .with_details(
+              serde_json::json!({"dependency_cycle": cycle}),
+            ),
+          );
+        }
+        chain.push(next);
+        next = *dependencies[next]
+          .iter()
+          .find(|&&name| dependencies.contains_key(name))
+          .unwrap();
+      }
+    }
+    for service in ready {
+      dependencies.remove(service);
+    }
+  }
+  Ok(())
+}
+
+pub fn validate_wait_for(
+  spec: &ServiceSpec,
+) -> Result<(), crate::ApiError> {
+  if spec.wait_for.len() > 16 {
+    return Err(crate::ApiError::invalid(
+      "最多配置 16 项启动前等待条件",
+    ));
+  }
+  if spec
+    .wait_for_timeout_secs
+    .is_some_and(|s| !(1..=1800).contains(&s))
+  {
+    return Err(crate::ApiError::invalid(
+      "启动前等待上限需在 1 到 1800 秒之间",
+    ));
+  }
+  for (name, condition) in &spec.wait_for {
+    crate::validate_name("等待条件", name)?;
+    if let Some(service) = condition.service() {
+      crate::validate_name("服务", service)?;
+    }
+    match condition {
+      WaitCondition::Tcp { port, .. } => {
+        crate::validate_name("端口", port)?
+      }
+      WaitCondition::Dns { host }
+        if host.len() > 253
+          || host.parse::<std::net::IpAddr>().is_ok()
+          || !crate::net_probe::dns_target(host)
+          || host
+            .trim_end_matches('.')
+            .split('.')
+            .all(|part| part.bytes().all(|b| b.is_ascii_digit())) =>
+      {
+        return Err(crate::ApiError::invalid(
+          "DNS 等待目标必须是域名",
+        ));
+      }
+      _ => {}
+    }
+  }
+  Ok(())
+}
+
+pub fn validate_extra_log_path(
+  path: &str,
+) -> Result<(), crate::ApiError> {
+  crate::data_sync::path_parts(path).map_err(|_| {
+    crate::ApiError::invalid("日志文件不在服务托管目录内")
+  })?;
+  if path.is_empty()
+    || path
+      .chars()
+      .any(|c| c.is_control() || "*?[]{}\\".contains(c))
+  {
+    return Err(crate::ApiError::invalid(
+      "日志文件不在服务托管目录内",
+    ));
+  }
+  Ok(())
 }
 
 #[derive(
@@ -700,6 +885,109 @@ pub enum ImagePullMode {
   IfMissing,
   Never,
   Always,
+}
+
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceDefaults {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub timezone: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub log_max: Option<LogMax>,
+  #[serde(default, skip_serializing_if = "Limits::is_empty")]
+  pub limits: Limits,
+}
+
+impl ServiceDefaults {
+  pub fn is_empty(&self) -> bool {
+    self.timezone.is_none()
+      && self.log_max.is_none()
+      && self.limits.is_empty()
+  }
+
+  pub fn with_fallback(mut self, fallback: &Self) -> Self {
+    self.timezone =
+      self.timezone.or_else(|| fallback.timezone.clone());
+    self.log_max = self.log_max.or(fallback.log_max);
+    self.limits.memory_mb =
+      self.limits.memory_mb.or(fallback.limits.memory_mb);
+    self.limits.cpu_milli =
+      self.limits.cpu_milli.or(fallback.limits.cpu_milli);
+    self.limits.pids = self.limits.pids.or(fallback.limits.pids);
+    self
+  }
+
+  pub fn patch(
+    &mut self,
+    patch: serde_json::Value,
+  ) -> Result<(), crate::ApiError> {
+    use serde_json::Value;
+
+    fn read<T: serde::de::DeserializeOwned>(
+      field: &str,
+      value: &Value,
+    ) -> Result<T, crate::ApiError> {
+      serde_json::from_value(value.clone()).map_err(|error| {
+        crate::ApiError::invalid(format!("默认值 {field} 无效"))
+          .with_hint(error.to_string())
+      })
+    }
+
+    for (field, value) in patch
+      .as_object()
+      .ok_or_else(|| crate::ApiError::invalid("默认值更新需为对象"))?
+    {
+      match field.as_str() {
+        "timezone" => self.timezone = read(field, value)?,
+        "log_max" => self.log_max = read(field, value)?,
+        "limits" if value.is_null() => {
+          self.limits = Limits::default()
+        }
+        "limits" => {
+          for (dimension, value) in
+            value.as_object().ok_or_else(|| {
+              crate::ApiError::invalid("默认值 limits 无效")
+            })?
+          {
+            match dimension.as_str() {
+              "memory_mb" => {
+                self.limits.memory_mb = read(dimension, value)?
+              }
+              "cpu_milli" => {
+                self.limits.cpu_milli = read(dimension, value)?
+              }
+              "pids" => self.limits.pids = read(dimension, value)?,
+              _ => {
+                return Err(crate::ApiError::invalid(format!(
+                  "默认值 {dimension} 无效"
+                )));
+              }
+            }
+          }
+        }
+        _ => {
+          return Err(crate::ApiError::invalid(format!(
+            "默认值 {field} 无效"
+          )));
+        }
+      }
+    }
+    Ok(())
+  }
+}
+
+impl LogMax {
+  pub fn validate(&self) -> Result<(), crate::ApiError> {
+    if self.max_bytes == 0 || self.max_files == 0 {
+      return Err(
+        crate::ApiError::invalid("日志轮转需要正数大小和保留文件数")
+          .with_hint("例如 --log-max 5m:1"),
+      );
+    }
+    Ok(())
+  }
 }
 
 impl Limits {
@@ -1219,6 +1507,8 @@ pub enum Change {
   UpsertService {
     name: String,
     spec: ServiceSpec,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    no_defaults: bool,
     /// 导入时接管的现有容器：第一次部署前停掉它们，失败时恢复。部署成功后记进导入记录，不再起作用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     adopt: Option<AdoptSpec>,

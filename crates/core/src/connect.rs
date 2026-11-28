@@ -306,6 +306,10 @@ mod tests {
       pull_policy: Default::default(),
       log_max: Default::default(),
       container_limits: Default::default(),
+      extra_logs: Vec::new(),
+      wait_for: Default::default(),
+      wait_for_timeout_secs: None,
+      restart_schedule: None,
     };
     let hp = BTreeMap::from([("pg".to_string(), 20001)]);
     let j = target("db", &spec, &hp, None, None).unwrap();

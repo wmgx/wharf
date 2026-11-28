@@ -139,6 +139,24 @@ fn walk(
           "--extract-secrets": {"returns": "service-import-preview", "when": "无 --apply 且提取到密钥"}
         });
       }
+      "defaults" => {
+        entry["write_perms"] = json!(["admin"]);
+        entry["flag_variants"] = json!({
+          "--server": {
+            "returns": "plan_run",
+            "write_perms": ["plan"],
+            "when": "同时提供修改参数",
+            "otherwise": "config"
+          }
+        });
+      }
+      "service restart-schedule" => {
+        entry["write_perms"] = json!(["plan"]);
+        entry["returns_by_flag"] = json!({
+          "--cron": "plan", "--skip-if-stopped": "plan", "--catch-up": "plan",
+          "--unset-catch-up": "plan", "--off": "plan", "--apply": "run"
+        });
+      }
       "service limits" => {
         entry["returns_by_flag"] = json!({
           "--memory": "plan", "--cpus": "plan", "--pids": "plan",
@@ -186,13 +204,15 @@ fn walk(
 fn read_when_no_args(command: &str) -> bool {
   matches!(
     command,
-    "service auto-update"
+    "defaults"
+      | "service auto-update"
       | "service monitor"
       | "service limits"
       | "service port-check"
       | "service heartbeat"
       | "service note"
       | "service log-alert"
+      | "service restart-schedule"
       | "service update-ignore"
       | "service file"
       | "service deploy"
@@ -231,6 +251,9 @@ fn effect(
   command: &str,
   cmd: &clap::Command,
 ) -> (&'static str, &'static [&'static str]) {
+  if command == "defaults" {
+    return ("direct", &["read"]);
+  }
   if matches!(command, "var set" | "var rm") {
     return ("plan", &["plan", "admin"]);
   }
@@ -436,6 +459,7 @@ fn returns(command: &str) -> Option<&'static str> {
     "exec" => "host_exec",
     "service exec" => "service_exec",
     "service render" => "service_render",
+    "service restart-schedule" => "restart_schedule",
     "service crash-guard" => "crash-guard",
     "service repair" => "service-repair",
     "service export-compose" => "service_compose_export",
@@ -458,8 +482,8 @@ fn returns(command: &str) -> Option<&'static str> {
     "tree" => "tree",
     "search" => "search",
     "lint" => "lint",
-    "config" | "config list" | "config get" | "config set"
-    | "config unset" => "config",
+    "defaults" | "config" | "config list" | "config get"
+    | "config set" | "config unset" => "config",
     "secret import" => "secret_import",
     "service env" | "service env list" => "service_env",
     "service env sync" => "service_env_sync",

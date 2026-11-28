@@ -2960,6 +2960,10 @@ mod tests {
       pull_policy: Default::default(),
       log_max: Default::default(),
       container_limits: Default::default(),
+      extra_logs: Vec::new(),
+      wait_for: Default::default(),
+      wait_for_timeout_secs: None,
+      restart_schedule: None,
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

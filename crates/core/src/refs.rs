@@ -129,6 +129,24 @@ pub(crate) fn resolve_with_host_style(
   )
 }
 
+pub(crate) fn probe_address(
+  me: &str,
+  world: &World,
+  net: &Net,
+  service: &str,
+  port: &str,
+) -> Result<String, ApiError> {
+  resolve_from_with_reach(
+    &format!("[[@{service}.{port}]]"),
+    &format!("服务 {me}"),
+    &world.services[me].spec.server,
+    world,
+    net,
+    false,
+    false,
+  )
+}
+
 pub(crate) fn validate_task_ref(
   task: &str,
   world: &World,
@@ -157,6 +175,20 @@ pub(crate) fn resolve_from(
   world: &World,
   net: &Net,
   legacy: bool,
+) -> Result<String, ApiError> {
+  resolve_from_with_reach(
+    text, caller, my_server, world, net, legacy, true,
+  )
+}
+
+fn resolve_from_with_reach(
+  text: &str,
+  caller: &str,
+  my_server: &str,
+  world: &World,
+  net: &Net,
+  legacy: bool,
+  check_reach: bool,
 ) -> Result<String, ApiError> {
   scan(text, |r| {
     let row = world.services.get(r.service).ok_or_else(|| {
@@ -205,7 +237,8 @@ pub(crate) fn resolve_from(
       .with_hint("服务之间经内网地址互相访问，先让这台接入组网")
       .suggest("wharf network")
     })?;
-    if target != my_server
+    if check_reach
+      && target != my_server
       && net.reach.get(&(my_server.to_string(), target.clone()))
         == Some(&false)
     {

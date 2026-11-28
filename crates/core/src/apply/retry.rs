@@ -251,13 +251,20 @@ async fn require_retry_access(
   original: &Run,
   steps: &[StepPlan],
   snap: &snapshot::Snapshot,
-  confirmed: &[String],
+  approval: (&[String], &BTreeMap<String, String>),
 ) -> Result<(), ApiError> {
+  let (confirmed, post_instances) = approval;
   let core_server = crate::join::core_server_of(snap);
   if !original.plan_id.is_empty() {
     let stored = stored_plan(state, &original.plan_id).await?;
     stored.check_deployment_privilege(steps, &snap.world)?;
     let mut plan = stored.body.plan;
+    crate::dependent_confirm::check_retry(
+      &snap.world,
+      &plan,
+      steps,
+      post_instances,
+    )?;
     let items: BTreeSet<_> =
       steps.iter().flat_map(|s| s.items.iter().copied()).collect();
     let mut needs_confirm: BTreeSet<_> = plan
@@ -460,7 +467,7 @@ pub async fn retry_run(
     &original,
     &steps,
     &snap,
-    &meta.confirmed,
+    (&meta.confirmed, &meta.post_instances),
   )
   .await?;
   let run = Run {
@@ -573,6 +580,7 @@ async fn run_retry_reruns_only_failed_and_skipped_and_rejects_stale()
   let service = "notes".to_string();
   let restart = Step::ServiceRestart {
     service: service.clone(),
+    scheduled: None,
     container: None,
   };
   let steps: Vec<_> = [
@@ -791,7 +799,7 @@ async fn retry_requires_confirm_only_for_remaining_risky_steps() {
     &run,
     &[safe],
     &snap,
-    &confirmed,
+    (&confirmed, &snap.world.service_instances()),
   )
   .await
   .unwrap();

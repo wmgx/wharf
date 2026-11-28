@@ -20,6 +20,9 @@ pub(crate) async fn make_service_action_plan(
       "service_action、changes、fleet、partial 只能给一个",
     ));
   }
+  if req.no_defaults {
+    return Err(ApiError::invalid("计划 no_defaults 仅用于 Fleet"));
+  }
   match req.service_action {
     Some(ServiceAction::ResumeProtected { service }) => {
       if allowed.is_some_and(|scope| !scope.contains(&service)) {
@@ -369,6 +372,7 @@ async fn make_batch_plan(
               Step::ServiceRestart {
                 service: name.clone(),
                 container: None,
+                scheduled: None,
               },
             )
           } else {
@@ -394,6 +398,7 @@ async fn make_batch_plan(
       }
     }
   }
+  crate::wait_for::validate_steps(&desired, &b.steps)?;
   let mut planned = finish_plan(
     &snap,
     &desired,

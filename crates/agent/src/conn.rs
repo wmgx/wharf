@@ -300,6 +300,7 @@ async fn handshake(
     net_probe: true,
     container_probe: true,
     files_v2: true,
+    extra_logs_v1: true,
   };
   tokio::time::timeout(
     SOCKET_WRITE_TIMEOUT,

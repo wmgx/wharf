@@ -298,6 +298,22 @@ pub fn plan_with(p: &Plan, next_step: bool) {
       for c in &item.changes {
         change(c);
       }
+      for dep in &item.dependents {
+        use wharf_api_types::plan::DependentDisposition::*;
+        let disposition = match dep.disposition {
+          Retained => "仍在引用",
+          Detached => "本次解除",
+          Removed => "本次删除",
+          Stopping => "本次停止",
+        };
+        println!(
+          "      {} {} · {disposition}",
+          dep.address, dep.field
+        );
+      }
+      if item.hidden_dependents > 0 {
+        println!("      {} 项不可见", item.hidden_dependents);
+      }
     }
   }
   for w in &p.warnings {

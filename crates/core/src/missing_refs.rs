@@ -239,6 +239,27 @@ pub(crate) fn collect_plan_missing(
       &source,
       desired.servers.contains_key(&spec.server),
     );
+    for (key, wait) in &spec.wait_for {
+      if let Some(dep) = wait.service() {
+        let at = format!("{source} wait_for.{key}");
+        let target = desired.services.get(dep);
+        add("service", dep, &at, target.is_some());
+        if let (
+          Some(row),
+          wharf_api_types::spec::WaitCondition::Tcp { port, .. },
+        ) = (target, wait)
+        {
+          add(
+            "port",
+            &format!("{dep}.{port}"),
+            &at,
+            wharf_api_types::spec::WaitCondition::valid_port(
+              &row.spec, port,
+            ) && row.host_ports.contains_key(port),
+          );
+        }
+      }
+    }
     if let Some(b) = &spec.backup {
       add(
         "server",
@@ -453,12 +474,23 @@ pub(crate) fn check_plan(
   let before = collect_plan_missing(&snap.world, snap)
     .into_iter()
     .collect::<BTreeSet<_>>();
-  error(
-    collect_plan_missing(desired, snap)
-      .into_iter()
-      .filter(|hit| !before.contains(hit))
-      .collect(),
-  )
+  let missing: Vec<_> = collect_plan_missing(desired, snap)
+    .into_iter()
+    .filter(|hit| !before.contains(hit))
+    .collect();
+  let removes_target = missing.iter().any(|hit| {
+    matches!(hit.kind.as_str(), "service" | "service_ref")
+      && snap.world.services.contains_key(&hit.target)
+      && !desired.services.contains_key(&hit.target)
+  });
+  error(missing).map_err(|error| {
+    if removes_target {
+      error
+        .with_hint("先改写或移除这些引用，再把变更和删除放进同一计划")
+    } else {
+      error
+    }
+  })
 }
 
 pub(crate) fn scope_error(
@@ -467,6 +499,17 @@ pub(crate) fn scope_error(
   routes: &BTreeSet<String>,
 ) -> ApiError {
   let Some(allowed) = allowed else { return err };
+  if let Some(cycle) = err
+    .details
+    .as_ref()
+    .and_then(|details| details["dependency_cycle"].as_array())
+    && cycle.iter().any(|name| {
+      name.as_str().is_none_or(|name| !allowed.contains(name))
+    })
+  {
+    return ApiError::invalid("服务依赖成环")
+      .with_hint("使用不限服务的令牌查看完整依赖");
+  }
   let Some(missing) =
     err.details.as_ref().and_then(|d| d.get("missing"))
   else {
@@ -491,10 +534,22 @@ pub(crate) fn scope_error(
   if missing.len() == total {
     return err;
   }
-  error(missing).err().unwrap_or_else(|| {
+  let hidden = total - missing.len();
+  let mut scoped = error(missing).err().unwrap_or_else(|| {
     ApiError::invalid("改动导致其他资源引用缺失")
       .with_hint("使用不限服务的令牌查看完整引用")
-  })
+  });
+  if err.hint.as_deref()
+    == Some("先改写或移除这些引用，再把变更和删除放进同一计划")
+  {
+    scoped.hint = err.hint;
+  }
+  let mut details = scoped
+    .details
+    .take()
+    .unwrap_or_else(|| json!({"missing":[],"total":0}));
+  details["hidden_dependents"] = json!(hidden);
+  scoped.with_details(details)
 }
 
 #[test]

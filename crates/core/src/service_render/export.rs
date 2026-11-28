@@ -777,6 +777,7 @@ mod tests {
 
   fn fixture(content: &str) -> ServiceRow {
     ServiceRow {
+      frozen_defaults: Default::default(),
       instance_id: "fixture".into(),
       spec: serde_json::from_value(json!({
         "server":"s1", "source":{"compose":{"content":content}},
@@ -860,6 +861,7 @@ services:
 #[test]
 fn compose_export_carries_23_1_runtime_and_component_limits() {
   let row = |spec| ServiceRow {
+    frozen_defaults: Default::default(),
     instance_id: "fixture".into(),
     spec: serde_json::from_value(spec).unwrap(),
     host_groups: Default::default(),

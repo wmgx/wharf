@@ -171,15 +171,22 @@ impl DirFd {
   }
 
   pub(crate) fn same_mount(&self, other: &Self) -> io::Result<bool> {
-    if self.stat_self()?.st_dev != other.stat_self()?.st_dev {
+    self.same_file_mount(&other.0)
+  }
+
+  pub(crate) fn same_file_mount(
+    &self,
+    other: &OwnedFd,
+  ) -> io::Result<bool> {
+    if self.stat_self()?.st_dev != stat(other.as_raw_fd())?.st_dev {
       return Ok(false);
     }
     #[cfg(target_os = "linux")]
     {
-      fn mount_id(fd: &DirFd) -> io::Result<String> {
+      fn mount_id(fd: &OwnedFd) -> io::Result<String> {
         let content = std::fs::read_to_string(format!(
           "/proc/self/fdinfo/{}",
-          fd.0.as_raw_fd()
+          fd.as_raw_fd()
         ))?;
         content
           .lines()
@@ -187,7 +194,7 @@ impl DirFd {
           .map(str::to_string)
           .ok_or_else(|| io::Error::other("无法读取挂载 ID"))
       }
-      Ok(mount_id(self)? == mount_id(other)?)
+      Ok(mount_id(&self.0)? == mount_id(other)?)
     }
     #[cfg(not(target_os = "linux"))]
     Ok(true)

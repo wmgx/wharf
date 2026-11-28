@@ -492,6 +492,7 @@ async fn execute(
 )> {
   let req = PlanRequest {
     changes: vec![Change::UpsertService {
+      no_defaults: false,
       name: service.name,
       spec: service.spec,
       pins: None,

@@ -261,6 +261,7 @@ async fn tick(
       format!("{AUTO_RESTART_TITLE}{name}（{why}）"),
       Step::ServiceRestart {
         service: name.clone(),
+        scheduled: None,
         container: None,
       },
       Some("自动自愈".into()),
@@ -359,6 +360,7 @@ mod tests {
       AUTO_RESTART_TITLE.into(),
       Step::ServiceRestart {
         service: service.clone(),
+        scheduled: None,
         container: None,
       },
     )

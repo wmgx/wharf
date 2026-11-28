@@ -717,6 +717,7 @@ fn service_ref_and_escaped_dollar_do_not_bypass_secret_lint() {
 fn warns_on_stopped_service_config_update() {
   let mut snap = Snapshot::default();
   snap.world.services.insert("app".into(), ServiceRow {
+    frozen_defaults: Default::default(),
     host_groups: Default::default(),
     instance_id: "svc_fixture".into(), spec: serde_json::from_value(serde_json::json!({
       "server":"s1","source":{"image":"nginx:1"},"stopped":true,"env":{"PASS":"fixture-password"}

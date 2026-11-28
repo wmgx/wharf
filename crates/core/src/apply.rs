@@ -339,6 +339,38 @@ pub(crate) async fn start_with_actor(
       let spec =
         serde_json::from_value(spec.clone()).map_err(json_err)?;
       crate::monitor::require_agent(&state, &spec)?;
+      let before = plan
+        .items
+        .iter()
+        .find(|item| {
+          item.layer == Layer::Config
+            && item.address.strip_prefix("service/") == Some(name)
+        })
+        .and_then(|item| item.before.as_ref())
+        .and_then(|value| {
+          serde_json::from_value::<ServiceSpec>(value.clone()).ok()
+        });
+      let same_server = before
+        .as_ref()
+        .filter(|before| before.server == spec.server);
+      if spec.restart_schedule.is_some()
+        && same_server.is_none_or(|before| {
+          before.restart_schedule != spec.restart_schedule
+        })
+      {
+        state.hub.scheduled_restart_conn_id(&spec.server)?;
+      }
+      if same_server
+        .is_none_or(|before| before.wait_for != spec.wait_for)
+      {
+        crate::wait_for::require_agent(&state, &spec.server, &spec)?;
+      }
+      if !spec.extra_logs.is_empty()
+        && same_server
+          .is_none_or(|before| before.extra_logs != spec.extra_logs)
+      {
+        state.hub.extra_logs_conn_id(&spec.server)?;
+      }
       if spec.crash_guard
         && plan.items.iter().any(|item| {
           item.layer == wharf_api_types::plan::Layer::Config
@@ -414,6 +446,24 @@ pub(crate) async fn start_with_actor(
       .suggest("wharf plan"),
     );
   }
+  crate::dependent_confirm::check_apply(
+    state.as_ref(),
+    plan,
+    &stored.steps,
+    &stored.writes,
+  )
+  .await?;
+  let visible_routes = if let Some(allowed) =
+    auth.and_then(|auth| auth.services.as_ref())
+  {
+    crate::dependent_confirm::visible_routes(
+      &snapshot::load_inner(&state.db).await?.world,
+      plan,
+      allowed,
+    )
+  } else {
+    BTreeSet::new()
+  };
   let mut deploy_connections = HashMap::new();
   let network_services: BTreeSet<_> = stored
     .steps
@@ -617,8 +667,30 @@ pub(crate) async fn start_with_actor(
       .iter()
       .filter(|address| !req.confirm.contains(address))
       .collect();
+    let mut visible = plan.clone();
+    crate::dependent_confirm::project(
+      &mut visible,
+      auth.and_then(|auth| auth.services.as_ref()),
+      &visible_routes,
+    );
+    let error = if let Some(item) =
+      visible.items.iter().find(|item| {
+        item.stopping_service && missing.contains(&&item.address)
+      }) {
+      let address = &item.address;
+      ApiError::new(
+        ErrorCode::ConfirmRequired,
+        format!("停止 {address} 会影响其他对象，需要确认"),
+      )
+      .with_hint(format!(
+        "查看计划影响后执行 wharf apply {} --confirm {address}",
+        plan.plan_id
+      ))
+    } else {
+      error
+    };
     error.with_details(wharf_api_types::plan::confirm_details(
-      plan, &missing,
+      &visible, &missing,
     ))
   })?;
 
@@ -634,6 +706,16 @@ pub(crate) async fn start_with_actor(
     ))
   } else {
     None
+  };
+  let scope_freshness_error = |error: ApiError| {
+    if error.code == ErrorCode::PlanStale
+      && auth.is_some_and(|auth| auth.services.is_some())
+    {
+      ApiError::new(ErrorCode::PlanStale, "计划依赖的资源已变更")
+        .with_hint("重新生成并确认计划")
+    } else {
+      error
+    }
   };
   let reason =
     crate::db_snapshot::plan_trigger_reason(plan, &stored.steps);
@@ -655,7 +737,8 @@ pub(crate) async fn start_with_actor(
         )?;
         check_service_action_agents(&checked_state, c, &checked_steps)
       })
-      .await?;
+      .await
+      .map_err(scope_freshness_error)?;
     crate::db_snapshot::before(
       &state,
       crate::db_snapshot::Trigger::Apply,
@@ -756,7 +839,7 @@ pub(crate) async fn start_with_actor(
           base_instances.as_ref(),
         )?;
         check_service_action_agents(&checked_state, &tx, &step_plans)?;
-        let alert_changes = apply_writes(&tx, &policy_plan, &writes, admin)?;
+        let alert_changes = apply_writes(&tx, &policy_plan, &writes, admin, Some((&checked_state, &step_plans)))?;
         if let Some(dns_gateways) = dns_gateways.filter(|m| !m.is_empty()) {
           let world = crate::world::World::from_rows(db::all_resources(&tx)?)?;
           let active = crate::failover::load_active_from_conn(&tx)?;
@@ -781,7 +864,7 @@ pub(crate) async fn start_with_actor(
         tx.commit().map_err(sql_err)?;
         Ok(alert_changes.clear_after_commit())
       })
-      .await?;
+      .await.map_err(scope_freshness_error)?;
     crate::log_redact::refresh(&state.db).await;
     if removed_firing {
       crate::rules::schedule_unsuppress(&state, now_ms()).await;
@@ -972,6 +1055,7 @@ pub(crate) fn apply_writes(
   plan: &Plan,
   writes: &[crate::db::Write],
   admin: bool,
+  waiting: Option<(&AppState, &[StepPlan])>,
 ) -> Result<crate::rules::lifecycle::Changes, ApiError> {
   let current =
     crate::world::World::from_rows(db::all_resources(tx)?)?;
@@ -1028,6 +1112,26 @@ pub(crate) fn apply_writes(
     &desired,
     &crate::app_accounts::account_links(tx)?,
   )?;
+  if let Some((state, steps)) = waiting {
+    for step in steps {
+      let (service, destination) = match &step.step {
+        Step::VolumeSync { service, to, .. } => (service, Some(to)),
+        Step::ServiceUp { service, .. }
+        | Step::ServiceStart { service, .. }
+        | Step::Rebuild { service } => (service, None),
+        _ => continue,
+      };
+      if let Some(row) = desired.services.get(service)
+        && !row.spec.stopped
+      {
+        crate::wait_for::require_agent(
+          state,
+          destination.unwrap_or(&row.spec.server),
+          &row.spec,
+        )?;
+      }
+    }
+  }
   Ok(crate::rules::lifecycle::Changes::between(
     &current, &desired,
   ))
@@ -1053,7 +1157,7 @@ pub async fn start_task_by(
   start_task_locked(state, title, step, actor, guard).await
 }
 
-async fn lock_task(
+pub(crate) async fn lock_task(
   state: &AppState,
   step: &Step,
   title: &str,
@@ -1164,7 +1268,7 @@ pub(crate) async fn run_cleanup_archive(
   Ok(())
 }
 
-async fn spawn_task(
+pub(crate) async fn spawn_task(
   state: Arc<AppState>,
   title: String,
   step: Step,
@@ -1905,6 +2009,7 @@ async fn run_step_with_dns(
         || crate::shared_volumes::consumers_on(world, service, to)
           .next()
           .is_some();
+      crate::wait_for::run(state, world, service, to, cancel).await?;
       crate::migrate::volume_sync(
         state,
         &net,
@@ -2072,6 +2177,8 @@ async fn run_step_with_dns(
         &snap.render_values(world, service),
       )?;
       check_expect(Some(expect), &hash, &format!("服务 {service}"))?;
+      crate::wait_for::run(state, world, service, &server, cancel)
+        .await?;
       project_stop_start(
         state, &server, service, true, &progress, cancel,
       )
@@ -2098,8 +2205,19 @@ async fn run_step_with_dns(
       )
       .await?;
     }
-    Step::ServiceRestart { service, container } => {
-      let server = service_server(&snap, service)?;
+    Step::ServiceRestart {
+      service,
+      container,
+      scheduled,
+    } => {
+      let server = if let Some(identity) = scheduled {
+        crate::tasks::restart_schedule::ready(
+          state, &snap, service, identity, cancel,
+        )
+        .await?
+      } else {
+        service_server(&snap, service)?
+      };
       if container.is_some()
         && snap.pending.migrations.get(service).is_some_and(|m| {
           m.phase != crate::pending::MigratePhase::UpDone
@@ -2114,12 +2232,15 @@ async fn run_step_with_dns(
           ),
         ));
       }
+      crate::wait_for::run(state, world, service, &server, cancel)
+        .await?;
       crate::pending::source_changed(state, service).await?;
       service_restart(
         state,
         &server,
         service,
         container.as_deref(),
+        scheduled.is_some(),
         &progress,
         cancel,
       )
@@ -2846,12 +2967,33 @@ async fn service_restart(
   server: &str,
   service: &str,
   container: Option<&str>,
+  scheduled: bool,
   progress: &ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
-  let conn = container
-    .map(|_| state.hub.exec_v2_conn_id(server, "重启单个子容器"))
-    .transpose()?;
+  let (conn, timeout) = if scheduled {
+    let conn = state.hub.scheduled_restart_conn_id(server)?;
+    let grace = project_grace(state, server, service).await?;
+    if grace.is_some_and(|n| n > 150)
+      && state
+        .hub
+        .deploy_v2_conn_id(server, "超过 150 秒的优雅停机超时")?
+        != conn
+    {
+      return Err(crate::hub::offline(server));
+    }
+    (
+      Some(conn),
+      stop_rpc_timeout(Duration::from_secs(240), grace),
+    )
+  } else {
+    (
+      container
+        .map(|_| state.hub.exec_v2_conn_id(server, "重启单个子容器"))
+        .transpose()?,
+      Duration::from_secs(240),
+    )
+  };
   let mut result: ProjectUpResult =
     if conn.is_some() || state.hub.supports_safe_gateway(server) {
       state
@@ -2863,7 +3005,7 @@ async fn service_restart(
             project: service.into(),
             container: container.map(str::to_string),
           },
-          Duration::from_secs(240),
+          timeout,
           Some(progress.clone()),
           cancel,
         )
@@ -3383,6 +3525,7 @@ async fn service_up(
     )
   })?;
   let server = &row.spec.server;
+  crate::wait_for::run(state, world, service, server, cancel).await?;
   let old = snap
     .applied
     .get(service)
@@ -3424,6 +3567,9 @@ async fn service_up(
     None
   };
   crate::monitor::require_agent(state, &row.spec)?;
+  if !row.spec.extra_logs.is_empty() {
+    state.hub.extra_logs_conn_id(&row.spec.server)?;
+  }
   let readiness = if let Some(m) =
     row.spec.monitor.as_ref().filter(|_| !row.spec.stopped)
   {
@@ -4309,6 +4455,165 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn partial_apply_starts_consumer_after_silenced_dependency_probes_pass()
+   {
+    use serde_json::json;
+    let state = crate::rules::tests::test_state();
+    let weak = Arc::downgrade(&state);
+    let mut projects = std::collections::BTreeMap::new();
+    let mut port_ok = false;
+    let mut http_ok = false;
+    state.hub.mock_agent("s1", false, move |op| match op {
+      AgentOp::ProjectStatus { projects: names, .. } => Ok(json!(
+        names.iter().filter_map(|name| projects.get(name)).collect::<Vec<_>>()
+      )),
+      AgentOp::ResolveImages(_) => Ok(json!([{"image":"fixture:1","digest":format!("sha256:{}", "a".repeat(64))}])),
+      AgentOp::ProjectUp(up) => {
+        if up.project == "a-wait-client" {
+          assert!(port_ok && http_ok);
+        } else {
+          assert_eq!(up.project, "z-wait-store");
+        }
+        let containers = json!([{"service":up.project,"name":format!("{}-1",up.project),
+          "state":"running","health":"healthy"}]);
+        projects.insert(up.project.clone(), json!({"project":up.project,"hash":up.hash,"containers":containers}));
+        Ok(json!({"containers":containers,"images":[],"warnings":[],"retired":[]}))
+      }
+      AgentOp::PortChecks { checks } => {
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].port, 22000);
+        assert!(projects.contains_key("z-wait-store"));
+        assert!(crate::rules::op_silence::service_busy(&weak.upgrade().unwrap(), "z-wait-store"));
+        port_ok = true;
+        Ok(json!([true]))
+      }
+      AgentOp::HttpCheck(_) => {
+        assert!(projects.contains_key("z-wait-store"));
+        assert!(crate::rules::op_silence::service_busy(&weak.upgrade().unwrap(), "z-wait-store"));
+        http_ok = true;
+        Ok(json!({"status":200,"ms":1}))
+      }
+      _ => panic!("额外的 agent 操作"),
+    });
+    state.hub.enable_mock_service_checks("s1");
+    state
+      .db
+      .call(|c| {
+        db::apply_write(
+          c,
+          &Write::Upsert {
+            kind: "server".into(),
+            name: "s1".into(),
+            spec: json!({}),
+            meta: json!({}),
+          },
+        )
+      })
+      .await
+      .unwrap();
+    let request = serde_json::from_value(json!({"partial":{"services":{
+      "a-wait-client":{"server":"s1","source":{"image":"fixture:1"},"wait_for_timeout_secs":2,
+        "wait_for":{"ready":{"kind":"service","service":"z-wait-store"}}},
+      "z-wait-store":{"server":"s1","source":{"image":"fixture:1"},
+        "ports":[{"name":"http","container":8080,"host":22000}],"monitor":{"path":"/health"}}
+    }}})).unwrap();
+    let planned =
+      crate::planner::make_plan(&state, request).await.unwrap();
+    crate::planner::save(&state, &planned).await.unwrap();
+    let response = start(
+      state.clone(),
+      ApplyRequest {
+        plan_id: planned.plan.plan_id,
+        confirm: vec![],
+        verify_before_dns: None,
+        skip_snapshot: false,
+      },
+      &BTreeSet::from([Perm::Admin]),
+      None,
+    )
+    .await
+    .unwrap();
+    let run = tokio::time::timeout(Duration::from_secs(8), async {
+      loop {
+        let run = load_run(&state, &response.run_id).await.unwrap();
+        if run.status != RunStatus::Running {
+          break run;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+      }
+    })
+    .await
+    .unwrap();
+    assert_eq!(run.status, RunStatus::Succeeded, "{:?}", run.steps);
+  }
+
+  #[tokio::test]
+  async fn apply_keeps_stopped_intent_when_wait_probe_agent_is_replaced()
+   {
+    use serde_json::json;
+    let state = crate::rules::tests::test_state();
+    state.db.call(|c| {
+      for (kind, name, spec) in [
+        ("server", "s1", json!({})),
+        ("service", "paused-app", json!({"server":"s1","source":{"image":"fixture:1"},
+          "stopped":true,"wait_for":{"dns":{"kind":"dns","host":"check.example.test"}}})),
+      ] {
+        db::apply_write(c, &Write::Upsert {
+          kind: kind.into(), name: name.into(), spec, meta: json!({}),
+        })?;
+      }
+      Ok(())
+    }).await.unwrap();
+    state.hub.mock_agent("s1", false, |op| match op {
+      AgentOp::ProjectStatus { .. } => Ok(json!([])),
+      AgentOp::ResolveImages(_) => Ok(json!([{"image":"fixture:1","digest":format!("sha256:{}", "a".repeat(64))}])),
+      _ => panic!("计划期发了意外请求"),
+    });
+    state.hub.enable_mock_net_probe("s1");
+    let request = serde_json::from_value(json!({"changes":[{
+      "op":"upsert_service","name":"paused-app",
+      "spec":{"server":"s1","source":{"image":"fixture:1"},
+        "wait_for":{"dns":{"kind":"dns","host":"check.example.test"}}}
+    }]}))
+    .unwrap();
+    let planned =
+      crate::planner::make_plan(&state, request).await.unwrap();
+    assert!(planned.steps.iter().any(|step| matches!(
+      &step.step, Step::ServiceUp { service, .. } if service == "paused-app"
+    )));
+    crate::planner::save(&state, &planned).await.unwrap();
+    state.hub.mock_agent("s1", false, |_| {
+      panic!("能力不足时不应发送 agent 请求")
+    });
+    let plan_id = planned.plan.plan_id;
+    let error = start(
+      state.clone(),
+      ApplyRequest {
+        plan_id: plan_id.clone(),
+        confirm: vec![],
+        verify_before_dns: None,
+        skip_snapshot: false,
+      },
+      &BTreeSet::from([Perm::Admin]),
+      None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Conflict);
+    assert!(error.hint.unwrap().contains("wharf upgrade"));
+    assert_eq!(
+      stored_plan(&state, &plan_id)
+        .await
+        .unwrap()
+        .body
+        .plan
+        .status,
+      PlanStatus::Pending
+    );
+    assert!(snapshot::load(&state.db).await.unwrap().world.services["paused-app"].spec.stopped);
+  }
+
+  #[tokio::test]
   async fn stale_delete_plan_rejected_after_recreate_same_version() {
     use wharf_api_types::{plan::PlanRequest, spec::Change};
     let state = crate::rules::tests::test_state();
@@ -4701,6 +5006,7 @@ mod tests {
     );
     let restart = Step::ServiceRestart {
       service: "notes".into(),
+      scheduled: None,
       container: None,
     };
     run_step(&state, "r2", &restart, progress, &cancel)
@@ -4788,19 +5094,28 @@ mod tests {
       .unwrap();
     state.db.call(|c| {
       c.execute(
-        "UPDATE resources SET spec = json_remove(spec, '$.stopped') WHERE kind = 'service' AND name = 'notes'",
-        [],
+        "UPDATE resources SET spec = json_set(json_remove(spec, '$.stopped'), '$.wait_for', json(?1)) WHERE kind = 'service' AND name = 'notes'",
+        [r#"{"dns":{"kind":"dns","host":"check.example.test"}}"#],
       ).map_err(sql_err)?;
       Ok(())
     }).await.unwrap();
     let snap = snapshot::load(&state.db).await.unwrap();
-    state.hub.mock_agent("s2", false, |op| {
-      assert!(
-        matches!(op, AgentOp::ProjectStart { project, containers }
-        if project == "notes" && containers.is_empty())
-      );
-      Ok(serde_json::json!(true))
+    let mut dns_ok = false;
+    state.hub.mock_agent("s2", false, move |op| match op {
+      AgentOp::NetProbe(job) => {
+        assert_eq!(job.kind, wharf_api_types::net_probe::NetProbeKind::Dns);
+        assert_eq!(job.target, "check.example.test");
+        dns_ok = true;
+        Ok(serde_json::json!({"elapsed_ms":0,"dns":{"ips":["203.0.113.1"],
+          "elapsed_ms":0,"nameservers":[],"search":[]}}))
+      }
+      AgentOp::ProjectStart { project, containers } => {
+        assert!(dns_ok && project == "notes" && containers.is_empty());
+        Ok(serde_json::json!(true))
+      }
+      _ => panic!("额外的 agent 操作"),
     });
+    state.hub.enable_mock_net_probe("s2");
     let start = Step::ServiceStart {
       service: "notes".into(),
       instance_id: snap.world.services["notes"].instance_id.clone(),
@@ -5307,6 +5622,7 @@ mod tests {
       "s1",
       "notes",
       None,
+      false,
       &progress,
       &CancellationToken::new(),
     )
@@ -5334,6 +5650,7 @@ mod tests {
         "s1",
         "stack",
         Some("db"),
+        false,
         &progress,
         &cancel,
       )
@@ -5366,9 +5683,11 @@ mod tests {
         during_stop.cancel();
       }
     });
-    service_restart(&state, "s1", "notes", None, &progress, &cancel)
-      .await
-      .unwrap();
+    service_restart(
+      &state, "s1", "notes", None, false, &progress, &cancel,
+    )
+    .await
+    .unwrap();
     assert!(cancel.is_cancelled());
   }
 
@@ -5442,6 +5761,9 @@ mod tests {
         reason: "修改配置".into(),
         changes: vec![],
         host_access: vec![],
+        dependents: vec![],
+        hidden_dependents: 0,
+        stopping_service: false,
       }],
       warnings: vec![],
       needs_host: vec![],

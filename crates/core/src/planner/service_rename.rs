@@ -987,6 +987,7 @@ async fn rename_switch_releases_new_name_and_keeps_old_name_until_archive()
   assert_eq!(snap.world.services["new"].instance_id, job.instance);
   let recreate = PlanRequest {
     changes: vec![Change::UpsertService {
+      no_defaults: false,
       name: "old".into(),
       spec: snap.world.services["new"].spec.clone(),
       adopt: None,
@@ -1009,6 +1010,7 @@ async fn rename_switch_releases_new_name_and_keeps_old_name_until_archive()
     &state,
     PlanRequest {
       changes: vec![Change::UpsertService {
+        no_defaults: false,
         name: "new".into(),
         spec: {
           let mut spec = desired.services["new"].spec.clone();

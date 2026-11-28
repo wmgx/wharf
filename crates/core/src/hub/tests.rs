@@ -54,6 +54,7 @@ fn old_hello_has_no_host_shell_capability() {
     build_v2,
     safe_rollback,
     key_rotation,
+    extra_logs_v1,
     gateway_probe,
     frpc_reload,
     ..
@@ -90,6 +91,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!build_v2);
   assert!(!safe_rollback);
   assert!(!key_rotation);
+  assert!(!extra_logs_v1);
   assert!(!gateway_probe && !frpc_reload);
 }
 
@@ -162,6 +164,7 @@ fn old_core_ignores_new_hello_capability() {
     deploy_v2: false,
     safe_rollback: true,
     files_v2: true,
+    extra_logs_v1: false,
     key_rotation: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
@@ -246,6 +249,21 @@ impl Hub {
 
   pub(crate) fn enable_mock_files_v2(&self, server: &str) {
     lock(&self.conns).get_mut(server).unwrap().files_v2 = true;
+  }
+
+  pub(crate) fn enable_mock_service_checks(&self, server: &str) {
+    lock(&self.conns).get_mut(server).unwrap().service_checks = true;
+  }
+
+  pub(crate) fn enable_mock_net_probe(&self, server: &str) {
+    lock(&self.conns).get_mut(server).unwrap().net_probe = true;
+  }
+
+  pub(crate) fn enable_mock_extra_logs(&self, server: &str) {
+    let mut conns = lock(&self.conns);
+    let conn = conns.get_mut(server).unwrap();
+    conn.files_v2 = true;
+    conn.extra_logs_v1 = true;
   }
 
   pub(crate) fn enable_mock_exec_v2(&self, server: &str) {
@@ -442,6 +460,7 @@ impl Hub {
         deploy_v2: false,
         safe_rollback: false,
         files_v2: false,
+        extra_logs_v1: false,
         upgrade_only: false,
       },
     );
@@ -606,6 +625,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     deploy_v2: false,
     safe_rollback: false,
     files_v2: false,
+    extra_logs_v1: false,
     upgrade_only: true,
   };
   state.hub.register("s1", conn.clone());
@@ -696,6 +716,7 @@ fn probe_connection(
     deploy_v2: false,
     safe_rollback: false,
     files_v2: false,
+    extra_logs_v1: false,
     upgrade_only: false,
   };
   (conn, rx)

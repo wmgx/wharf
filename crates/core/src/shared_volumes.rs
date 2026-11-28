@@ -115,12 +115,10 @@ pub fn validate_service(
 
 pub fn validate_world(world: &World) -> Result<(), ApiError> {
   let mut owned = BTreeMap::new();
-  let mut dependencies = BTreeMap::<&str, BTreeSet<&str>>::new();
   for (name, row) in &world.services {
     for v in &row.spec.volumes {
       let Some(raw) = &v.from_service else { continue };
       let (owner, vol) = parse_ref(raw)?;
-      dependencies.entry(name).or_default().insert(owner);
       let other = world.services.get(owner).ok_or_else(|| {
         ApiError::invalid(format!(
           "服务 {name} 的共享卷 {} 引用的服务 {owner} 不存在",
@@ -158,28 +156,12 @@ pub fn validate_world(world: &World) -> Result<(), ApiError> {
       }
     }
   }
-  // 互相挂载对方的自有卷也会形成环，任何一方都不能先安全删数。
-  while !dependencies.is_empty() {
-    let ready: Vec<_> = dependencies
+  wharf_api_types::spec::validate_service_dependencies(
+    world
+      .services
       .iter()
-      .filter(|(_, owners)| {
-        owners.iter().all(|owner| !dependencies.contains_key(owner))
-      })
-      .map(|(&service, _)| service)
-      .collect();
-    if ready.is_empty() {
-      let services =
-        dependencies.keys().copied().collect::<Vec<_>>().join("、");
-      return Err(
-        ApiError::invalid(format!("共享卷依赖成环：{services}"))
-          .with_hint("解除其中一个共享卷引用后再试"),
-      );
-    }
-    for service in ready {
-      dependencies.remove(service);
-    }
-  }
-  Ok(())
+      .map(|(name, row)| (name.as_str(), &row.spec)),
+  )
 }
 
 pub fn implicit_warnings(
@@ -225,7 +207,10 @@ pub fn sort_steps(
       .iter()
       .enumerate()
       .filter_map(|(i, s)| match &s.step {
-        Step::ServiceUp { service, .. } if !down => {
+        Step::ServiceUp { service, .. }
+        | Step::ServiceStart { service, .. }
+          if !down =>
+        {
           Some((i, service.clone()))
         }
         Step::ServiceDown { service, .. } if down => {
@@ -236,14 +221,21 @@ pub fn sort_steps(
       .collect();
     let mut deps: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for (_, service) in &slots {
-      if let Some(row) = world.services.get(service) {
-        for owner in owners(&row.spec) {
-          let (before, after) = if down {
-            (service.as_str(), owner)
-          } else {
-            (owner, service.as_str())
-          };
-          deps.entry(after).or_default().insert(before);
+      let Some(row) = world.services.get(service) else {
+        continue;
+      };
+      for owner in owners(&row.spec) {
+        if down {
+          deps.entry(owner).or_default().insert(service);
+        } else {
+          deps.entry(service).or_default().insert(owner);
+        }
+      }
+      if !down {
+        for dep in
+          row.spec.wait_for.values().filter_map(|wait| wait.service())
+        {
+          deps.entry(service).or_default().insert(dep);
         }
       }
     }
@@ -293,6 +285,7 @@ mod tests {
       ),
     ] {
       world.apply_changes(&[Change::UpsertService {
+        no_defaults: false,
         name: name.into(),
         spec: serde_json::from_value(json!({"server":"s1","source":{"image":"fixture:1"},"volumes":[volume]})).unwrap(),
         adopt: None,
@@ -302,6 +295,58 @@ mod tests {
       }]).unwrap();
     }
     world
+  }
+
+  #[test]
+  fn wait_edges_order_startup_and_reject_cycles_with_shared_volumes()
+  {
+    use wharf_api_types::spec::WaitCondition;
+    let mut world = shared_world();
+    let mut steps: Vec<StepPlan> = ["reader", "photos"]
+      .into_iter()
+      .map(|service| StepPlan {
+        items: vec![],
+        title: service.into(),
+        step: Step::ServiceStart {
+          service: service.into(),
+          instance_id: world.services[service].instance_id.clone(),
+          expect: String::new(),
+        },
+      })
+      .collect();
+    world
+      .services
+      .get_mut("reader")
+      .unwrap()
+      .spec
+      .wait_for
+      .insert(
+        "available".into(),
+        WaitCondition::Service {
+          service: "photos".into(),
+        },
+      );
+    validate_world(&world).unwrap();
+    sort_steps(&mut steps, &World::default(), &world);
+    assert_eq!(steps[0].title, "photos");
+    world
+      .services
+      .get_mut("photos")
+      .unwrap()
+      .spec
+      .wait_for
+      .insert(
+        "reader".into(),
+        WaitCondition::Service {
+          service: "reader".into(),
+        },
+      );
+    assert!(
+      validate_world(&world)
+        .unwrap_err()
+        .message
+        .contains("photos → reader → photos")
+    );
   }
 
   #[test]
@@ -340,9 +385,16 @@ mod tests {
   }
 
   #[test]
-  fn batch_delete_orders_consumer_before_owner_and_up_owner_before_consumer()
+  fn batch_delete_keeps_shared_volume_order_with_reverse_env_reference()
    {
-    let world = shared_world();
+    let mut world = shared_world();
+    world
+      .services
+      .get_mut("photos")
+      .unwrap()
+      .spec
+      .env
+      .insert("READER".into(), "[[@reader.http]]".into());
     let up = |name: &str| Step::ServiceUp {
       images: Default::default(),
       service: name.into(),

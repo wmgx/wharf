@@ -1067,6 +1067,7 @@ async fn pending_import_retry_does_not_resolve_registry_images() {
     .unwrap(),
   );
   let row = crate::world::ServiceRow {
+    frozen_defaults: Default::default(),
     host_groups: Default::default(),
     spec: serde_json::from_value(serde_json::json!({"server": "s1", "source": {"image": "img:1"}})).unwrap(),
     version: 1,
