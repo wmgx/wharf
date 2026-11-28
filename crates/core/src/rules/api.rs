@@ -330,7 +330,7 @@ pub async fn patch(
     .await;
   }
   if builtin_sup && p.enabled == Some(false) {
-    suppress::flush_unsuppressed(&s, now_ms()).await;
+    suppress::flush_unsuppressed_now(&s, now_ms()).await;
   }
   Ok(Json(view(&s).await?))
 }

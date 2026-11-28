@@ -43,7 +43,7 @@ pub(crate) async fn clear_matching(
     .await;
   match result {
     Ok(true) => {
-      super::suppress::flush_unsuppressed(state, db::now_ms()).await
+      super::suppress::schedule_unsuppress(state, db::now_ms()).await
     }
     Ok(false) => {}
     Err(e) => tracing::warn!("清理告警状态失败：{}", e.message),
@@ -54,6 +54,8 @@ fn clear_cache(remove: &impl Fn(&str, &str) -> bool) -> bool {
   with(|m| {
     let before = m.firing.len();
     m.firing.retain(|(rule, subject), _| !remove(rule, subject));
+    m.unsuppress_grace
+      .retain(|(rule, subject), _| !remove(rule, subject));
     m.acks.retain(|(rule, subject), _| !remove(rule, subject));
     m.series.retain(|(metric, subject), _| {
       let mut rules = RULES

@@ -51,7 +51,9 @@ pub(crate) mod service_overrides;
 mod store;
 #[path = "rules/suppress.rs"]
 mod suppress;
-pub(crate) use suppress::flush_unsuppressed;
+pub(crate) use suppress::{
+  flush_due_unsuppressed, schedule_unsuppress,
+};
 
 use api::view;
 use catalog::{NOTICES, RULES};
@@ -233,6 +235,7 @@ struct Memory {
   series: BTreeMap<(String, String), (VecDeque<f64>, i64)>,
   /// （规则，对象）→ 触发记录，和表 `alert_firing` 一致，第一次用时从库里读。
   firing: BTreeMap<(String, String), FiringEntry>,
+  unsuppress_grace: BTreeMap<(String, String), i64>,
   /// （规则，对象）→ 确认记录，和表 `alert_acks` 一致。
   acks: BTreeMap<(String, String), AckEntry>,
   /// 自定义抑制规则，和表 `alert_suppressions` 一致。
@@ -552,7 +555,9 @@ pub(crate) async fn observe_at(
         (true, (rule.ok)(&ctx))
       }
     };
-    if notify::transition(state, &(rule.key)(subject), ok).await {
+    if notify::transition(state, &(rule.key)(subject), ok).await
+      || (!ok && suppress::confirm_sample(state, &fkey).await)
+    {
       let event = if ok && rule.id == "server_offline" {
         // 开始触发前已经连续离线了 for_n 分钟。
         let since =
@@ -579,7 +584,7 @@ pub(crate) async fn observe_at(
       )
       .await;
       if ok {
-        suppress::flush_unsuppressed(state, now).await;
+        suppress::schedule_unsuppress(state, now).await;
       }
     }
   }

@@ -223,6 +223,12 @@ pub async fn ensure_loaded(state: &AppState) {
   with(|m| {
     if !m.loaded {
       m.config = cfg;
+      let deadline = db::now_ms() + 180_000;
+      m.unsuppress_grace = firing
+        .iter()
+        .filter(|(_, f)| f.suppressed && f.delivery == Delivery::None)
+        .map(|(key, _)| (key.clone(), deadline))
+        .collect();
       m.firing = firing;
       m.acks = acks;
       m.suppressions = suppressions;
@@ -254,7 +260,10 @@ pub(super) async fn set_firing(
         Some(false)
       }
     }
-    None => m.firing.remove(&key).map(|_| false),
+    None => {
+      m.unsuppress_grace.remove(&key);
+      m.firing.remove(&key).map(|_| false)
+    }
   });
   let Some(update) = update else { return };
   let result = state

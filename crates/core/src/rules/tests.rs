@@ -428,8 +428,11 @@ async fn suppress_offline_flushes_on_recovery_and_skips_unpushed_recovery()
     )
     .await;
   }
-  // s1 恢复在线：web 仍在触发，应补推一次。
+  // s1 恢复在线，等 web 新采样后再补推。
   observe_at(&s, t0 + 10 * MIN, "server.online", "s1", 1.0, "").await;
+  assert_eq!(history_rows(&s).await.len(), 3);
+  observe_at(&s, t0 + 11 * MIN, "monitor.ok", "web", 0.0, "仍超时")
+    .await;
 
   let rows = history_rows(&s).await;
   assert_eq!(rows.len(), 4);
@@ -516,7 +519,7 @@ async fn custom_suppression_blocks_until_source_recovers() {
   assert_eq!(rows[1].0, "monitor_failed");
   assert_eq!(rows[1].3.as_deref(), Some("被抑制：s1 上的 db 停了"));
 
-  // A:x 恢复 -> B 补推；此后 B 恢复、再次触发均不再受抑制。
+  // A:x 恢复后保持宽限，无新点则到期补推。
   observe_at(
     &s,
     t0 + 6 * MIN,
@@ -526,11 +529,15 @@ async fn custom_suppression_blocks_until_source_recovers() {
     "running",
   )
   .await;
-  observe_at(&s, t0 + 7 * MIN, "monitor.ok", "api", 1.0, "ok").await;
+  assert_eq!(history_rows(&s).await.len(), 3);
+  suppress::flush_due_unsuppressed(&s, t0 + 8 * MIN).await;
+  assert_eq!(history_rows(&s).await.len(), 3);
+  suppress::flush_due_unsuppressed(&s, t0 + 9 * MIN).await;
+  observe_at(&s, t0 + 10 * MIN, "monitor.ok", "api", 1.0, "ok").await;
   for i in 0..3 {
     observe_at(
       &s,
-      t0 + (8 + i) * MIN,
+      t0 + (11 + i) * MIN,
       "monitor.ok",
       "api",
       0.0,
@@ -1090,6 +1097,7 @@ async fn firing_refreshes_certificate_text_and_suppression_rejects_cycle()
       .starts_with("被抑制：")
   );
   lifecycle::clear(&state, "cert_expiring", "app.example.com").await;
+  observe_at(&state, 6, "monitor.ok", "web", 0.0, "").await;
   assert!(delivered(&history_rows(&state).await.last().unwrap().3));
 }
 

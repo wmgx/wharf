@@ -518,7 +518,7 @@ pub(crate) async fn start_with_actor(
       .await?;
     crate::log_redact::refresh(&state.db).await;
     if removed_firing {
-      crate::rules::flush_unsuppressed(&state, now_ms()).await;
+      crate::rules::schedule_unsuppress(&state, now_ms()).await;
     }
   }
 

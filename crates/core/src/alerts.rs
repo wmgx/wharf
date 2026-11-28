@@ -126,7 +126,8 @@ async fn round(
     .await;
   }
   crate::rules::lifecycle::reconcile_world(state, snap).await?;
-  crate::rules::flush_unsuppressed(state, crate::db::now_ms()).await;
+  crate::rules::flush_due_unsuppressed(state, crate::db::now_ms())
+    .await;
   Ok(())
 }
 

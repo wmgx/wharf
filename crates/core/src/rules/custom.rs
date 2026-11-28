@@ -651,7 +651,9 @@ pub(super) async fn evaluate_at(
         (true, e)
       }
     };
-    if notify::transition(state, &cr.notify_key(), ok).await {
+    if notify::transition(state, &cr.notify_key(), ok).await
+      || (!ok && suppress::confirm_sample(state, &fkey).await)
+    {
       let o = cr.as_override();
       push_with_world(
         state,
@@ -668,7 +670,7 @@ pub(super) async fn evaluate_at(
       )
       .await;
       if ok {
-        suppress::flush_unsuppressed(state, now).await;
+        suppress::schedule_unsuppress(state, now).await;
       }
     }
   }
