@@ -13,7 +13,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use wharf_api_types::{
-  ApiError,
+  ApiError, ErrorCode,
   agent::ProjectState,
   plan::{
     Action, Impact, Layer, Plan, PlanItem, PlanRequest, PlanStatus,
@@ -4600,7 +4600,7 @@ mod tests {
         AgentOp::ProjectStatus { .. } => json!([applied]),
         AgentOp::TaskRun(task) => {
           assert!(matches!(task.how, TaskHow::Exec { project, service: Some(service), .. } if project == "wharf-gw-edge" && service == "caddy"));
-          json!({"output":format!("{}  -", render::hash(&format!("{url}/agent/acme-dns"))), "exit_code":0, "timed_out":false, "duration_ms":0})
+          json!({"output":format!("{}  -", crate::render::hash(&format!("{url}/agent/acme-dns"))), "exit_code":0, "timed_out":false, "duration_ms":0})
         }
         _ => panic!("计划期发了意外请求"),
       })
