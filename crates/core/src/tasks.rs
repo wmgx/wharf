@@ -166,7 +166,9 @@ pub fn spawn(state: Arc<AppState>) {
     tokio::time::sleep(Duration::from_secs(30)).await;
     loop {
       let now = minute_floor(Utc::now());
-      if let Err(e) = tick(&state, checked, now).await {
+      if !state.is_safe_mode()
+        && let Err(e) = tick(&state, checked, now).await
+      {
         tracing::warn!("检查定时任务失败：{e}");
       }
       checked = now;
@@ -181,6 +183,13 @@ async fn tick(
   after: DateTime<Utc>,
   until: DateTime<Utc>,
 ) -> Result<(), ApiError> {
+  let resumed_at = state
+    .resumed_at
+    .get()
+    .copied()
+    .map(minute_floor)
+    .unwrap_or(DateTime::<Utc>::MIN_UTC);
+  let after = after.max(resumed_at);
   let rows = load(state).await?;
   let snap = if rows.iter().any(|(_, spec, _)| {
     spec.enabled && matches!(spec.how, TaskKind::Exec { .. })
@@ -199,7 +208,16 @@ async fn tick(
     if let TaskKind::Ping { grace_mins, .. } = spec.how {
       if until > after {
         crate::ping::check_due(
-          state, &name, &spec, &cron, grace_mins, after, until,
+          state,
+          &name,
+          &spec,
+          &cron,
+          grace_mins,
+          after.max(
+            resumed_at
+              + chrono::Duration::minutes(i64::from(grace_mins)),
+          ),
+          until,
         )
         .await;
       }
@@ -242,6 +260,7 @@ async fn tick(
     };
     let grace = chrono::Duration::minutes(i64::from(window));
     if let Some(due) = cron.prev_at_or_before(until, window)
+      && due > resumed_at
       && due.timestamp_millis() >= updated_at
       && (stopped.is_some() || online)
       && let Some(guard) = RunGuard::acquire(&name)
@@ -271,7 +290,8 @@ async fn tick(
       continue;
     }
     if until > after
-      && let Some(due) = cron.next_after(after - grace)
+      && let Some(due) =
+        cron.next_after((after - grace).max(resumed_at))
       && due + grace <= until
       && due.timestamp_millis() >= updated_at
       && !scheduled_since(state, &name, due).await?
@@ -625,7 +645,9 @@ pub(crate) async fn notify_result(
   output: &str,
   target: Option<&str>,
 ) {
-  if matches!(status, TaskStatus::Skipped | TaskStatus::Cancelled) {
+  if state.is_safe_mode()
+    || matches!(status, TaskStatus::Skipped | TaskStatus::Cancelled)
+  {
     return;
   }
   let ok = status == TaskStatus::Succeeded;
@@ -2267,6 +2289,41 @@ async fn task_skips_when_service_stopped_and_catches_up_once_after_offline()
     assert_eq!(expired, (1, "failed".into()));
     Ok(())
   }).await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_skips_paused_due_times_without_skipping_future_runs()
+{
+  let state = crate::rules::tests::test_state();
+  let resume =
+    DateTime::parse_from_rfc3339("2026-11-20T10:20:00+08:00")
+      .unwrap()
+      .with_timezone(&Utc);
+  state.resumed_at.set(resume).unwrap();
+  state.db.call(|c| {
+    c.execute_batch(
+      "INSERT INTO tasks (name, spec, created_at, updated_at) VALUES
+       ('online', '{\"server\":\"s1\",\"kind\":\"host\",\"command\":\"true\",\"schedule\":\"0 * * * *\",\"catch_up_mins\":60,\"notify\":false}', 0, 0),
+       ('offline', '{\"server\":\"s2\",\"kind\":\"host\",\"command\":\"true\",\"schedule\":\"0 10 * * *\",\"catch_up_mins\":60,\"notify\":false}', 0, 0)",
+    ).map_err(sql_err)
+  }).await.unwrap();
+  state.hub.mock_agent("s1", false, |_| Ok(serde_json::json!({"output":"","exit_code":0,"timed_out":false})));
+  let minute = chrono::Duration::minutes(1);
+  tick(&state, resume, resume + minute).await.unwrap();
+  assert!(
+    !scheduled_since(&state, "online", resume - minute * 20)
+      .await
+      .unwrap()
+  );
+
+  let next = resume + minute * 40;
+  tick(&state, next - minute, next).await.unwrap();
+  assert!(
+    !scheduled_since(&state, "offline", resume - minute * 20)
+      .await
+      .unwrap()
+  );
+  assert!(scheduled_since(&state, "online", next).await.unwrap());
 }
 
 #[tokio::test]

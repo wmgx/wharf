@@ -966,8 +966,21 @@ pub struct Issue {
   pub alert: Option<AlertTarget>,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CoreSafeModeView {
+  pub safe_mode: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub resumed: Option<bool>,
+  #[serde(default)]
+  pub paused: Vec<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub hint: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Status {
+  #[serde(default)]
+  pub safe_mode: bool,
   #[serde(default)]
   pub bookmarks: Vec<BookmarkView>,
   pub servers: Vec<ServerView>,
@@ -1240,9 +1253,20 @@ pub struct BackupRecord {
   pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BackupUnlockResult {
+  pub target: String,
+  pub stale_only: bool,
+  pub unlocked: bool,
+}
+
 /// `GET /api/services/{name}/backups`
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BackupsView {
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub exclude: Vec<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub retention: Option<crate::backup::BackupRetention>,
   pub service: String,
   /// 没开启备份时为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]

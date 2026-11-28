@@ -40,6 +40,7 @@ pub struct Ops {
   /// 数据目录：打包宿主机目录时的临时文件放在它下面的 `tmp/`。
   pub data_dir: std::path::PathBuf,
   locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+  extracts: crate::restic::ExtractStore,
   restic_locks: Mutex<HashMap<String, Arc<tokio::sync::RwLock<()>>>>,
 }
 
@@ -59,6 +60,7 @@ impl Ops {
       reporter,
       core_url,
       host_shell,
+      extracts: crate::restic::ExtractStore::new(&data_dir),
       data_dir,
       locks: Default::default(),
       restic_locks: Default::default(),
@@ -590,6 +592,21 @@ impl Ops {
   ) -> Result<Value, ApiError> {
     use wharf_api_types::agent::{ResticAction, ResticRepo};
     wharf_api_types::validate_name("service", &job.service)?;
+    match &job.action {
+      ResticAction::ExtractRead { token, offset, len } => {
+        return to_value(self.extracts.read(
+          &job.service,
+          token,
+          *offset,
+          *len,
+        )?);
+      }
+      ResticAction::ExtractClose { token } => {
+        self.extracts.close(&job.service, token);
+        return Ok(Value::Null);
+      }
+      _ => {}
+    }
     let scope = match &job.repo {
       ResticRepo::Local => "local",
       ResticRepo::Rest { .. } => "rest",
@@ -616,13 +633,17 @@ impl Ops {
       ResticAction::Snapshots
         | ResticAction::ListKeys
         | ResticAction::Preflight(_)
+        | ResticAction::Ls { .. }
+        | ResticAction::ExtractPrepare { .. }
+        | ResticAction::DiffLocal { .. }
+        | ResticAction::DiffSnapshots { .. }
     ) {
       let _guard = tokio::select! {
         biased;
         _ = ctx.cancel.cancelled() => return Err(ApiError::new(ErrorCode::Cancelled, "已取消")),
         guard = tokio::time::timeout(Duration::from_secs(5), lock.read()) => guard.map_err(|_| busy())?,
       };
-      crate::restic::run(&self.docker, job, ctx).await
+      crate::restic::run(&self.docker, job, &self.extracts, ctx).await
     } else {
       let _guard = lock.try_write().map_err(|_| busy())?;
       let _data = if matches!(
@@ -634,7 +655,7 @@ impl Ops {
       } else {
         None
       };
-      crate::restic::run(&self.docker, job, ctx).await
+      crate::restic::run(&self.docker, job, &self.extracts, ctx).await
     }
   }
 

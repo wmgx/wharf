@@ -9,6 +9,7 @@
 
 pub mod access_logs;
 pub mod agent;
+pub mod backup;
 pub mod build;
 pub mod compose;
 pub mod egress;

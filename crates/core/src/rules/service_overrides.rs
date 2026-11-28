@@ -35,6 +35,7 @@ pub(super) const SERVICE_RULES: &[&str] = &[
   "port_down",
   "heartbeat_late",
   "mem_forecast",
+  "backup_spike",
 ];
 
 pub(crate) fn is_service_rule(id: &str) -> bool {
@@ -53,6 +54,7 @@ pub(crate) fn service_of_subject<'a>(
     | "monitor_failed"
     | "http_5xx"
     | "heartbeat_late"
+    | "backup_spike"
     | "backup"
     | "heal"
     | "auto_update"
@@ -201,6 +203,11 @@ pub(super) async fn set_override(
       "{} 的阈值固定，改连续次数",
       rule.name
     )));
+  }
+  if id == "backup_spike"
+    && p.threshold.is_some_and(|value| value <= 0.0)
+  {
+    return Err(ApiError::invalid("备份暴涨倍数必须大于 0"));
   }
   if p.threshold.is_some_and(|t| !t.is_finite()) {
     return Err(ApiError::invalid("阈值要是数字"));

@@ -563,13 +563,11 @@ impl Client {
     &self.base
   }
 
-  /// 边收边交给 `on_chunk`（下载文件），总共最多 `timeout`。
-  pub async fn download(
+  pub(crate) async fn download_response(
     &self,
     path: &str,
     timeout: Duration,
-    mut on_chunk: impl FnMut(&[u8]) -> std::io::Result<()>,
-  ) -> CliResult<()> {
+  ) -> CliResult<reqwest::Response> {
     let req = self
       .http
       .get(format!("{}{path}", self.endpoint))
@@ -578,8 +576,7 @@ impl Client {
       Some(token) => req.bearer_auth(token),
       None => req,
     };
-    let mut resp =
-      req.send().await.map_err(|e| self.conn_error(e))?;
+    let resp = req.send().await.map_err(|e| self.conn_error(e))?;
     if !resp.status().is_success() {
       let status = resp.status().as_u16();
       let bytes = resp.bytes().await.unwrap_or_default();
@@ -591,6 +588,17 @@ impl Client {
           .into(),
       );
     }
+    Ok(resp)
+  }
+
+  /// 边收边交给 `on_chunk`（下载文件），总共最多 `timeout`。
+  pub async fn download(
+    &self,
+    path: &str,
+    timeout: Duration,
+    mut on_chunk: impl FnMut(&[u8]) -> std::io::Result<()>,
+  ) -> CliResult<()> {
+    let mut resp = self.download_response(path, timeout).await?;
     let expected = resp.content_length();
     let mut received = 0;
     while let Some(chunk) = resp.chunk().await.map_err(|e| {
@@ -633,6 +641,21 @@ impl Client {
   ) -> CliResult<T> {
     self
       .send(self.http.get(format!("{}{path}", self.endpoint)))
+      .await
+  }
+
+  pub async fn get_timeout<T: DeserializeOwned>(
+    &self,
+    path: &str,
+    timeout: Duration,
+  ) -> CliResult<T> {
+    self
+      .send(
+        self
+          .http
+          .get(format!("{}{path}", self.endpoint))
+          .timeout(timeout),
+      )
       .await
   }
 
