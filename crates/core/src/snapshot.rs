@@ -1657,6 +1657,99 @@ mod tests {
     );
   }
 
+  #[tokio::test]
+  async fn old_services_and_old_agent_stay_unchanged_in_global_plan()
+  {
+    use serde_json::json;
+    use wharf_api_types::{agent::AgentOp, plan::PlanRequest};
+    let state = crate::rules::tests::test_state();
+    let mut world = world(21000);
+    world.servers.get_mut("s1").unwrap().settings.private_addr = Some(
+      serde_json::from_value(
+        json!({"ip":"2001:db8::1","network":"overlay"}),
+      )
+      .unwrap(),
+    );
+    let row = world.services.remove("app").unwrap();
+    for (i, name) in ["image", "compose", "stopped", "v6"]
+      .into_iter()
+      .enumerate()
+    {
+      let mut current = row.clone();
+      current.instance_id = format!("instance-{name}");
+      current.host_ports.insert("http".into(), 21000 + i as u16);
+      current.pins.insert(
+        "nginx:1".into(),
+        format!("sha256:{}", "a".repeat(64)),
+      );
+      if name == "compose" {
+        current.spec.source=serde_json::from_value(json!({"compose":{"content":"services:\n  web:\n    image: nginx:1\n"}})).unwrap();
+        current.spec.ports.clear();
+        current.host_ports.clear();
+      } else if name == "stopped" {
+        current.spec.stopped = true;
+      } else if name == "v6" {
+        current
+          .spec
+          .env
+          .insert("APP_HOST".into(), "[[@image:host]]".into());
+      }
+      let old = serde_json::to_value(&current.spec).unwrap();
+      assert!(
+        old.get("tags").is_none() && old.get("crash_guard").is_none()
+      );
+      world.services.insert(name.into(), current);
+    }
+    let mut snap = Snapshot {
+      world,
+      ..Default::default()
+    };
+    let net = snap.net(&snap.world);
+    let mut live = Vec::new();
+    for name in ["image", "compose", "stopped", "v6"] {
+      let values = Default::default();
+      let (_, hash) = resolve_service(
+        &snap.world,
+        &net,
+        name,
+        &values,
+        name == "v6",
+      )
+      .unwrap();
+      let component = if name == "compose" { "web" } else { name };
+      let state = if name == "stopped" {
+        "exited"
+      } else {
+        "running"
+      };
+      live.push(json!({"project":name,"hash":hash,"containers":[{"service":component,"name":format!("{name}-1"),"state":state}]}));
+      snap.deployed.insert(name.into(), "s1".into());
+    }
+    state.hub.mock_agent("s1", false, move |op| match op {
+      AgentOp::ProjectStatus { .. } => Ok(json!(live)),
+      _ => panic!("旧服务的普通 plan 不应执行额外操作"),
+    });
+    let result = crate::planner::make_plan_inner(
+      &state,
+      PlanRequest::default(),
+      snap,
+      false,
+      true,
+    )
+    .await
+    .unwrap();
+    assert!(result.writes.is_empty() && result.steps.is_empty());
+    assert!(result.plan.items.is_empty(), "{:?}", result.plan.items);
+    let mut saved = serde_json::to_value(result.plan).unwrap();
+    saved.as_object_mut().unwrap().remove("service_action");
+    assert!(
+      serde_json::from_value::<wharf_api_types::plan::Plan>(saved)
+        .unwrap()
+        .service_action
+        .is_none()
+    );
+  }
+
   #[test]
   fn references_follow_the_target_service() {
     use wharf_api_types::spec::{PrivateAddr, PrivateNetwork};

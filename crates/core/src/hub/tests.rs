@@ -169,6 +169,14 @@ impl Hub {
     );
   }
 
+  pub(crate) fn enable_mock_service_copy(&self, server: &str) {
+    let mut conns = lock(&self.conns);
+    let conn = conns.get_mut(server).unwrap();
+    conn.service_copy = true;
+    conn.migrate_v2 = true;
+    conn.shared_volumes = true;
+  }
+
   pub(crate) fn enable_mock_container_diagnosis(&self, server: &str) {
     lock(&self.conns)
       .get_mut(server)

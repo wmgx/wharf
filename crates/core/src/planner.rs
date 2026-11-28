@@ -4315,6 +4315,118 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn clone_plan_reserves_copy_confirmation_and_requires_both_scopes()
+   {
+    use wharf_api_types::{agent::AgentOp, plan::ServiceAction};
+    let state = crate::rules::tests::test_state();
+    let mut world = world();
+    let row = world.services.get_mut("app").unwrap();
+    row.spec.stopped = true;
+    row.spec.volumes = serde_json::from_value(
+      json!([{"name":"data","target":"/data"}]),
+    )
+    .unwrap();
+    let snap = || Snapshot {
+      world: world.clone(),
+      ..Default::default()
+    };
+    let request = || PlanRequest {
+      service_action: Some(ServiceAction::Clone {
+        source: "app".into(),
+        target: "copy".into(),
+        server: None,
+        copy_data: true,
+      }),
+      ..Default::default()
+    };
+    let err = make_service_action_plan(
+      &state,
+      request(),
+      snap(),
+      Some(&["app".into()].into()),
+      false,
+    )
+    .await
+    .err()
+    .unwrap();
+    assert_eq!(err.code, ErrorCode::Forbidden);
+    state.hub.mock_agent("s1", false, |_| {
+      panic!("旧 agent 不应收到克隆操作")
+    });
+    let err = make_plan_inner(&state, request(), snap(), false, true)
+      .await
+      .err()
+      .unwrap();
+    assert_eq!(err.code, ErrorCode::AgentFailed);
+    state.hub.mock_safe_migrate_agent("s1",|op,_| Some(Ok(match op {
+      AgentOp::ProjectStatus{..}=> json!([{"project":"app","hash":"fixture","containers":[]}]),
+      AgentOp::ProjectMounts{..}=>json!({}),
+      AgentOp::BindMountUsers(_)=>json!([]),
+      AgentOp::ServiceCopy(wharf_api_types::agent::ServiceCopy::Check{..})=>json!({"committed":false}),
+      AgentOp::DirSpace{..}=>json!({"data_bytes":1024,"fs_avail_bytes":1073741824_u64,"fs_total_bytes":2147483648_u64}),
+      _=>panic!("克隆预览不得创建项目、目录或执行搬运"),
+    })));
+    state.hub.enable_mock_service_copy("s1");
+    let planned =
+      make_plan_inner(&state, request(), snap(), false, true)
+        .await
+        .unwrap();
+    assert_eq!(planned.plan.needs_confirm, ["service/copy"]);
+    assert!(planned.writes.is_empty());
+    assert!(matches!(planned.steps[0].step, Step::CloneData { .. }));
+    assert!(
+      planned
+        .steps
+        .iter()
+        .any(|step| matches!(step.step, Step::ServiceUp { .. }))
+    );
+    assert!(planned.plan.items.iter().any(|item| {
+      item.after.as_ref().is_some_and(|v| v["stopped"] == true)
+    }));
+  }
+
+  #[tokio::test]
+  async fn rename_plan_rejects_a_service_with_backup_before_agent_calls()
+   {
+    use wharf_api_types::plan::ServiceAction;
+    let state = crate::rules::tests::test_state();
+    let mut world = world();
+    let row = world.services.get_mut("app").unwrap();
+    row.spec.stopped = true;
+    row.spec.backup =
+      Some(serde_json::from_value(json!({"to":"s1"})).unwrap());
+    state.hub.mock_agent("s1", false, |_| {
+      panic!("有备份的服务不应访问 agent")
+    });
+    let snap = Snapshot {
+      world,
+      applied: [(
+        "app".into(),
+        serde_json::from_value(json!({
+          "hash":"fixture","at":"2025-01-01T00:00:00Z"
+        }))
+        .unwrap(),
+      )]
+      .into(),
+      ..Default::default()
+    };
+    let request = PlanRequest {
+      service_action: Some(ServiceAction::Rename {
+        source: "app".into(),
+        target: "new".into(),
+      }),
+      ..Default::default()
+    };
+    let err = make_plan_inner(&state, request, snap, false, true)
+      .await
+      .err()
+      .unwrap();
+    assert_eq!(err.code, ErrorCode::Conflict);
+    assert!(err.message.contains("备份"));
+    assert!(err.hint.unwrap().contains("克隆"));
+  }
+
+  #[tokio::test]
   async fn monitor_headers_require_upgraded_agent_during_plan() {
     let state = crate::rules::tests::test_state();
     let world = world();

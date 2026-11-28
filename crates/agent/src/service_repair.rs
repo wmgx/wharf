@@ -413,3 +413,34 @@ pub(crate) async fn run(
     }
   }
 }
+
+#[test]
+fn repair_mounts_keep_only_owned_data_and_project_files() {
+  let temp = tempfile::tempdir().unwrap();
+  let docker = Docker {
+    bin: "docker".into(),
+    data_dir: temp.path().into(),
+  };
+  let path = docker.project_dir("app").join("config");
+  std::fs::create_dir_all(&path).unwrap();
+  let at = std::fs::canonicalize(&path).unwrap();
+  let mut docker = docker;
+  docker.data_dir = std::fs::canonicalize(temp.path()).unwrap();
+  let lease = RepairLease {
+    service: "app".into(),
+    instance: "svc_fixture".into(),
+    id: "sample".into(),
+    hash: "hash".into(),
+    expires_ms: 0,
+  };
+  let mounts = |rw| {
+    json!({"Mounts":[
+      {"Source":at,"Destination":"/etc/app","RW":rw,"Type":"bind"}
+    ]})
+  };
+  assert_eq!(
+    check_mounts(&docker, &lease, &mounts(false)).unwrap().len(),
+    1
+  );
+  assert!(check_mounts(&docker, &lease, &mounts(true)).is_err());
+}

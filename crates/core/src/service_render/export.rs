@@ -747,5 +747,24 @@ services:
         .message
         .contains("include")
     );
+    if std::env::var_os("GITHUB_ACTIONS").is_some() {
+      let dir = tempfile::tempdir().unwrap();
+      let compose = dir.path().join("compose.yaml");
+      std::fs::write(&compose, &view.compose).unwrap();
+      for file in view.files.keys() {
+        let path = dir.path().join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "fixture").unwrap();
+      }
+      let status = std::process::Command::new("docker")
+        .args(["compose", "-f"])
+        .arg(&compose)
+        .args(["config", "--quiet"])
+        .envs(view.variables.keys().map(|key| (key, "fixture")))
+        .env("LOCAL_MODE", "fixture")
+        .status()
+        .unwrap();
+      assert!(status.success());
+    }
   }
 }

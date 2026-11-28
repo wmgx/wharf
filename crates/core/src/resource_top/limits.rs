@@ -478,6 +478,35 @@ mod tests {
   use super::*;
   use serde_json::json;
 
+  #[tokio::test]
+  async fn recommendation_excludes_previous_instance_samples() {
+    let db = db::Db::memory();
+    db.call(|c| {
+      let end=50*DAY;
+      let start=end-DAY;
+      c.execute(
+        "INSERT INTO deployments(service,server,run_id,hash,compose,images,created_at,instance_id)
+         VALUES ('app','s1','r1','fixture','','[]',?1,'current')", [start],
+      ).map_err(sql_err)?;
+      for (at,metric,value) in [(start-MINUTE_MS,"svc.mem",2048.0*MIB),(start+MINUTE_MS,"oom.kill",1.0)] {
+        c.execute("INSERT INTO points(name,subject,at,value) VALUES(?1,'app',?2,?3)",params![metric,at,value]).map_err(sql_err)?;
+      }
+      for hour in 0..24 {
+        c.execute("INSERT INTO points(name,subject,at,value) VALUES('svc.mem','app',?1,?2)",
+          params![start+hour*HOUR_MS+MINUTE_MS,120.0*MIB]).map_err(sql_err)?;
+      }
+      let spec=serde_json::from_value(json!({"server":"s1","source":{"image":"fixture:1"},"limits":{"memory_mb":128}})).unwrap();
+      let rows=calculate(c,vec![Selected {
+        name:"app".into(),server:"s1".into(),instance:"current".into(),at:start,
+        spec,skip:None,mem_total:1<<30,cpu_total:2,
+      }],1,end)?;
+      assert_eq!(rows[0].memory.peak,Some(120.0));
+      assert_eq!(rows[0].memory_mb,Some(256));
+      assert_eq!(rows[0].oom_points,1);
+      Ok(())
+    }).await.unwrap();
+  }
+
   #[test]
   fn oom_raises_the_memory_tier_and_missing_cpu_peak_skips_cpu() {
     let spec = serde_json::from_value(json!({
