@@ -80,7 +80,19 @@ async fn linear_growth_matches_hand_calculation_and_picks_biggest_change()
           insert_point(c, "req.qps", "web", at, 10.0 + 60.0 * frac);
         }
       }
-      compute_at(c, &world, now, 7, None, None, MAX_SCAN_POINTS, None)
+      compute_at(
+        c,
+        &snapshot::Snapshot {
+          world,
+          ..Default::default()
+        },
+        now,
+        7,
+        None,
+        None,
+        MAX_SCAN_POINTS,
+        None,
+      )
     })
     .await
     .unwrap();
@@ -128,7 +140,19 @@ async fn three_days_data_has_no_previous_comparison_and_valid_coverage()
         insert_point(c, "host.cpu", "s1", at, 20.0);
         insert_point(c, "svc.cpu", "web", at, 15.0);
       }
-      compute_at(c, &world, now, 7, None, None, MAX_SCAN_POINTS, None)
+      compute_at(
+        c,
+        &snapshot::Snapshot {
+          world,
+          ..Default::default()
+        },
+        now,
+        7,
+        None,
+        None,
+        MAX_SCAN_POINTS,
+        None,
+      )
     })
     .await
     .unwrap();
@@ -161,7 +185,19 @@ async fn scan_limit_returns_error_with_hint() {
           20.0,
         );
       }
-      compute_at(c, &world, now, 7, None, None, 5, None)
+      compute_at(
+        c,
+        &snapshot::Snapshot {
+          world,
+          ..Default::default()
+        },
+        now,
+        7,
+        None,
+        None,
+        5,
+        None,
+      )
     })
     .await
     .unwrap_err();
@@ -222,7 +258,7 @@ async fn partial_previous_ten_minutes_disables_comparison() {
         )
         .unwrap();
       }
-      compute_at(c, &world, now, 7, None, None, MAX_SCAN_POINTS, None)
+      compute_at(c, &snapshot::Snapshot { world, ..Default::default() }, now, 7, None, None, MAX_SCAN_POINTS, None)
     })
     .await
     .unwrap();
@@ -282,7 +318,7 @@ async fn report_filters_domain_expiry_and_notices_by_server_and_service()
         kind: kind.into(), name: name.into(), spec, meta: json!({}),
       })?;
     }
-    let world = World::from_rows(db::all_resources(c)?)?;
+    let snap = snapshot::Snapshot { world: World::from_rows(db::all_resources(c)?)?, ..Default::default() };
     let now = 1_750_000_000_000;
     for (rule, subject) in [
       ("domain_down", "web.example.test"), ("cert_expiring", "web.example.test"),
@@ -292,7 +328,7 @@ async fn report_filters_domain_expiry_and_notices_by_server_and_service()
         params![now - MINUTE_MS, rule, subject]).map_err(sql_err)?;
     }
     for (server, service, count) in [(Some("s1"), None, 5), (None, Some("web"), 3), (None, Some("api"), 2)] {
-      let report = compute_at(c, &world, now, 1, server, service, MAX_SCAN_POINTS, None)?;
+      let report = compute_at(c, &snap, now, 1, server, service, MAX_SCAN_POINTS, None)?;
       assert_eq!(report.alerts.len(), count);
     }
     Ok(())
@@ -304,7 +340,10 @@ async fn compact_preserves_peak_and_report_compares_same_granularity()
 {
   Db::memory()
     .call(|c| {
-      let world = seed_world(c);
+      let snap = snapshot::Snapshot {
+        world: seed_world(c),
+        ..Default::default()
+      };
       let now = 1_750_000_000_000 / HOUR_MS * HOUR_MS;
       for minute in 0..14 * 24 * 60 {
         insert_point(
@@ -322,7 +361,7 @@ async fn compact_preserves_peak_and_report_compares_same_granularity()
       );
       let view = compute_at(
         c,
-        &world,
+        &snap,
         now,
         7,
         None,
@@ -339,7 +378,7 @@ async fn compact_preserves_peak_and_report_compares_same_granularity()
         .map_err(sql_err)?;
       let view = compute_at(
         c,
-        &world,
+        &snap,
         now,
         7,
         None,
@@ -361,7 +400,7 @@ async fn compact_preserves_peak_and_report_compares_same_granularity()
 async fn report_weights_err_by_qps_integrates_real_gaps_and_scopes_coverage()
  {
   Db::memory().call(|c| {
-    let world = seed_world(c);
+    let snap = snapshot::Snapshot { world: seed_world(c), ..Default::default() };
     let now = 1_750_000_000_000 / HOUR_MS * HOUR_MS;
     let earliest = now - 14 * DAY_MS + HOUR_MS;
     insert_point(c, "host.cpu", "s1", earliest, 10.0);
@@ -375,7 +414,7 @@ async fn report_weights_err_by_qps_integrates_real_gaps_and_scopes_coverage()
       insert_point(c, "req.err", "web", at, if h == 1 { 100.0 } else { 0.0 });
       insert_point(c, "req.qps", "web", at, if h == 1 { 1.0 / 3600.0 } else { 10.0 });
     }
-    let view = compute_at(c, &world, now, 7, None, None, MAX_SCAN_POINTS, None)?;
+    let view = compute_at(c, &snap, now, 7, None, None, MAX_SCAN_POINTS, None)?;
     assert_eq!(view.coverage.earliest_at, Some(earliest));
     assert!(view.coverage.has_previous);
     assert_eq!(view.servers[0].net_rx_bytes.current, Some(6_000_000_000.0));

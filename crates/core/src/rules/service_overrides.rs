@@ -13,7 +13,7 @@ use wharf_api_types::{
 };
 
 use super::{
-  KEEP, NOTICES, Override, RULES,
+  NOTICES, Override, RULES,
   custom::{CustomRule, level_str, parse_level, service_exists},
   ensure_loaded, split_unit, suppress, with,
 };
@@ -205,11 +205,7 @@ pub(super) async fn set_override(
   if p.threshold.is_some_and(|t| !t.is_finite()) {
     return Err(ApiError::invalid("阈值要是数字"));
   }
-  if p.for_n.is_some_and(|n| n == 0 || n as usize > KEEP) {
-    return Err(ApiError::invalid(format!(
-      "连续次数在 1 到 {KEEP} 之间"
-    )));
-  }
+  super::validate_for_n(rule, p.for_n)?;
 
   let key = (id.to_string(), service.to_string());
   let mut o = if p.reset {

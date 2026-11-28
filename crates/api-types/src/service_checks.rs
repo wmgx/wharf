@@ -28,11 +28,18 @@ const fn one() -> u32 {
 impl LogAlertSpec {
   pub fn compile(&self) -> Result<Option<regex::Regex>, ApiError> {
     if !(1..=1440).contains(&self.window_mins)
-      || !(1..=100_000).contains(&self.min_count)
+      || !(1..=10_000).contains(&self.min_count)
     {
       return Err(ApiError::invalid(
-        "日志规则窗口须为 1 到 1440 分钟，最少次数须为 1 到 100000",
+        "日志规则窗口须为 1 到 1440 分钟，最少次数须为 1 到 10000",
       ));
+    }
+    if self
+      .container
+      .as_ref()
+      .is_some_and(|name| name.trim().is_empty())
+    {
+      return Err(ApiError::invalid("日志规则的容器名不能为空"));
     }
     self.compile_stored()
   }
@@ -137,6 +144,9 @@ pub struct HeartbeatSpec {
   pub grace_mins: u32,
   #[serde(default, skip_serializing_if = "String::is_empty")]
   pub token: String,
+  /// 已按目标容器配置；旧心跳保留原来的全容器注入。
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub targeted: bool,
 }
 
 #[derive(
@@ -169,7 +179,7 @@ pub struct LogWatch {
   pub spec: LogAlertSpec,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortCheck {
   pub port: u16,
   pub udp: Option<PortCheckSpec>,
@@ -203,7 +213,8 @@ fn reject_out_of_range_service_checks() {
     HeartbeatSpec {
       every_mins: 100000,
       grace_mins: 5,
-      token: String::new()
+      token: String::new(),
+      targeted: false,
     }
     .validate()
     .is_err()

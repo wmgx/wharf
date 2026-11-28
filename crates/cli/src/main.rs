@@ -926,8 +926,11 @@ pub enum ServiceCmd {
   /// 设置服务心跳。启停时重新部署以添加或移除 WHARF_HEARTBEAT_URL。
   Heartbeat {
     name: String,
+    /// 目标 Compose 容器。
+    #[arg(long)]
+    container: Option<String>,
     /// 报到间隔，例如 10m。
-    #[arg(long, required_unless_present_any = ["off", "grace"], conflicts_with = "off", value_parser = service_checks::minutes)]
+    #[arg(long, required_unless_present_any = ["off", "grace", "container"], conflicts_with = "off", value_parser = service_checks::minutes)]
     every: Option<u32>,
     /// 宽限，默认 5 分钟。心跳已开启时可以单独调整。
     #[arg(long, conflicts_with = "off", value_parser = service_checks::minutes)]
@@ -1111,6 +1114,9 @@ pub enum ServiceCmd {
   /// 新建或更新服务。已存在的服务只修改给出的参数。
   Deploy {
     name: String,
+    /// 目标 Compose 容器。
+    #[arg(long)]
+    container: Option<String>,
     /// 镜像，例如 `traefik/whoami`。
     #[arg(long, conflicts_with = "compose")]
     image: Option<String>,
@@ -1249,6 +1255,9 @@ pub enum ServiceCmd {
   /// 资源上限。例：`wharf service limits blog --memory 512 --cpus 0.5 --apply`；`--off` 去掉全部上限。
   Limits {
     name: String,
+    /// 目标 Compose 容器。
+    #[arg(long)]
+    container: Option<String>,
     /// 内存上限，单位 MB；给 0 去掉这一项。
     #[arg(long)]
     memory: Option<u32>,
@@ -1266,6 +1275,9 @@ pub enum ServiceCmd {
   /// 例：`wharf service file app /etc/app/config.yaml --file ./config.yaml --apply`。
   File {
     name: String,
+    /// 目标 Compose 容器。
+    #[arg(long)]
+    container: Option<String>,
     /// 容器内的绝对路径。
     path: Option<String>,
     /// 从本地文件读内容，`-` 表示标准输入。生成计划。

@@ -234,16 +234,21 @@ pub async fn port(
   put(c, name, spec, apply, j).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn heartbeat(
   c: &Client,
   name: String,
   every: Option<u32>,
   grace: Option<u32>,
   off: bool,
+  container: Option<String>,
   apply: ApplyFlags,
   j: bool,
 ) -> CliResult<()> {
   let mut spec = get(c, &name).await?.spec;
+  if let Some(container) = container {
+    spec.container = Some(container);
+  }
   let current = spec.heartbeat.take();
   if !off {
     let every_mins = every
@@ -259,6 +264,7 @@ pub async fn heartbeat(
       every_mins,
       grace_mins,
       token: String::new(),
+      targeted: false,
     });
   }
   if current.is_some() != spec.heartbeat.is_some() {

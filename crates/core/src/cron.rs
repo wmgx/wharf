@@ -85,6 +85,23 @@ impl Cron {
     }
     None
   }
+
+  pub fn prev_before(
+    &self,
+    before: DateTime<Utc>,
+  ) -> Option<DateTime<Utc>> {
+    let mut t = minute_floor(before);
+    if t == before {
+      t -= Duration::minutes(1);
+    }
+    for _ in 0..366 * 24 * 60 {
+      if self.matches(t) {
+        return Some(t);
+      }
+      t -= Duration::minutes(1);
+    }
+    None
+  }
 }
 
 pub fn minute_floor(t: DateTime<Utc>) -> DateTime<Utc> {

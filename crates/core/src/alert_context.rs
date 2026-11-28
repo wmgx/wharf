@@ -58,13 +58,16 @@ pub async fn enrich(
     if include_logs {
       match snapshot::load(&state.db).await {
         Ok(snap) => {
-          if let Some(row) = snap.world.services.get(service) {
+          if let Some(row) = snap.world.services.get(service)
+            && let Some(server) =
+              snapshot::service_runtime_server(&snap, service)
+          {
             let secrets =
               crate::log_redact::service_values(&row.spec);
             let logs = tokio::time::timeout(
               Duration::from_secs(8),
               state.hub.call::<String>(
-                &row.spec.server,
+                server,
                 AgentOp::Logs {
                   project: service.to_string(),
                   tail: 30,
@@ -130,7 +133,9 @@ pub async fn back_online(
     .world
     .services
     .iter()
-    .filter(|(_, r)| r.spec.server == server)
+    .filter(|(n, _)| {
+      snapshot::service_runtime_server(&snap, n) == Some(server)
+    })
     .map(|(n, r)| (n.clone(), !r.spec.stopped))
     .collect();
   if services.is_empty() {

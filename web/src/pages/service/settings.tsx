@@ -86,7 +86,7 @@ function SettingsFields({ svc, draft, set, dirty, changed, onReset, onSubmit }: 
   const memoryNum = memory.trim() ? Number(memory) : undefined;
   const cpuNum = cpus.trim() ? Number(cpus) : undefined;
   const limitsValid = (memoryNum === undefined || (Number.isInteger(memoryNum) && memoryNum >= 32 && memoryNum <= 4294967295)) && (cpuNum === undefined || (Number.isFinite(cpuNum) && cpuNum >= 0.01 && cpuNum * 1000 <= 4294967295));
-  const needsContainer = isCompose && composeInfo.services.length > 1 && !draft.container && (Object.keys(draft.env ?? {}).length > 0 || !!draft.limits || !!draft.files?.length);
+  const needsContainer = isCompose && composeInfo.services.length > 1 && !draft.container && (Object.keys(draft.env ?? {}).length > 0 || !!draft.limits || !!draft.files?.length || Boolean(svc.spec.heartbeat));
   const files = draft.files ?? [];
   const filesValid = files.every((f) => filePathOk(f.path)) && new Set(files.map((f) => f.path)).size === files.length;
   const disabled = needsContainer ? "compose 里有多个容器，先选环境变量、配置文件和资源上限加在哪个容器上" : !filesValid ? "配置文件的路径不正确或重复" : !limitsValid ? "资源上限不正确" : build && !howReady(how) ? "来源的 Dockerfile 不能为空" : undefined;

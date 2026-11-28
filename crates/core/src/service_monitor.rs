@@ -75,7 +75,7 @@ impl Hits {
 struct Memory {
   watches: BTreeMap<String, Vec<LogWatch>>,
   hits: BTreeMap<String, Hits>,
-  ports: BTreeMap<String, (i64, bool)>,
+  ports: BTreeMap<String, (PortTarget, i64, bool)>,
   old_agents: BTreeSet<String>,
 }
 
@@ -140,6 +140,12 @@ pub fn config_only(old: &ServiceRow, new: &ServiceRow) -> bool {
   if let (Some(old), Some(new)) =
     (&old.spec.heartbeat, &mut stripped.spec.heartbeat)
     && old.token == new.token
+    && (old.targeted == new.targeted
+      || stripped.spec.container.is_none()
+      || !matches!(
+        stripped.spec.source,
+        wharf_api_types::spec::Source::Compose { .. }
+      ))
   {
     new.clone_from(old);
   }
@@ -199,8 +205,9 @@ pub async fn sync_watches(
     for server in
       old.keys().chain(m.watches.keys()).collect::<BTreeSet<_>>()
     {
-      if old.get(server) != m.watches.get(server)
-        || connecting == Some(server.as_str())
+      if state.hub.supports_service_checks(server)
+        && (old.get(server) != m.watches.get(server)
+          || connecting == Some(server.as_str()))
       {
         state.hub.log_watches(
           server,
@@ -344,35 +351,92 @@ pub(crate) fn ports(
   })
 }
 
+#[derive(Clone, PartialEq)]
+struct PortTarget {
+  server: String,
+  conn_id: u64,
+  instance_id: String,
+  check: PortCheck,
+}
+
+pub(crate) fn probe_server<'a>(
+  state: &AppState,
+  snap: &'a Snapshot,
+  name: &str,
+  row: &ServiceRow,
+) -> Option<(&'a str, u64)> {
+  if row.spec.stopped {
+    return None;
+  }
+  let server = crate::snapshot::service_runtime_server(snap, name)?;
+  Some((server, state.hub.conn_id(server)?))
+}
+
+fn port_target(
+  row: &ServiceRow,
+  check: PortCheck,
+  server: &str,
+  conn_id: u64,
+) -> PortTarget {
+  PortTarget {
+    server: server.into(),
+    conn_id,
+    instance_id: row.instance_id.clone(),
+    check,
+  }
+}
+
 pub fn port_views(
+  state: &AppState,
+  snap: &Snapshot,
   service: &str,
   row: &ServiceRow,
-  applied_at: i64,
 ) -> BTreeMap<String, bool> {
-  if row.spec.stopped {
+  let applied_at = snap
+    .applied
+    .get(service)
+    .map_or(0, |applied| applied.at.timestamp_millis());
+  if rules::op_silence::service_busy(state, service) {
     return BTreeMap::new();
   }
+  let Some((server, conn_id)) =
+    probe_server(state, snap, service, row)
+  else {
+    return BTreeMap::new();
+  };
   memory(|m| {
     ports(row)
-      .filter_map(|(name, _)| {
-        let &(at, ok) = m.ports.get(&format!("{service}:{name}"))?;
-        (at >= applied_at).then(|| (name.to_string(), ok))
+      .filter_map(|(name, check)| {
+        let (target, at, ok) =
+          m.ports.get(&format!("{service}:{name}"))?;
+        (*at >= applied_at
+          && *target == port_target(row, check, server, conn_id))
+        .then(|| (name.to_string(), *ok))
       })
       .collect()
   })
 }
 
-fn record_port(id: String, at: i64, ok: bool) {
+fn record_port(
+  id: String,
+  target: PortTarget,
+  at: i64,
+  ok: bool,
+) -> bool {
   memory(|m| {
-    let entry = m.ports.entry(id).or_insert((at, ok));
-    if entry.0 <= at {
-      *entry = (at, ok);
+    if m.ports.get(&id).is_some_and(|(previous, stamp, _)| {
+      previous == &target && *stamp > at
+    }) {
+      return false;
     }
-  });
+    m.ports.insert(id, (target, at, ok));
+    true
+  })
 }
 
 pub(crate) async fn doctor_ports(
   state: &AppState,
+  snap: &Snapshot,
   service: &str,
   row: &ServiceRow,
 ) -> Vec<wharf_api_types::view::DoctorCheck> {
@@ -381,7 +445,6 @@ pub(crate) async fn doctor_ports(
   if targets.is_empty() || row.spec.stopped {
     return vec![];
   }
-  let server = &row.spec.server;
   let skip = |detail| {
     vec![crate::doctor::check(
       "port",
@@ -390,9 +453,11 @@ pub(crate) async fn doctor_ports(
       detail,
     )]
   };
-  if !state.hub.is_online(server) {
+  let Some((server, conn_id)) =
+    probe_server(state, snap, service, row)
+  else {
     return skip("agent 离线，测不了");
-  }
+  };
   if !state.hub.supports_service_checks(server) {
     return skip("agent 版本旧，升级后可测端口（wharf upgrade）");
   }
@@ -412,12 +477,27 @@ pub(crate) async fn doctor_ports(
       &CancellationToken::new(),
     )
     .await;
+  let fresh = crate::snapshot::load(&state.db).await.ok();
   match results {
     Ok(results) if results.len() == targets.len() => targets
       .into_iter()
       .zip(results)
-      .map(|((port, _), ok)| {
-        record_port(format!("{service}:{port}"), at, ok);
+      .map(|((port, check), ok)| {
+        let target = port_target(row, check, server, conn_id);
+        let unchanged = fresh
+          .as_ref()
+          .and_then(|fresh| {
+            let row = fresh.world.services.get(service)?;
+            let (server, conn_id) =
+              probe_server(state, fresh, service, row)?;
+            let (_, current) =
+              ports(row).find(|(name, _)| *name == port)?;
+            Some(target == port_target(row, current, server, conn_id))
+          })
+          .unwrap_or_default();
+        if unchanged {
+          record_port(format!("{service}:{port}"), target, at, ok);
+        }
         let (status, detail) = if ok {
           (CheckStatus::Ok, "通过")
         } else {
@@ -446,35 +526,46 @@ async fn check_ports(state: &AppState) {
   };
   let started_at = now_ms();
   let mut active = BTreeSet::new();
-  let mut batches = BTreeMap::<&str, Vec<(String, PortCheck)>>::new();
+  let mut wanted = BTreeMap::new();
+  let mut batches =
+    BTreeMap::<&str, Vec<(String, PortTarget)>>::new();
   for (name, row) in &snap.world.services {
     if row.spec.stopped || !snap.applied.contains_key(name) {
       continue;
     }
-    let server = row.spec.server.as_str();
-    let skip = !state.hub.is_online(server)
-      || deploying(&snap, name, now_ms())
-      || rules::op_silence::service_busy(state, name);
+    let probe = if can_probe_in_background(state, &snap, name) {
+      probe_server(state, &snap, name, row)
+    } else {
+      None
+    };
     for (port, check) in ports(row) {
       let id = format!("{name}:{port}");
       active.insert(id.clone());
-      if !skip {
-        batches.entry(server).or_default().push((id, check));
-      }
-    }
-  }
-  memory(|m| m.ports.retain(|k, _| active.contains(k)));
-  rules::retain_subjects(state, "port_down", &active).await;
-  let results = futures_util::future::join_all(
-    batches.into_iter().map(|(server, targets)| async move {
+      let Some((server, conn_id)) = probe else {
+        continue;
+      };
       if !state.hub.supports_service_checks(server) {
         if memory(|m| m.old_agents.insert(server.to_string())) {
           tracing::info!(
             "服务器 {server} 的 agent 暂不支持端口检查，跳过"
           );
         }
-        return None;
+        continue;
       }
+      let target = port_target(row, check, server, conn_id);
+      wanted.insert(id.clone(), target.clone());
+      batches.entry(server).or_default().push((id, target));
+    }
+  }
+  memory(|m| {
+    m.ports.retain(|key, (target, _, _)| {
+      wanted.get(key).is_none_or(|wanted| wanted == target)
+        && active.contains(key)
+    })
+  });
+  rules::retain_subjects(state, "port_down", &active).await;
+  let results = futures_util::future::join_all(
+    batches.into_iter().map(|(server, targets)| async move {
       let r = state
         .hub
         .call::<Vec<bool>>(
@@ -482,7 +573,7 @@ async fn check_ports(state: &AppState) {
           AgentOp::PortChecks {
             checks: targets
               .iter()
-              .map(|(_, check)| check.clone())
+              .map(|(_, target)| target.check.clone())
               .collect(),
           },
           Duration::from_secs(10),
@@ -498,21 +589,38 @@ async fn check_ports(state: &AppState) {
   let Ok(latest) = crate::snapshot::load(&state.db).await else {
     return;
   };
-  for (targets, results) in results.into_iter().flatten() {
-    for ((id, check), ok) in targets.into_iter().zip(results) {
-      let (name, _) = id.split_once(':').unwrap_or((&id, ""));
-      if snap.world.services.get(name)
-        != latest.world.services.get(name)
-        || deploying(&latest, name, now_ms())
-        || !state
-          .hub
-          .is_online(&latest.world.services[name].spec.server)
+  for (targets, outcomes) in results.into_iter().flatten() {
+    for ((id, target), ok) in targets.into_iter().zip(outcomes) {
+      let Some((name, port)) = id.split_once(':') else {
+        continue;
+      };
+      let Some(row) = latest.world.services.get(name) else {
+        continue;
+      };
+      let Some((server, conn_id)) =
+        probe_server(state, &latest, name, row)
+      else {
+        continue;
+      };
+      let Some((_, check)) = ports(row).find(|(n, _)| *n == port)
+      else {
+        continue;
+      };
+      if !can_probe_in_background(state, &latest, name)
+        || target != port_target(row, check, server, conn_id)
       {
         continue;
       }
-      record_port(id.clone(), started_at, ok);
-      let suffix = if check.udp.is_some() { "UDP" } else { "TCP" };
-      let detail = format!("{suffix} 127.0.0.1:{}", check.port);
+      let suffix = if target.check.udp.is_some() {
+        "UDP"
+      } else {
+        "TCP"
+      };
+      let detail =
+        format!("{suffix} 127.0.0.1:{}", target.check.port);
+      if !record_port(id.clone(), target, started_at, ok) {
+        continue;
+      }
       rules::observe(
         state,
         PORT_METRIC,
@@ -523,6 +631,16 @@ async fn check_ports(state: &AppState) {
       .await;
     }
   }
+}
+
+pub(crate) fn can_probe_in_background(
+  state: &AppState,
+  snap: &Snapshot,
+  name: &str,
+) -> bool {
+  snap.applied.contains_key(name)
+    && !deploying(snap, name, now_ms())
+    && !rules::op_silence::service_busy(state, name)
 }
 
 fn deploying(snap: &Snapshot, name: &str, now: i64) -> bool {

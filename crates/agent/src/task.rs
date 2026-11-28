@@ -6,7 +6,7 @@ use std::{
   io::{Read, Write},
   os::unix::fs::{DirBuilderExt, OpenOptionsExt},
   path::{Path, PathBuf},
-  sync::{Arc, LazyLock},
+  sync::{Arc, LazyLock, Mutex},
   time::{Duration, Instant},
 };
 
@@ -25,7 +25,7 @@ use wharf_api_types::{
 
 use crate::{
   docker::{Docker, io_err},
-  exec::{Ctx, Output},
+  exec::{Cmd, Ctx, Output},
 };
 
 /// 输出只留最后这么多字节。
@@ -57,6 +57,7 @@ pub async fn run(
   let timeout = Duration::from_secs(job.timeout_secs);
   let started = Instant::now();
   let mut mem_peak = None;
+  let mut timed_out = false;
   if job.network_host && !matches!(job.how, TaskHow::Script { .. }) {
     return Err(ApiError::invalid("代登录参数只能用于脚本"));
   }
@@ -292,17 +293,19 @@ pub async fn run(
       let id =
         find_container(docker, project, service.as_deref(), ctx)
           .await?;
-      // 容器里有 timeout 就让它到点杀掉命令，免得 docker exec 被杀后命令还在容器里跑。
-      let wrapper = format!(
-        "command -v timeout >/dev/null 2>&1 && exec timeout -s KILL {} sh -c \"$0\" || exec sh -c \"$0\"",
-        job.timeout_secs
-      );
-      docker
+      let marker = timeout_marker()?;
+      let wrapper = wrap_exec_timeout(job.timeout_secs, &marker);
+      let cmd = docker
         .cmd()
-        .args(["exec", &id, "sh", "-c", &wrapper, command])
-        .timeout(timeout + Duration::from_secs(5))
-        .run(ctx)
-        .await
+        .args([
+          "exec", &id, "sh", "-c", &wrapper, "sh", "sh", "-c",
+          command,
+        ])
+        .timeout(timeout + Duration::from_secs(5));
+      run_wrapped(cmd, &marker, ctx).await.map(|(out, expired)| {
+        timed_out = expired;
+        out
+      })
     }
     TaskHow::Container {
       image,
@@ -341,7 +344,7 @@ pub async fn run(
       result: None,
       mem_peak,
       exit_code: o.code,
-      timed_out: false,
+      timed_out,
       output: tail(&format!("{}{}", o.stdout, o.stderr)),
       duration_ms,
     }),
@@ -506,14 +509,17 @@ async fn run_sso(
   } else {
     file.into()
   };
+  let marker = timeout_marker()?;
   let args = sso_exec_args(
     &runner,
     &env_file,
     &mount,
     timeout,
+    &marker,
     [entry, &script_path],
   );
-  let output = sso_exec(docker, args, &runner, timeout, ctx).await;
+  let output =
+    sso_exec(docker, args, &runner, timeout, &marker, ctx).await;
   let hidden: Vec<String> = env
     .values()
     .filter(|value| !value.is_empty())
@@ -521,11 +527,11 @@ async fn run_sso(
     .collect();
   let duration_ms = started.elapsed().as_millis() as u64;
   match output {
-    Ok(o) => Ok(TaskRunResult {
-      result: read_result(&work.0),
+    Ok((o, timed_out)) => Ok(TaskRunResult {
+      result: (!timed_out).then(|| read_result(&work.0)).flatten(),
       mem_peak: None,
       exit_code: o.code,
-      timed_out: o.code == Some(137),
+      timed_out,
       output: tail(&mask_values(
         &format!("{}{}", o.stdout, o.stderr),
         &hidden,
@@ -620,19 +626,119 @@ async fn ensure_sso_runner(
   Ok(out.stdout.trim().into())
 }
 
+fn timeout_marker() -> Result<String, ApiError> {
+  let mut bytes = [0; 8];
+  getrandom::fill(&mut bytes)
+    .map_err(|_| ApiError::internal("随机数不可用"))?;
+  Ok(format!("__WHARF_TO_{}__", hex::encode(bytes)))
+}
+
+fn wrap_exec_timeout(seconds: u64, marker: &str) -> String {
+  format!(
+    r#"if command -v timeout >/dev/null 2>&1; then
+  timeout -s KILL {seconds} sh -c 'marker=$1; shift; "$@"; rc=$?; printf "\n%s:DONE:%d\n" "$marker" "$rc" >&2; exit "$rc"' sh '{marker}' "$@"
+  rc=$?
+  printf '\n%s:WRAP:%d\n' '{marker}' "$rc" >&2
+  exit "$rc"
+fi
+exec "$@""#
+  )
+}
+
+#[derive(Default)]
+struct TimeoutSentinel {
+  done: Option<i32>,
+  wrapped: Option<i32>,
+}
+
+impl TimeoutSentinel {
+  fn observe(&mut self, marker: &str, line: &str) {
+    let Some(line) = line.strip_prefix(marker) else {
+      return;
+    };
+    if let Some(value) = line.strip_prefix(":DONE:") {
+      self.done = value.parse().ok();
+    }
+    if let Some(value) = line.strip_prefix(":WRAP:") {
+      self.wrapped = value.parse().ok();
+    }
+  }
+
+  fn classify(
+    &self,
+    mut out: Output,
+    marker: &str,
+  ) -> (Output, bool) {
+    let timed_out =
+      self.done.is_none() && matches!(self.wrapped, Some(124 | 137));
+    out.code = if timed_out {
+      None
+    } else {
+      self.done.or(self.wrapped).or(out.code)
+    };
+    out.success = !timed_out && out.success;
+    out.stderr = out
+      .stderr
+      .lines()
+      .filter(|line| !line.starts_with(marker))
+      .collect::<Vec<_>>()
+      .join("\n");
+    (out, timed_out)
+  }
+}
+
+async fn run_wrapped(
+  cmd: Cmd,
+  marker: &str,
+  ctx: &Ctx,
+) -> Result<(Output, bool), ApiError> {
+  let seen = Arc::new(Mutex::new(TimeoutSentinel::default()));
+  let progress = {
+    let seen = seen.clone();
+    let marker = marker.to_string();
+    Arc::new(move |line: String| {
+      seen
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .observe(&marker, &line)
+    })
+  };
+  let capture = Ctx {
+    cancel: ctx.cancel.clone(),
+    progress: Some(progress),
+  };
+  let output = cmd.stream(false).run(&capture).await?;
+  let parsed = seen
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
+    .classify(output, marker);
+  Ok(parsed)
+}
+
 fn sso_exec_args(
   runner: &str,
   env_file: &Path,
   mount: &str,
   timeout: Duration,
+  marker: &str,
   command: impl IntoIterator<Item = impl Into<String>>,
 ) -> Vec<String> {
   [
-    "exec", "--env-file", &env_file.to_string_lossy(), "-w", mount,
-    runner, "sh", "-c",
-    r#"seconds=$1; shift; if command -v timeout >/dev/null 2>&1; then exec timeout -s KILL "$seconds" "$@"; fi; exec "$@""#,
-    "sh", &timeout.as_secs().to_string(),
-  ].into_iter().map(str::to_string).chain(command.into_iter().map(Into::into)).collect()
+    "exec",
+    "--env-file",
+    &env_file.to_string_lossy(),
+    "-w",
+    mount,
+    runner,
+    "sh",
+    "-c",
+    &wrap_exec_timeout(timeout.as_secs(), marker),
+    "sh",
+  ]
+  .into_iter()
+  .map(str::to_string)
+  .chain(command.into_iter().map(Into::into))
+  .collect()
 }
 
 // 容器内外的超时和取消都可能留下子进程，重启可确认它们已退出。
@@ -641,18 +747,18 @@ async fn sso_exec(
   args: Vec<String>,
   runner: &str,
   timeout: Duration,
+  marker: &str,
   ctx: &Ctx,
-) -> Result<Output, ApiError> {
+) -> Result<(Output, bool), ApiError> {
   if ctx.cancel.is_cancelled() {
     return Err(ApiError::new(ErrorCode::Cancelled, "代登录已取消"));
   }
-  let out = docker
+  let cmd = docker
     .cmd()
     .args(args)
-    .timeout(timeout + Duration::from_secs(2))
-    .run(ctx)
-    .await;
-  if !out.as_ref().is_ok_and(|o| o.code != Some(137)) {
+    .timeout(timeout + Duration::from_secs(2));
+  let out = run_wrapped(cmd, marker, ctx).await;
+  if !out.as_ref().is_ok_and(|(_, timed_out)| !timed_out) {
     docker
       .cmd()
       .args(["restart", "-t", "0", runner])
@@ -731,9 +837,18 @@ async fn install_sso_deps(
     }
     ScriptRuntime::Shell => unreachable!(),
   };
-  let args =
-    sso_exec_args(runner, &env_file, mount, DEPS_TIMEOUT, command);
-  let out = sso_exec(docker, args, runner, DEPS_TIMEOUT, ctx).await?;
+  let marker = timeout_marker()?;
+  let args = sso_exec_args(
+    runner,
+    &env_file,
+    mount,
+    DEPS_TIMEOUT,
+    &marker,
+    command,
+  );
+  let (out, _) =
+    sso_exec(docker, args, runner, DEPS_TIMEOUT, &marker, ctx)
+      .await?;
   if !out.success {
     return Err(ApiError::new(
       ErrorCode::AgentFailed,
@@ -1076,6 +1191,7 @@ mod tests {
       &env_file,
       "/work",
       Duration::from_secs(30),
+      "fixture-marker",
       ["python", "main.py"],
     );
     assert_eq!(
@@ -1083,6 +1199,39 @@ mod tests {
       ["exec", "--env-file", env_file.to_str().unwrap()]
     );
     assert!(args.iter().all(|arg| !arg.contains(value)));
+  }
+
+  #[test]
+  fn exec_and_sso_distinguish_timeout_from_oom_and_exit_124() {
+    let marker = "__WHARF_TO_fixture__";
+    let classify = |done: Option<i32>, wrapped, raw| {
+      let mut seen = TimeoutSentinel::default();
+      if let Some(done) = done {
+        seen.observe(marker, &format!("{marker}:DONE:{done}"));
+      }
+      if wrapped {
+        seen.observe(marker, &format!("{marker}:WRAP:{raw}"));
+      }
+      let (out, timed_out) = seen.classify(
+        Output {
+          success: false,
+          code: Some(raw),
+          stdout: String::new(),
+          stderr: format!("log\n{marker}:WRAP:{raw}\n"),
+        },
+        marker,
+      );
+      assert!(!out.stderr.contains(marker));
+      (timed_out, out.code)
+    };
+    assert_eq!(classify(None, true, 137), (true, None));
+    assert_eq!(classify(None, true, 124), (true, None));
+    for code in [1, 125, 126, 127] {
+      assert_eq!(classify(None, true, code), (false, Some(code)));
+    }
+    assert_eq!(classify(Some(137), true, 137), (false, Some(137)));
+    assert_eq!(classify(Some(124), true, 124), (false, Some(124)));
+    assert_eq!(classify(None, false, 137), (false, Some(137)));
   }
 
   #[test]

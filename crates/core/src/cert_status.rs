@@ -40,6 +40,8 @@ pub struct Parsed {
 
 /// 按时间顺序扫一遍 Caddy 的 JSON 日志，只看证书标识是 `ids` 之一的事件。
 pub fn parse(logs: &str, ids: &[String]) -> Parsed {
+  let ids: Vec<_> =
+    ids.iter().map(|id| id.to_ascii_lowercase()).collect();
   let mut out = Parsed::default();
   for line in logs.lines() {
     let Some(start) = line.find('{') else {
@@ -52,18 +54,21 @@ pub fn parse(logs: &str, ids: &[String]) -> Parsed {
     if !logger.starts_with("tls") && logger != "http" {
       continue;
     }
-    let mine = v["identifier"]
-      .as_str()
-      .is_some_and(|i| ids.iter().any(|x| x == i))
-      || v["identifiers"].as_array().is_some_and(|a| {
+    let mine =
+      v["identifier"].as_str().is_some_and(|i| {
+        ids.iter().any(|x| x.eq_ignore_ascii_case(i))
+      }) || v["identifiers"].as_array().is_some_and(|a| {
         a.iter().any(|i| {
-          i.as_str().is_some_and(|i| ids.iter().any(|x| x == i))
+          i.as_str().is_some_and(|i| {
+            ids.iter().any(|x| x.eq_ignore_ascii_case(i))
+          })
         })
-      })
-      || v["error"].as_str().is_some_and(|e| {
+      }) || v["error"].as_str().is_some_and(|e| {
+        let e = e.to_ascii_lowercase();
         ids.iter().any(|x| {
-          e.starts_with(&format!("[{x}]"))
+          e.contains(&format!("[{x}]"))
             || e.starts_with(&format!("{x}:"))
+            || e.contains(&format!(" {x}:"))
         })
       });
     if !mine {
@@ -81,10 +86,15 @@ pub fn parse(logs: &str, ids: &[String]) -> Parsed {
         out.state = Some(CertState::Obtaining);
         out.next_retry_at = None;
       }
+      "renewing certificate" => {
+        out = Parsed {
+          state: Some(CertState::Obtaining),
+          since: ts,
+          ..Default::default()
+        };
+      }
       "trying to solve challenge"
-      | "waiting on internal rate limiter"
-        if out.state != Some(CertState::Ok) =>
-      {
+      | "waiting on internal rate limiter" => {
         out.state = Some(CertState::Obtaining);
         out.next_retry_at = None;
       }
@@ -92,6 +102,14 @@ pub fn parse(logs: &str, ids: &[String]) -> Parsed {
         out.state = Some(CertState::Failed);
         out.error = v["error"].as_str().map(str::to_string);
         out.failed_at = ts;
+      }
+      "could not renew certificate"
+      | "failed to renew certificate"
+      | "error renewing certificate" => {
+        out.state = Some(CertState::Failed);
+        out.error = v["error"].as_str().map(str::to_string);
+        out.failed_at = ts;
+        out.attempts += 1;
       }
       "will retry" => {
         out.state = Some(CertState::Failed);
@@ -110,7 +128,8 @@ pub fn parse(logs: &str, ids: &[String]) -> Parsed {
           _ => None,
         };
       }
-      "certificate obtained successfully" => {
+      "certificate obtained successfully"
+      | "certificate renewed successfully" => {
         out = Parsed {
           state: Some(CertState::Ok),
           since: ts,
@@ -325,6 +344,26 @@ mod tests {
 caddy-1  | 2026-11-21T17:14:26Z {"level":"info","ts":1795281266.0,"logger":"tls.obtain","msg":"obtaining certificate","identifier":"b.example.com"}
 caddy-1  | 2026-11-21T17:16:08Z {"level":"error","ts":1795281368.05,"logger":"tls.obtain","msg":"will retry","error":"[a.example.com] Obtain: solving challenges: Post \"https://acme-v02.api.letsencrypt.org/acme/authz/1\": http2: timeout awaiting response headers","attempt":1,"retrying_in":60}
 "#;
+
+  #[test]
+  fn cert_status_recognizes_tls_renew_recovery() {
+    let logs = r#"{"logger":"tls.renew","ts":1,"msg":"renewing certificate","identifier":"A.EXAMPLE.COM"}
+{"logger":"tls.renew","ts":2,"msg":"will retry","error":"renewing certificate: [A.EXAMPLE.COM] timeout","retrying_in":60}"#;
+    let ids = ["a.example.com".into()];
+    assert_eq!(parse(logs, &ids).next_retry_at, Some(62_000));
+    let logs = format!(
+      "{logs}\n{}",
+      r#"{"logger":"tls.renew","ts":3,"msg":"certificate renewed successfully","identifiers":["A.EXAMPLE.COM"]}"#
+    );
+    assert_eq!(
+      parse(&logs, &ids),
+      Parsed {
+        state: Some(CertState::Ok),
+        since: Some(3_000),
+        ..Default::default()
+      }
+    );
+  }
 
   #[test]
   fn reads_failure_and_next_retry() {

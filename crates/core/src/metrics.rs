@@ -70,7 +70,9 @@ pub async fn insert_owned_at(
         .iter()
         .map(|(n, s, v)| (n.as_str(), s.as_str(), *v))
         .collect();
-      insert(c, at, &rows)
+      let tx = c.transaction().map_err(sql_err)?;
+      insert(&tx, at, &rows)?;
+      tx.commit().map_err(sql_err)
     })
     .await;
   if let Err(e) = result {
@@ -102,7 +104,9 @@ pub async fn record_links(
         .iter()
         .map(|(n, s, v)| (n.as_str(), s.as_str(), *v))
         .collect();
-      insert(c, now_ms(), &points)
+      let tx = c.transaction().map_err(sql_err)?;
+      insert(&tx, now_ms(), &points)?;
+      tx.commit().map_err(sql_err)
     })
     .await;
   if let Err(e) = result {
@@ -124,7 +128,13 @@ pub async fn record_report_at(
     .call(move |c| {
       let tx = c.transaction().map_err(sql_err)?;
       let s = owned.as_str();
-      crate::traffic::add(&tx, s, at, m.net_rx, m.net_tx)?;
+      crate::traffic::add(
+        &tx,
+        s,
+        at,
+        (m.net_rx, m.net_tx),
+        m.net_rx_bytes.zip(m.net_tx_bytes),
+      )?;
       insert(
         &tx,
         at,
@@ -618,7 +628,10 @@ pub async fn usage(
     .world
     .services
     .iter()
-    .filter(|(_, r)| r.spec.server == q.server)
+    .filter(|(n, _)| {
+      crate::snapshot::service_runtime_server(&snap, n)
+        == Some(q.server.as_str())
+    })
     .map(|(n, _)| (n.clone(), n.clone(), "service"))
     .collect();
   subjects.extend(
@@ -690,4 +703,35 @@ pub async fn usage(
     b.mem.unwrap_or(-1.0).total_cmp(&a.mem.unwrap_or(-1.0))
   });
   Ok(Json(out))
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn report_metrics_roll_back_traffic_if_point_write_fails() {
+  let state = crate::rules::tests::test_state();
+  state.db.call(|c| c.execute_batch(
+    "CREATE TRIGGER reject_point BEFORE INSERT ON points WHEN NEW.name='host.net_rx' BEGIN SELECT RAISE(ABORT,'test'); END;"
+  ).map_err(sql_err)).await.unwrap();
+  record_report_at(
+    &state,
+    "s1",
+    now_ms(),
+    &Metrics {
+      net_rx_bytes: Some(1000),
+      net_tx_bytes: Some(100),
+      ..Default::default()
+    },
+  )
+  .await;
+  state
+    .db
+    .call(|c| {
+      let points: i64 = c
+        .query_row("SELECT count(*) FROM points", [], |r| r.get(0))
+        .map_err(sql_err)?;
+      assert_eq!(points, 0);
+      Ok(())
+    })
+    .await
+    .unwrap();
 }

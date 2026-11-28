@@ -8,11 +8,12 @@ use std::{
 use ipnet::Ipv4Net;
 use wharf_api_types::{
   agent::{AgentReport, Metrics},
-  spec::GatewayKind,
+  spec::{GatewayKind, RouteSpec},
 };
 
 use crate::{
   db::AgentRow,
+  pending::{MigratePhase, PendingState},
   source_trust::{is_cgnat_v4, is_global_unicast, private_ipv4s},
   world::{ServerRow, World, gateway_project},
 };
@@ -314,18 +315,35 @@ pub fn safe_reports(
     .collect()
 }
 
+pub(crate) fn metric_owner_server<'a>(
+  name: &str,
+  deployed: &'a BTreeMap<String, String>,
+  pending: &'a PendingState,
+) -> Option<&'a str> {
+  if let Some(migration) = pending.migrations.get(name) {
+    return Some(if migration.phase == MigratePhase::UpDone {
+      &migration.payload.to
+    } else {
+      &migration.payload.from
+    });
+  }
+  deployed.get(name).map(String::as_str)
+}
+
 pub fn filter_owned_metrics(
   server: &str,
   m: &mut Metrics,
   world: &World,
   deployed: &BTreeMap<String, String>,
+  pending: &PendingState,
 ) {
   let services = world
     .services
     .iter()
-    .filter(|(name, s)| {
-      s.spec.server == server
-        || deployed.get(*name).is_some_and(|s| s == server)
+    .filter(|(name, row)| {
+      !row.spec.stopped
+        && metric_owner_server(name, deployed, pending)
+          == Some(server)
     })
     .map(|(name, _)| name.as_str())
     .collect::<BTreeSet<_>>();
@@ -340,7 +358,7 @@ pub fn filter_owned_metrics(
   });
   trim_map(&mut m.projects, 256);
   m.hosts
-    .retain(|h, _| route_owned_by_server(world, server, h).is_some());
+    .retain(|h, _| route_on_caddy_server(world, server, h));
   trim_map(&mut m.hosts, 256);
   if let Some(oom) = &mut m.oom {
     oom.retain(|p| services.contains(p.as_str()));
@@ -354,19 +372,51 @@ fn trim_map<V>(map: &mut BTreeMap<String, V>, max: usize) {
   }
 }
 
-pub fn route_owned_by_server(
+fn route_on_caddy_server(
+  world: &World,
+  server: &str,
+  hostname: &str,
+) -> bool {
+  world.routes.get(hostname).is_some_and(|route| {
+    caddy_servers(world, &route.spec).any(|s| s == server)
+  })
+}
+
+pub(crate) fn caddy_servers<'a>(
+  world: &'a World,
+  route: &'a RouteSpec,
+) -> impl Iterator<Item = &'a str> {
+  world
+    .route_gateways(route)
+    .into_iter()
+    .filter_map(move |name| {
+      let gateway = &world.gateways.get(name)?.spec;
+      (gateway.kind == GatewayKind::Caddy)
+        .then_some(gateway.server.as_str())
+    })
+}
+
+pub(crate) fn single_service(route: &RouteSpec) -> Option<&str> {
+  (!route.service.is_empty()
+    && route.upstream.is_none()
+    && route.redirect.is_none()
+    && route.paths.iter().all(|path| {
+      path.upstream.is_none()
+        && path.service.as_deref() == Some(&route.service)
+    }))
+  .then_some(route.service.as_str())
+}
+
+pub(crate) fn route_single_service(
   world: &World,
   server: &str,
   hostname: &str,
 ) -> Option<String> {
   let route = &world.routes.get(hostname)?.spec;
-  (!route.service.is_empty()
-    && world.route_gateways(route).iter().any(|g| {
-      world.gateways.get(*g).is_some_and(|g| {
-        g.spec.kind == GatewayKind::Caddy && g.spec.server == server
-      })
-    }))
-  .then(|| route.service.clone())
+  let service = single_service(route)?;
+  caddy_servers(world, route)
+    .any(|s| s == server)
+    .then(|| service.to_owned())
 }
 
 pub async fn record_report(
@@ -400,8 +450,9 @@ pub async fn record_report(
       tracing::warn!("已忽略服务器 {server} 上报的无效或冲突地址");
     }
     let deployed = crate::db::deployed_servers(c)?;
+    let pending = crate::pending::load(c)?;
     if let Some(m) = &mut report.metrics {
-      filter_owned_metrics(&server, m, &world, &deployed);
+      filter_owned_metrics(&server, m, &world, &deployed, &pending);
     }
     let mut stored = report.clone();
     let previous = registered.and_then(|a| a.report.as_ref());
@@ -409,12 +460,14 @@ pub async fn record_report(
       stored.metrics = previous.filter(|r| r.build == stored.build)
         .and_then(|r| r.metrics.clone());
       if let Some(m) = &mut stored.metrics {
-        filter_owned_metrics(&server, m, &world, &deployed);
+        filter_owned_metrics(&server, m, &world, &deployed, &pending);
       }
     }
     if let Some(m) = &mut stored.metrics {
       m.oom = None;
       m.hosts.clear();
+      m.net_rx_bytes = None;
+      m.net_tx_bytes = None;
     }
     if stored.agent_memory.is_none() && stored.time_ms.is_none() {
       stored.agent_memory = previous.and_then(|r| r.agent_memory.clone());

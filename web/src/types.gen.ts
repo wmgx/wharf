@@ -1346,6 +1346,10 @@ export type Health = "healthy" | "unhealthy" | "starting" | "none";
 export interface HeartbeatSpec {
   every_mins: number;
   grace_mins: number;
+  /**
+   * 已按目标容器配置；旧心跳保留原来的全容器注入。
+   */
+  targeted?: boolean;
   token?: string;
 }
 
@@ -1431,6 +1435,12 @@ export interface ImageRow {
   server: string;
   size: number;
   used_by: string[];
+}
+
+export interface ImageVersionCheck {
+  error?: string | null;
+  latest?: string | null;
+  newer: boolean;
 }
 
 export interface ImagesView {
@@ -1722,7 +1732,9 @@ export interface Metrics {
    * 字节每秒，不含回环、docker 网桥和组网网卡。
    */
   net_rx: number;
+  net_rx_bytes?: number | null;
   net_tx: number;
+  net_tx_bytes?: number | null;
   /**
    * 上次上报以来因内存超限被杀过容器的 compose project 名。
    * 旧 agent 没有这个字段；新 agent 每次都带，没有就是空列表。
@@ -3188,6 +3200,7 @@ export interface TaskRunView {
    * 输出的最后 16 KB，密钥值已换成 `***`；出错时是错误信息。
    */
   output: string;
+  service?: string | null;
   started_at: string;
   status: TaskStatus;
   task: string;
@@ -3263,6 +3276,7 @@ export interface TaskView {
   data_bytes?: number | null;
   hook_url?: string | null;
   last?: TaskRunView | null;
+  migrating?: boolean;
   name: string;
   /**
    * 下次运行时间；停用时没有。
@@ -3273,6 +3287,7 @@ export interface TaskView {
    */
   ping_url?: string | null;
   spec: TaskSpec;
+  target_server?: string | null;
   updated_at: string;
 }
 
@@ -3425,6 +3440,7 @@ export interface VersionCheck {
    * 这次没查到时的原因，`newer` 沿用上一次的结果。
    */
   error?: string | null;
+  images?: Record<string, ImageVersionCheck>;
   /**
    * 查到的最新版本（镜像 digest 或 commit）。
    */

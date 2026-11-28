@@ -69,6 +69,16 @@ fn handle_auth_failure(
 pub async fn run_forever(ops: Arc<Ops>) -> ! {
   let mut backoff = 1u64;
   let mut auth_failures = 0;
+  let cursors = crate::log_watches::CursorStore::load(&ops.data_dir);
+  tokio::spawn({
+    let cursors = cursors.clone();
+    async move {
+      loop {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        cursors.save();
+      }
+    }
+  });
   let hits = crate::log_watches::Hits::default();
   let cancel = CancellationToken::new();
   let _guard = cancel.clone().drop_guard();
@@ -76,7 +86,7 @@ pub async fn run_forever(ops: Arc<Ops>) -> ! {
     ops.docker.clone(),
     cancel.clone(),
     hits.clone(),
-    Default::default(),
+    cursors.clone(),
   );
   let telemetry = Arc::new(Telemetry {
     online: AtomicBool::new(false),
@@ -97,6 +107,7 @@ pub async fn run_forever(ops: Arc<Ops>) -> ! {
         .await
     }
     .await;
+    cursors.save();
     match result {
       Ok(true) => {
         backoff = 1;
@@ -465,15 +476,16 @@ async fn session(
             ops.reporter.metrics(&ctx).await.map(Box::new);
         }
         sample = !sample;
+        report.agent_memory = memory_report.borrow().clone();
+        report.time_ms = Some(chrono::Utc::now().timestamp_millis());
+        let permit = tokio::select! {
+          _ = cancel.cancelled() => break,
+          permit = tx.reserve() => match permit { Ok(permit) => permit, Err(_) => break },
+        };
         report.log_hits = std::mem::take(&mut *hits.lock().unwrap())
           .into_values()
           .collect();
-        report.agent_memory = memory_report.borrow().clone();
-        report.time_ms = Some(chrono::Utc::now().timestamp_millis());
-        if tx.send(AgentMsg::Report(Box::new(report))).await.is_err()
-        {
-          break;
-        }
+        permit.send(AgentMsg::Report(Box::new(report)));
       }
     })
   };

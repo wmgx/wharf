@@ -1054,7 +1054,7 @@ fn apply_compose_settings(
   let quote = |v: &str| {
     serde_json::to_string(&v.replace('$', "$$")).unwrap_or_default()
   };
-  let mut inserts: Vec<(usize, String)> = Vec::new();
+  let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
   let memory = limits.memory_mb.map(|mb| format!("{mb}m"));
   let cpus = limits.cpu_milli.map(cpus_text);
   let mut added = String::new();
@@ -1082,18 +1082,44 @@ fn apply_compose_settings(
         }
       }
       Some(e) => {
-        if key(lines[e].1).as_deref() != Some("environment") {
-          return Err(unsupported());
-        }
+        let (start, line) = lines[e];
+        let end = start + line.len();
         let item = lines[e + 1..body_end]
           .iter()
           .find(|(_, l)| code(l))
           .filter(|(_, l)| indent(l) > m)
-          .map(|(_, l)| *l)
-          .ok_or_else(unsupported)?;
-        let k_pad = " ".repeat(indent(item));
-        let list = item.trim_start().starts_with("- ");
-        let mut text = String::new();
+          .map(|(_, l)| *l);
+        let mut header = String::new();
+        let (range, k_pad, list) = if let Some(item) = item {
+          if key(line).as_deref() != Some("environment") {
+            return Err(unsupported());
+          }
+          (
+            end..end,
+            " ".repeat(indent(item)),
+            item.trim_start().starts_with("- "),
+          )
+        } else {
+          let rest = line
+            .trim_start()
+            .strip_prefix("environment:")
+            .unwrap_or_default();
+          let (value, comment) =
+            rest.split_once('#').unwrap_or((rest, ""));
+          if !existing.is_empty()
+            || !matches!(value.trim(), "" | "{}" | "[]")
+          {
+            return Err(unsupported());
+          }
+          header = format!("{pad}environment:");
+          if !comment.is_empty() {
+            header.push_str(" #");
+            header.push_str(comment.trim_end());
+          }
+          header.push_str(eol);
+          (start..end, format!("{pad}  "), false)
+        };
+        let mut text = header;
         for (k, v) in &spec.env {
           if list {
             text.push_str(&format!(
@@ -1104,17 +1130,18 @@ fn apply_compose_settings(
             text.push_str(&format!("{k_pad}{k}: {}{eol}", quote(v)));
           }
         }
-        inserts.push((lines[e].0 + lines[e].1.len(), text));
+        edits.push((range, text));
       }
     }
   }
   if !added.is_empty() {
-    inserts.push((lines[header].0 + lines[header].1.len(), added));
+    let end = lines[header].0 + lines[header].1.len();
+    edits.push((end..end, added));
   }
-  inserts.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+  edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
   let mut out = content.to_string();
-  for (at, text) in inserts {
-    out.insert_str(at, &text);
+  for (range, text) in edits {
+    out.replace_range(range, &text);
   }
   // 插完再解析一遍，确认加到了对的容器上。
   let parsed: serde_yaml_ng::Value =

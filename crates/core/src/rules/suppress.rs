@@ -259,19 +259,26 @@ pub(super) async fn check(
     && (id == "task"
       || (id == "backup" && subject == crate::core_backup::REPO))
   {
-    let name = subject.to_string();
-    let task = id == "task";
-    let servers = state.db.call(move |c| {
-      if task {
-        let mut stmt = c.prepare(
-          "SELECT json_extract(spec, '$.server') FROM tasks WHERE name = ?1"
-        ).map_err(db::sql_err)?;
-        return stmt.query_map([name], |r| r.get::<_, String>(0))
-          .map_err(db::sql_err)?.collect::<Result<Vec<_>, _>>().map_err(db::sql_err);
-      }
-      Ok(crate::core_node::load_persisted(c)?.map(|(server, _)| server).into_iter()
-        .chain(db::setting(c, crate::core_backup::TO)?).collect())
-    }).await.unwrap_or_default();
+    let servers = if id == "task" {
+      crate::tasks::notification_server(state, subject)
+        .await
+        .into_iter()
+        .collect()
+    } else {
+      state
+        .db
+        .call(|c| {
+          Ok(
+            crate::core_node::load_persisted(c)?
+              .map(|(server, _)| server)
+              .into_iter()
+              .chain(db::setting(c, crate::core_backup::TO)?)
+              .collect::<Vec<_>>(),
+          )
+        })
+        .await
+        .unwrap_or_default()
+    };
     if let Some(reason) = with(|m| {
       servers.into_iter().find_map(|server| {
         m.firing
@@ -306,9 +313,8 @@ pub(super) async fn check(
   })
 }
 
-/// 抑制源恢复（或抑制规则关闭/删除）后，把仍在触发且还没推过的告警按自身级别补推一次。
-pub(crate) async fn flush_unsuppressed(state: &AppState, now: i64) {
-  let pending: Vec<(String, String, Event)> = with(|m| {
+fn pending() -> Vec<(String, String, Event)> {
+  with(|m| {
     m.firing
       .iter()
       .filter(|(_, f)| f.suppressed && f.delivery == Delivery::None)
@@ -323,7 +329,120 @@ pub(crate) async fn flush_unsuppressed(state: &AppState, now: i64) {
         )
       })
       .collect()
+  })
+}
+
+fn grace_ms(rule_id: &str) -> i64 {
+  RULES
+    .iter()
+    .find(|rule| rule.id == rule_id)
+    .map_or(180_000, |rule| {
+      (rule.period_secs as i64 * 1000 + 60_000).max(180_000)
+    })
+}
+
+async fn eligible(
+  state: &AppState,
+  rule: &str,
+  subject: &str,
+  cfg: &BTreeMap<String, Override>,
+  world: Option<&World>,
+) -> bool {
+  let service = service_overrides::service_of_subject(rule, subject)
+    .or_else(|| {
+      with(|m| m.custom_rules.contains_key(rule)).then_some(subject)
+    });
+  !service.is_some_and(|service| {
+    super::op_silence::service_busy(state, service)
+  }) && check(state, rule, Some(subject), cfg, world)
+    .await
+    .is_none()
+}
+
+pub(crate) async fn schedule_unsuppress(state: &AppState, now: i64) {
+  let pending = pending();
+  if pending.is_empty() {
+    return;
+  }
+  let cfg = config(state).await;
+  let world = load_world(state).await;
+  for (rule, subject, _) in pending {
+    let ready =
+      eligible(state, &rule, &subject, &cfg, world.as_ref()).await;
+    with(|m| {
+      let key = (rule.clone(), subject);
+      if ready
+        && m.firing.get(&key).is_some_and(|f| {
+          f.suppressed && f.delivery == Delivery::None
+        })
+      {
+        m.unsuppress_grace
+          .entry(key)
+          .or_insert_with(|| now + grace_ms(&rule));
+      } else {
+        m.unsuppress_grace.remove(&key);
+      }
+    });
+  }
+}
+
+pub(super) async fn confirm_sample(
+  state: &AppState,
+  key: &(String, String),
+) -> bool {
+  if !with(|m| m.unsuppress_grace.contains_key(key)) {
+    return false;
+  }
+  let cfg = config(state).await;
+  if !eligible(state, &key.0, &key.1, &cfg, None).await {
+    return false;
+  }
+  claim(state, key, |deadline| deadline.is_some()).await
+}
+
+async fn claim(
+  state: &AppState,
+  key: &(String, String),
+  due: impl Fn(Option<i64>) -> bool,
+) -> bool {
+  let claimed = with(|m| {
+    let suppressed = m
+      .firing
+      .get(key)
+      .is_some_and(|f| f.suppressed && f.delivery == Delivery::None);
+    let deadline = m.unsuppress_grace.get(key).copied();
+    if !suppressed || !due(deadline) {
+      return false;
+    }
+    m.unsuppress_grace.remove(key);
+    if let Some(f) = m.firing.get_mut(key) {
+      f.suppressed = false;
+    }
+    true
   });
+  if claimed {
+    set_firing_suppressed(state, key.clone(), false).await;
+  }
+  claimed
+}
+
+pub(super) async fn flush_unsuppressed_now(
+  state: &AppState,
+  now: i64,
+) {
+  flush(state, now, true).await;
+}
+
+pub(crate) async fn flush_due_unsuppressed(
+  state: &AppState,
+  now: i64,
+) {
+  schedule_unsuppress(state, now).await;
+  flush(state, now, false).await;
+}
+
+async fn flush(state: &AppState, now: i64, immediate: bool) {
+  let pending = pending();
   if pending.is_empty() {
     return;
   }
@@ -332,18 +451,19 @@ pub(crate) async fn flush_unsuppressed(state: &AppState, now: i64) {
     with(|m| (m.service_overrides.clone(), m.custom_rules.clone()));
   let world = load_world(state).await;
   for (rule_id, subject, event) in pending {
-    if check(state, &rule_id, Some(&subject), &cfg, world.as_ref())
+    if !eligible(state, &rule_id, &subject, &cfg, world.as_ref())
       .await
-      .is_some()
     {
       continue;
     }
-    set_firing_suppressed(
-      state,
-      (rule_id.clone(), subject.clone()),
-      false,
-    )
-    .await;
+    let key = (rule_id.clone(), subject.clone());
+    if !claim(state, &key, |deadline| {
+      immediate || deadline.is_some_and(|deadline| deadline <= now)
+    })
+    .await
+    {
+      continue;
+    }
     let o = service_overrides::override_for_firing(
       &cfg,
       &svc_overrides,
@@ -382,7 +502,7 @@ pub async fn sync_unavailable_gateways(
     any_recovered
   });
   if recovered {
-    flush_unsuppressed(state, now_ms()).await;
+    schedule_unsuppress(state, now_ms()).await;
   }
 }
 
@@ -553,7 +673,7 @@ pub(super) async fn remove_rule(
     );
   }
   with(|m| m.suppressions.retain(|r| r.id != id));
-  flush_unsuppressed(state, now).await;
+  flush_unsuppressed_now(state, now).await;
   Ok(())
 }
 

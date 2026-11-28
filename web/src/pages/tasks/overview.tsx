@@ -41,7 +41,7 @@ export function Overview({ task, onRuns }: { task: TaskView; onRuns: () => void 
     </Panel>}
     <Panel className="p-4">
       <Facts items={[
-        ["形式", KIND[s.kind]], ["在哪", where(s)],
+        ["形式", KIND[s.kind]], ["在哪", where(task)],
         ["时间", !s.schedule ? "不定时" : <>
           {friendly && <span>
             {friendly} </span>}<span className="font-mono text-xs text-muted-foreground">

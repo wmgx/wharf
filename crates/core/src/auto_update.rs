@@ -105,15 +105,18 @@ pub async fn run(state: &Arc<AppState>) -> Vec<AutoUpdateResult> {
     let Some(latest) = check.latest.clone() else {
       continue;
     };
+    let Some(fingerprint) = updates::newer_fingerprint(check) else {
+      continue;
+    };
     let key = format!("autoupdate.failed.{name}");
     let previous = state
       .db
       .call({
         let key = key.clone();
-        let latest = latest.clone();
+        let fingerprint = fingerprint.clone();
         move |c| {
           let previous = db::setting(c, &key)?;
-          if previous.as_ref().is_some_and(|p| p != &latest) {
+          if previous.as_ref().is_some_and(|p| p != &fingerprint) {
             db::set_setting(c, &key, None)?;
           }
           Ok(previous)
@@ -121,11 +124,10 @@ pub async fn run(state: &Arc<AppState>) -> Vec<AutoUpdateResult> {
       })
       .await;
     let result = match previous {
-      Ok(Some(previous)) if previous == latest => Ok((
+      Ok(Some(previous)) if previous == fingerprint => Ok((
         "skipped",
         Some("这个版本上次自动更新失败过，等下一个版本".into()),
       )),
-      Ok(_) if !check.newer => continue,
       Ok(_) => {
         let row = &snap.world.services[&name];
         let explicit = if row.spec.update_ignore.iter().any(|r| {
@@ -158,7 +160,7 @@ pub async fn run(state: &Arc<AppState>) -> Vec<AutoUpdateResult> {
         1.0,
       )
       .await;
-      let value = (!ok).then(|| latest.clone());
+      let value = (!ok).then_some(fingerprint);
       if let Err(e) = state
         .db
         .call(move |c| db::set_setting(c, &key, value.as_deref()))

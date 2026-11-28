@@ -71,8 +71,10 @@ async fn round(
     .services
     .iter()
     .filter(|(_, row)| !row.spec.stopped)
-    .filter_map(|(name, row)| {
-      let projects = live.get(&row.spec.server)?.as_ref().ok()?;
+    .filter_map(|(name, _)| {
+      let server =
+        crate::snapshot::service_runtime_server(&snap, name)?;
+      let projects = live.get(server)?.as_ref().ok()?;
       let seen = projects.get(name).is_some_and(|p| {
         p.containers
           .iter()
@@ -124,7 +126,8 @@ async fn round(
     .await;
   }
   crate::rules::lifecycle::reconcile_world(state, snap).await?;
-  crate::rules::flush_unsuppressed(state, crate::db::now_ms()).await;
+  crate::rules::flush_due_unsuppressed(state, crate::db::now_ms())
+    .await;
   Ok(())
 }
 

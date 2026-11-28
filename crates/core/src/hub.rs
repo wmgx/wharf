@@ -1529,10 +1529,10 @@ async fn ingest_backfill(
   public_key: &str,
   now: i64,
   mut samples: Vec<BufferedSample>,
-  alerts: &mpsc::Sender<crate::rules::resources::Sample>,
+  alerts: &crate::rules::resources::ReportQueue,
 ) -> Result<usize, ApiError> {
   let (name, key) = (server.to_string(), public_key.to_string());
-  let (world, deployed, mut last) = state.db.call(move |c| {
+  let (world, deployed, pending, mut last) = state.db.call(move |c| {
     if !crate::db::agents(c)?.iter().any(|a| a.server == name && a.public_key.as_deref() == Some(key.as_str())) {
       return Err(ApiError::not_found("agent 已取消注册"));
     }
@@ -1542,7 +1542,7 @@ async fn ingest_backfill(
       "SELECT MAX(at) FROM points WHERE subject = ?1 AND name = 'host.net_rx'",
       [&name], |r| r.get::<_, Option<i64>>(0),
     ).map_err(sql_err)?.unwrap_or(i64::MIN);
-    Ok((world, deployed, last))
+    Ok((world, deployed, crate::pending::load(c)?, last))
   }).await?;
   samples.retain(|s| {
     // 后续实时报告可能在同一毫秒收到，补传只能排在它之前。
@@ -1564,22 +1564,16 @@ async fn ingest_backfill(
     if let Some(mut m) = sample.metrics {
       crate::report_guard::sanitize_metrics(&mut m);
       crate::report_guard::filter_owned_metrics(
-        server, &mut m, &world, &deployed,
+        server, &mut m, &world, &deployed, &pending,
       );
       let oom = m.oom.take();
       let hosts = std::mem::take(&mut m.hosts);
       if !hosts.is_empty() {
-        crate::http_stats::record_at(
-          state.clone(),
-          server.to_string(),
-          at,
-          hosts,
-        )
-        .await;
+        crate::http_stats::record_at(state, server, at, hosts).await;
       }
       crate::metrics::record_report_at(state, server, at, &m).await;
       if let Some((_, limits)) = &settings {
-        let _ = alerts.send((at, m, limits.clone(), None)).await;
+        alerts.push_backfill((at, m, limits.clone(), None)).await;
       }
       crate::oom::record_at(state, server, at, oom).await;
     }
@@ -1659,10 +1653,7 @@ async fn report_worker(
         let hosts = std::mem::take(&mut m.hosts);
         if !hosts.is_empty() {
           crate::http_stats::record_at(
-            state.clone(),
-            server.clone(),
-            received,
-            hosts,
+            &state, &server, received, hosts,
           )
           .await;
         }
@@ -1676,12 +1667,7 @@ async fn report_worker(
             .as_ref()
             .and_then(|m| m.limit)
             .filter(|_| wanted > 0);
-          let _ = alerts.try_send((
-            received,
-            m.as_ref().clone(),
-            limits,
-            limit,
-          ));
+          alerts.push((received, m.as_ref().clone(), limits, limit));
         }
         crate::oom::record_at(&state, &server, received, oom).await;
       }

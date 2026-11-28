@@ -402,6 +402,77 @@ async fn digest_batches_sends_at_nine_and_catches_up_once_after_restart()
 }
 
 #[tokio::test]
+async fn oom_alert_names_compose_limit_with_empty_override() {
+  let _guard = TEST_LOCK.lock().await;
+  reset_memory();
+  let state = test_state();
+  state.db.call(|c| {
+    db::apply_write(c, &db::Write::Upsert {
+      kind: "service".into(), name: "web".into(),
+      spec: json!({
+        "server":"s1", "limits":{}, "source":{"compose":{"content":"services: {web: {image: nginx, mem_limit: 256m}}"}}
+      }),
+      meta: json!({}),
+    })?;
+    c.execute_batch(
+      "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at, instance_id)
+       SELECT 'web', 's1', 'r1', 'v1', '', '[]', 1, json_extract(meta, '$.instance_id')
+       FROM resources WHERE kind = 'service' AND name = 'web';",
+    ).map_err(db::sql_err)
+  }).await.unwrap();
+  crate::oom::record_at(
+    &state,
+    "s1",
+    db::now_ms(),
+    Some(vec!["web".into()]),
+  )
+  .await;
+  assert!(with(|m| {
+    m.firing[&("oom_killed".into(), "web".into())]
+      .body
+      .contains("Compose 上限 256")
+  }));
+}
+
+#[tokio::test]
+async fn migrated_exec_task_is_suppressed_by_its_runtime_server() {
+  let _guard = TEST_LOCK.lock().await;
+  reset_memory();
+  let state = test_state();
+  seed_server_service(&state, "s2", "web").await;
+  seed_server_service(&state, "s1", "other").await;
+  state.db.call(|c| {
+    c.execute_batch(
+      "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at, instance_id)
+       SELECT 'web', 's2', 'r1', 'v1', '', '[]', 1, json_extract(meta, '$.instance_id')
+       FROM resources WHERE kind = 'service' AND name = 'web';
+       INSERT INTO tasks (name, spec, created_at, updated_at) VALUES
+       ('dump', '{\"server\":\"s1\",\"kind\":\"exec\",\"service\":\"web\",\"command\":\"true\",\"schedule\":\"0 4 * * *\"}', 0, 0);",
+    ).map_err(db::sql_err)
+  }).await.unwrap();
+  let cfg = config(&state).await;
+  for _ in 0..3 {
+    observe(&state, "server.online", "s1", 0.0, "").await;
+  }
+  assert!(firing_since("server_offline", "s1").is_some());
+  assert_eq!(
+    suppress::check(&state, "task", Some("dump"), &cfg, None).await,
+    None
+  );
+  observe(&state, "server.online", "s1", 1.0, "").await;
+  for _ in 0..3 {
+    observe(&state, "server.online", "s2", 0.0, "").await;
+  }
+  assert!(firing_since("server_offline", "s2").is_some());
+  assert_eq!(
+    suppress::check(&state, "task", Some("dump"), &cfg, None)
+      .await
+      .as_deref(),
+    Some("服务器 s2 离线")
+  );
+}
+
+#[tokio::test]
 async fn suppress_offline_flushes_on_recovery_and_skips_unpushed_recovery()
  {
   let _g = TEST_LOCK.lock().await;
@@ -428,8 +499,11 @@ async fn suppress_offline_flushes_on_recovery_and_skips_unpushed_recovery()
     )
     .await;
   }
-  // s1 恢复在线：web 仍在触发，应补推一次。
+  // s1 恢复在线，等 web 新采样后再补推。
   observe_at(&s, t0 + 10 * MIN, "server.online", "s1", 1.0, "").await;
+  assert_eq!(history_rows(&s).await.len(), 3);
+  observe_at(&s, t0 + 11 * MIN, "monitor.ok", "web", 0.0, "仍超时")
+    .await;
 
   let rows = history_rows(&s).await;
   assert_eq!(rows.len(), 4);
@@ -516,7 +590,7 @@ async fn custom_suppression_blocks_until_source_recovers() {
   assert_eq!(rows[1].0, "monitor_failed");
   assert_eq!(rows[1].3.as_deref(), Some("被抑制：s1 上的 db 停了"));
 
-  // A:x 恢复 -> B 补推；此后 B 恢复、再次触发均不再受抑制。
+  // A:x 恢复后保持宽限，无新点则到期补推。
   observe_at(
     &s,
     t0 + 6 * MIN,
@@ -526,11 +600,15 @@ async fn custom_suppression_blocks_until_source_recovers() {
     "running",
   )
   .await;
-  observe_at(&s, t0 + 7 * MIN, "monitor.ok", "api", 1.0, "ok").await;
+  assert_eq!(history_rows(&s).await.len(), 3);
+  suppress::flush_due_unsuppressed(&s, t0 + 8 * MIN).await;
+  assert_eq!(history_rows(&s).await.len(), 3);
+  suppress::flush_due_unsuppressed(&s, t0 + 9 * MIN).await;
+  observe_at(&s, t0 + 10 * MIN, "monitor.ok", "api", 1.0, "ok").await;
   for i in 0..3 {
     observe_at(
       &s,
-      t0 + (8 + i) * MIN,
+      t0 + (11 + i) * MIN,
       "monitor.ok",
       "api",
       0.0,
@@ -573,6 +651,27 @@ async fn muted_beats_digest_priority() {
 }
 
 #[tokio::test]
+async fn digest_ack_recovery_marks_recovered_at() {
+  let _g = TEST_LOCK.lock().await;
+  reset_memory();
+  let s = test_state();
+  let now = db::now_ms();
+  observe_at(&s, now, "disk.days_left", "s1", 5.0, "").await;
+  ack::ack_at(&s, "disk_forecast", "s1", "fixture", None, now)
+    .await
+    .unwrap();
+  observe_at(&s, now + 1, "disk.days_left", "s1", 30.0, "").await;
+  assert!(
+    digest::preview(&s)
+      .await
+      .unwrap()
+      .body
+      .unwrap()
+      .contains("已恢复")
+  );
+}
+
+#[tokio::test]
 async fn digest_keeps_rows_on_failure_and_preserves_inflight_inserts()
 {
   let _g = TEST_LOCK.lock().await;
@@ -603,15 +702,24 @@ async fn digest_keeps_rows_on_failure_and_preserves_inflight_inserts()
   assert!(
     digest::tick_at_with(
       &s,
-      beijing_ms(2026, 6, 2, 9, 0),
+      beijing_ms(2026, 6, 1, 9, 15),
       move |_| async move {
         observe_at(
           &s_inflight,
-          beijing_ms(2026, 6, 2, 9, 0),
+          beijing_ms(2026, 6, 1, 9, 15),
           "disk.days_left",
-          "s2",
-          5.0,
+          "s1",
+          30.0,
           "",
+        )
+        .await;
+        observe_at(
+          &s_inflight,
+          beijing_ms(2026, 6, 1, 9, 15),
+          "disk.days_left",
+          "s1",
+          4.0,
+          "再次触发",
         )
         .await;
         None
@@ -622,7 +730,7 @@ async fn digest_keeps_rows_on_failure_and_preserves_inflight_inserts()
   let pv = digest::preview(&s).await.unwrap();
   assert_eq!(pv.count, 1);
   let body = pv.body.unwrap();
-  assert!(!body.contains("s1") && body.contains("s2"));
+  assert!(body.contains("s1") && body.contains("仍在触发"));
 }
 
 #[path = "custom_tests.rs"]
@@ -648,6 +756,7 @@ async fn notice_with_subject_respects_offline_and_custom_suppression()
         delivery: Delivery::None,
         suppressed: false,
       }),
+      now,
     )
     .await;
   }
@@ -1060,6 +1169,7 @@ async fn firing_refreshes_certificate_text_and_suppression_rejects_cycle()
       .starts_with("被抑制：")
   );
   lifecycle::clear(&state, "cert_expiring", "app.example.com").await;
+  observe_at(&state, 6, "monitor.ok", "web", 0.0, "").await;
   assert!(delivered(&history_rows(&state).await.last().unwrap().3));
 }
 
@@ -1451,5 +1561,23 @@ async fn failover_notice_ignores_primary_offline_suppression() {
       .as_deref()
       .unwrap()
       .starts_with("被抑制：")
+  );
+}
+
+#[test]
+fn rule_window_clamps_old_counts_and_slow_metrics_keep_their_series()
+{
+  let rule = rule("container_restarting");
+  assert!(validate_for_n(rule, Some(11)).is_err());
+  assert!(matches!(
+    judge(rule, rule.threshold, 11, &VecDeque::from(vec![1.0; 10])),
+    Verdict::Fire
+  ));
+  assert_eq!(metric_stale_ms(rule.metric), STALE_MS);
+  assert_eq!(
+    metric_stale_ms(
+      super::tests::rule("tailnet_key_expiring").metric
+    ),
+    18 * 3_600_000
   );
 }

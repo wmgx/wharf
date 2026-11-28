@@ -51,7 +51,9 @@ pub(crate) mod service_overrides;
 mod store;
 #[path = "rules/suppress.rs"]
 mod suppress;
-pub(crate) use suppress::flush_unsuppressed;
+pub(crate) use suppress::{
+  flush_due_unsuppressed, schedule_unsuppress,
+};
 
 use api::view;
 use catalog::{NOTICES, RULES};
@@ -140,6 +142,7 @@ struct Rule {
   /// 有值时要回到这一侧（`op` 取反）才算恢复，中间状态保持不变。
   recover: Option<f64>,
   every: &'static str,
+  period_secs: u64,
   default_level: AlertLevel,
   /// 状态键，沿用改造前的，升级后不会重推。
   key: fn(&str) -> String,
@@ -232,6 +235,7 @@ struct Memory {
   series: BTreeMap<(String, String), (VecDeque<f64>, i64)>,
   /// （规则，对象）→ 触发记录，和表 `alert_firing` 一致，第一次用时从库里读。
   firing: BTreeMap<(String, String), FiringEntry>,
+  unsuppress_grace: BTreeMap<(String, String), i64>,
   /// （规则，对象）→ 确认记录，和表 `alert_acks` 一致。
   acks: BTreeMap<(String, String), AckEntry>,
   /// 自定义抑制规则，和表 `alert_suppressions` 一致。
@@ -290,6 +294,74 @@ fn judge_consecutive(
   }
 }
 
+fn metric_stale_ms(metric: &str) -> i64 {
+  RULES
+    .iter()
+    .filter(|rule| rule.metric == metric)
+    .map(|rule| rule.period_secs as i64 * 3000)
+    .max()
+    .unwrap_or_default()
+    .max(STALE_MS)
+}
+
+fn validate_for_n(
+  rule: &Rule,
+  count: Option<u32>,
+) -> Result<(), wharf_api_types::ApiError> {
+  let max = match rule.mode {
+    Mode::Window(window) => window,
+    _ => KEEP,
+  };
+  if count.is_some_and(|n| n == 0 || n as usize > max) {
+    return Err(
+      wharf_api_types::ApiError::invalid(format!(
+        "{}的连续次数要在 1 到 {max} 之间",
+        rule.name
+      ))
+      .with_hint(format!("把 --for 改到 1..={max}")),
+    );
+  }
+  Ok(())
+}
+
+pub(crate) async fn recover_idle_http(
+  state: &AppState,
+  now: i64,
+  idle_services: &BTreeSet<String>,
+) {
+  let targets: BTreeSet<_> = with(|m| {
+    let idle = |metric: &str, service: &str| {
+      matches!(metric, "req.err" | "req.p95")
+        && idle_services.contains(service)
+    };
+    m.series
+      .retain(|(metric, service), _| !idle(metric, service));
+    m.custom_rules
+      .values()
+      .filter(|r| {
+        idle(&r.metric, &r.service)
+          && matches!(r.op, Op::Gt)
+          && m
+            .firing
+            .contains_key(&(r.name.clone(), r.service.clone()))
+      })
+      .map(|r| (r.metric.clone(), r.service.clone()))
+      .collect()
+  });
+  for (metric, name) in targets {
+    custom::evaluate_at(
+      state,
+      now,
+      &metric,
+      &name,
+      0.0,
+      "最近 1 分钟无请求",
+      &VecDeque::new(),
+    )
+    .await;
+  }
+}
+
 fn judge(
   rule: &Rule,
   threshold: f64,
@@ -323,7 +395,9 @@ fn judge(
     }
     Mode::ServiceLog => Verdict::Hold,
     Mode::Heartbeat if last == f64::MAX => Verdict::Fire,
-    Mode::Heartbeat if last == -f64::MAX => Verdict::Recover,
+    Mode::Heartbeat if last == -f64::MAX || !bad(last) => {
+      Verdict::Recover
+    }
     Mode::Heartbeat
       if points.len() >= n
         && points.iter().rev().take(n).all(|v| bad(*v)) =>
@@ -334,7 +408,7 @@ fn judge(
     Mode::Window(w) => {
       let hits =
         points.iter().rev().take(w).filter(|v| bad(**v)).count();
-      if bad(last) && hits >= n {
+      if bad(last) && hits >= n.min(w) {
         Verdict::Fire
       } else if hits == 0 {
         Verdict::Recover
@@ -408,7 +482,9 @@ pub(crate) async fn observe_at(
     return;
   }
   let Some(points) = with(|m| {
-    m.series.retain(|_, (_, at)| now - *at < STALE_MS);
+    m.series.retain(|(metric, _), (_, at)| {
+      now - *at < metric_stale_ms(metric)
+    });
     let (p, at) = m
       .series
       .entry((metric.to_string(), subject.to_string()))
@@ -417,6 +493,15 @@ pub(crate) async fn observe_at(
       && !resources::prepare_sample(p, *at, now)
     {
       return None;
+    }
+    if metric.starts_with("req.") && now < *at {
+      return None;
+    }
+    if metric.starts_with("req.")
+      && *at > 0
+      && at.div_euclid(60_000) == now.div_euclid(60_000)
+    {
+      p.pop_back();
     }
     p.push_back(value);
     while p.len() > KEEP {
@@ -430,7 +515,7 @@ pub(crate) async fn observe_at(
   for (rule, o) in active_rules {
     let fkey = (rule.id.to_string(), subject.to_string());
     if !o.enabled() {
-      set_firing(state, fkey, None).await;
+      set_firing(state, fkey, None, now).await;
       continue;
     }
     let threshold = o.threshold.unwrap_or(rule.threshold);
@@ -457,6 +542,7 @@ pub(crate) async fn observe_at(
             delivery: Delivery::None,
             suppressed: false,
           }),
+          now,
         )
         .await;
         ack::on_firing_change(state, &fkey, true, now).await;
@@ -464,12 +550,14 @@ pub(crate) async fn observe_at(
       }
       Verdict::Recover => {
         prev = with(|m| m.firing.get(&fkey).cloned());
-        set_firing(state, fkey.clone(), None).await;
+        set_firing(state, fkey.clone(), None, now).await;
         ack::on_firing_change(state, &fkey, false, now).await;
         (true, (rule.ok)(&ctx))
       }
     };
-    if notify::transition(state, &(rule.key)(subject), ok).await {
+    if notify::transition(state, &(rule.key)(subject), ok).await
+      || (!ok && suppress::confirm_sample(state, &fkey).await)
+    {
       let event = if ok && rule.id == "server_offline" {
         // 开始触发前已经连续离线了 for_n 分钟。
         let since =
@@ -496,7 +584,7 @@ pub(crate) async fn observe_at(
       )
       .await;
       if ok {
-        suppress::flush_unsuppressed(state, now).await;
+        suppress::schedule_unsuppress(state, now).await;
       }
     }
   }
@@ -660,16 +748,6 @@ async fn push_with_world(state: &AppState, args: PushArgs<'_>) {
         return;
       }
       Some(Delivery::Digest) => {
-        digest::enqueue(
-          state,
-          id,
-          subject,
-          &event.title,
-          true,
-          false,
-          now,
-        )
-        .await;
         record_at(
           state,
           now,

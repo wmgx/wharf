@@ -56,6 +56,7 @@ interface Draft {
   server: string;
   ports: PortSpec[];
   envText: string;
+  container?: string;
   hostname: string;
   entry: string;
   pkg: CodePackage | null;
@@ -88,6 +89,7 @@ function Form({ onClose }: { onClose: () => void }) {
   const servers = status?.servers ?? [];
   const [server, setServer] = useState(draft?.server ?? "");
   const [ports, setPorts] = useState<PortSpec[]>(draft?.ports ?? [{ name: "http", container: 80 }]);
+  const [container, setContainer] = useState(draft?.container ?? "");
   const [envText, setEnvText] = useState(draft?.envText ?? "");
   const [hostname, setHostname] = useState(draft?.hostname ?? "");
   const [pkg, setPkg] = useState<CodePackage | null>(draft?.pkg ?? null);
@@ -106,6 +108,7 @@ function Form({ onClose }: { onClose: () => void }) {
     if (r.kind === "url") {
       setKind("compose");
       setCompose(r.compose);
+      setContainer("");
       setPortsTouched(false);
       setPorts(composePorts(parseCompose(r.compose)));
       setVolumes([]);
@@ -126,6 +129,8 @@ function Form({ onClose }: { onClose: () => void }) {
     } else if ("compose" in d.source) {
       setKind("compose");
       setCompose(d.source.compose.content ?? "");
+      setContainer("");
+      setEnvText(formatEnv(d.env));
       setVolumes([]);
       setLimits(null);
     }
@@ -163,8 +168,9 @@ function Form({ onClose }: { onClose: () => void }) {
   const repoOk =
     kind === "git" ? /^https:\/\/[^\s@]+$/.test(repo.trim()) && !!gitRef.trim() && howReady(how) : kind === "package" ? howReady(how) : true;
   const portsOk = portsValid(ports, kind === "compose");
-  const ready = !!svcName && !!source && repoOk && !!chosenServer && portsOk && (!hostname.trim() || entry.ready);
-  const withEnv = kind !== "compose";
+  const multiCompose = kind === "compose" && composeInfo.services.length > 1;
+  const selectedContainer = multiCompose && composeInfo.services.includes(container) ? container : undefined;
+  const ready = (!multiCompose || !envText.trim() || !!selectedContainer) && !!svcName && !!source && repoOk && !!chosenServer && portsOk && (!hostname.trim() || entry.ready);
 
   const submit = () => {
     const spec: ServiceSpec = {
@@ -178,7 +184,8 @@ function Form({ onClose }: { onClose: () => void }) {
               ? { build: { upload: source, ...cleanHow(how) } }
               : { compose: { content: source } },
       ports: ports.length ? portsFor(ports, kind === "compose") : undefined,
-      env: withEnv && envText.trim() ? parseEnv(envText) : undefined,
+      env: envText.trim() ? parseEnv(envText) : undefined,
+      container: selectedContainer,
       volumes: kind === "image" && volumes.length ? volumes : undefined,
       limits: kind === "image" ? limits : undefined,
     };
@@ -187,7 +194,7 @@ function Form({ onClose }: { onClose: () => void }) {
       const { gateway, changes: gatewayChanges } = entry.resolve();
       changes.push(...gatewayChanges, { op: "upsert_route", spec: { hostname: hostname.trim().toLowerCase(), service: svcName, gateway } });
     }
-    lastDraft = { kind, image, compose, repo, gitRef, path, how, name: svcName, nameTouched, server: chosenServer, ports, envText, hostname, entry: entry.chosen, pkg, volumes, limits };
+    lastDraft = { kind, image, compose, repo, gitRef, path, how, name: svcName, nameTouched, server: chosenServer, ports, envText, container, hostname, entry: entry.chosen, pkg, volumes, limits };
     onClose();
     actions.plan({ title: `部署 ${svcName}`, changes, then: `/services/${svcName}`, back: NEW_SERVICE_DRAFT_URL });
   };
@@ -326,14 +333,15 @@ function Form({ onClose }: { onClose: () => void }) {
           </Field>
         )}
 
-        {withEnv && (
-          <Field
-            label="环境变量"
-            htmlFor="env"
-          >
-            <CodeEditor id="env" lang="env" secrets className="min-h-24" placeholder={"KEY=value\nTOKEN=[[MY_SECRET]]"} value={envText} onChange={setEnvText} />
-          </Field>
-        )}
+        {multiCompose && <Field label="目标容器" htmlFor="new-service-container">
+          <select id="new-service-container" className="h-9 w-full rounded-md border bg-background px-3 text-sm sm:w-64" value={selectedContainer ?? ""} onChange={(e) => setContainer(e.target.value)}>
+            <option value="">请选择</option>
+            {composeInfo.services.map((name) => <option key={name} value={name}>{name}</option>)}
+          </select>
+        </Field>}
+        <Field label="环境变量" htmlFor="env">
+          <CodeEditor id="env" lang="env" secrets className="min-h-24" placeholder={"KEY=value\nTOKEN=[[MY_SECRET]]"} value={envText} onChange={setEnvText} />
+        </Field>
 
         <Separator />
 

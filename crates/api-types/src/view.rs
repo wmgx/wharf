@@ -1391,8 +1391,21 @@ pub struct UpdatesView {
   pub pending: Option<PendingCheck>,
 }
 
+#[derive(
+  Debug, Clone, Default, Serialize, Deserialize, JsonSchema,
+)]
+pub struct ImageVersionCheck {
+  pub newer: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub latest: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct VersionCheck {
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub images: BTreeMap<String, ImageVersionCheck>,
   pub at: DateTime<Utc>,
   /// 仓库里有比固定版本新的。
   pub newer: bool,
@@ -1542,12 +1555,13 @@ pub enum TaskStatus {
   Succeeded,
   Failed,
   TimedOut,
-  /// 上一次还没跑完。
   Skipped,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TaskRunView {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub service: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub mem_peak: Option<u64>,
   pub id: i64,
@@ -1566,6 +1580,10 @@ pub struct TaskRunView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TaskView {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub target_server: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub migrating: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub data_bytes: Option<u64>,
   pub name: String,

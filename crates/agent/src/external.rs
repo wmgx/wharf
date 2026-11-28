@@ -29,7 +29,7 @@ const DOCKER_PREVIEW: &str = "https://registry-1.docker.io/v2/ratelimitpreview/t
 const TTL_V6: Duration = Duration::from_secs(3600);
 const TTL_GEO: Duration = Duration::from_secs(6 * 3600);
 const TTL_GEO_RETRY: Duration = Duration::from_secs(15 * 60);
-const TTL_QUOTA: Duration = Duration::from_secs(24 * 3600);
+const TTL_QUOTA: Duration = Duration::from_secs(3600);
 const TTL_QUOTA_RETRY: Duration = Duration::from_secs(3600);
 
 type CachedQuota = (Instant, DockerQuota);
@@ -295,7 +295,9 @@ pub async fn quota() -> DockerQuota {
   let mut saved = QUOTA.lock().await;
   if let Some((at, quota)) = saved.as_ref() {
     let ttl = if quota.error.is_none() {
-      TTL_QUOTA
+      quota.window_secs.map_or(TTL_QUOTA, |seconds| {
+        Duration::from_secs(u64::from(seconds)).min(TTL_QUOTA)
+      })
     } else {
       TTL_QUOTA_RETRY
     };

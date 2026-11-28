@@ -1,7 +1,7 @@
 use super::{
   ApiError, AppState, Auth, Cron, ErrorCode, OptionalExtension,
   RUN_COLS, TaskKind, TaskView, Utc, load, need_perm, params,
-  run_view, sql_err, to_time,
+  run_view, sql_err, to_time, visible_services,
 };
 
 pub(super) async fn build_views(
@@ -11,14 +11,13 @@ pub(super) async fn build_views(
   reveal: bool,
 ) -> Result<Vec<TaskView>, crate::api::AppError> {
   let tasks = load(s).await?;
-  let (context, base) = if reveal {
-    let snap = crate::snapshot::load(&s.db).await?;
-    let base = crate::join::default_url_from(s, &snap);
-    let core_server = crate::join::core_server_of(&snap);
-    (Some((snap.world, core_server)), base)
-  } else {
-    (None, None)
-  };
+  let snap = crate::snapshot::load(&s.db).await?;
+  let base = reveal
+    .then(|| crate::join::default_url_from(s, &snap))
+    .flatten();
+  let core_server =
+    reveal.then(|| crate::join::core_server_of(&snap)).flatten();
+  let visible = visible_services(auth)?;
   let mut out = Vec::new();
   let now = Utc::now();
   for (name, spec, updated) in tasks {
@@ -30,23 +29,23 @@ pub(super) async fn build_views(
     {
       continue;
     }
-    if let Some((world, core_server)) = &context {
-      need_perm(auth, &spec, world, core_server.as_deref()).map_err(
-        |_| {
+    if reveal {
+      need_perm(auth, &spec, &snap.world, core_server.as_deref())
+        .map_err(|_| {
           ApiError::new(
             ErrorCode::Forbidden,
             "查看完整触发/报到地址需要对应执行权限",
           )
-        },
-      )?;
+        })?;
     }
     let n = name.clone();
+    let allowed = visible.clone();
     let last = s
       .db
       .call(move |c| {
         c.query_row(
-          &format!("SELECT {RUN_COLS} FROM task_runs WHERE task = ?1 ORDER BY id DESC LIMIT 1"),
-          params![n],
+          &format!("SELECT {RUN_COLS} FROM task_runs WHERE task = ?1 AND (?2 IS NULL OR service IN (SELECT value FROM json_each(?2))) ORDER BY id DESC LIMIT 1"),
+          params![n, allowed],
           run_view,
         )
         .optional()
@@ -79,7 +78,20 @@ pub(super) async fn build_views(
       } => url("/hook/", token),
       _ => None,
     };
+    let (target_server, migrating) =
+      if let TaskKind::Exec { service, .. } = &spec.how {
+        let target = super::exec_target(&snap, service).ok();
+        (
+          target.map(str::to_string),
+          target.is_none()
+            && snap.pending.migrations.contains_key(service),
+        )
+      } else {
+        (None, false)
+      };
     out.push(TaskView {
+      target_server,
+      migrating,
       data_bytes: None,
       name,
       spec: crate::redact::redact_task_spec(&spec),

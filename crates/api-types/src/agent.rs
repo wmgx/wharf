@@ -328,6 +328,10 @@ pub struct Metrics {
   /// 字节每秒，不含回环、docker 网桥和组网网卡。
   pub net_rx: u64,
   pub net_tx: u64,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub net_rx_bytes: Option<u64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub net_tx_bytes: Option<u64>,
   pub disk_used: u64,
   pub disk_total: u64,
   #[serde(default, skip_serializing_if = "Option::is_none")]

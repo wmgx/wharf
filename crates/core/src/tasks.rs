@@ -153,11 +153,10 @@ async fn tick(
   until: DateTime<Utc>,
 ) -> Result<(), ApiError> {
   let rows = load(state).await?;
-  let world = if rows
-    .iter()
-    .any(|(_, spec, _)| spec.enabled && spec.skip_if_stopped)
-  {
-    Some(snapshot::load(&state.db).await?.world)
+  let snap = if rows.iter().any(|(_, spec, _)| {
+    spec.enabled && matches!(spec.how, TaskKind::Exec { .. })
+  }) {
+    Some(snapshot::load(&state.db).await?)
   } else {
     None
   };
@@ -177,17 +176,34 @@ async fn tick(
       }
       continue;
     }
-    let stopped =
-      world.as_ref().and_then(|w| should_skip_stopped(&spec, w));
-    let online = state.hub.is_online(&spec.server);
+    let stopped = snap
+      .as_ref()
+      .and_then(|snap| should_skip_stopped(&spec, &snap.world));
+    let service =
+      snap.as_ref().and_then(|snap| run_service(&spec, snap));
+    let target = service
+      .zip(snap.as_ref())
+      .map_or(Ok(spec.server.as_str()), |((name, _), snap)| {
+        exec_target(snap, name)
+      });
+    let online = target
+      .as_ref()
+      .is_ok_and(|server| state.hub.is_online(server));
     if until > after
       && cron.next_after(after).is_some_and(|t| t <= until)
     {
       if let Some(service) = stopped {
-        record_skipped(state, &name, "schedule", service).await?;
+        record_skipped(
+          state,
+          &name,
+          "schedule",
+          service,
+          snap.as_ref().expect("容器任务有快照"),
+        )
+        .await?;
         continue;
       }
-      if spec.catch_up_mins.is_none() || online {
+      if spec.catch_up_mins.is_none() || online || target.is_err() {
         start(state, &name, spec, "schedule", None).await?;
         continue;
       }
@@ -203,7 +219,14 @@ async fn tick(
       && !scheduled_since(state, &name, due).await?
     {
       if let Some(service) = stopped {
-        record_skipped(state, &name, "catch_up", service).await?;
+        record_skipped(
+          state,
+          &name,
+          "catch_up",
+          service,
+          snap.as_ref().expect("容器任务有快照"),
+        )
+        .await?;
       } else {
         start_with_guard(
           state,
@@ -223,6 +246,23 @@ async fn tick(
       && due.timestamp_millis() >= updated_at
       && !scheduled_since(state, &name, due).await?
     {
+      let server = match target {
+        Ok(server) => server,
+        Err(reason) => {
+          let id = insert_run_at(
+            state,
+            &name,
+            TaskStatus::Skipped,
+            "catch_up",
+            due.timestamp_millis(),
+            service,
+          )
+          .await?;
+          finish(state, id, TaskStatus::Skipped, None, &reason, None)
+            .await;
+          continue;
+        }
+      };
       let output = format!(
         "错过计划时间 {}，在 {window} 分钟宽限内服务器 {} 未补跑",
         due
@@ -231,7 +271,7 @@ async fn tick(
               .expect("固定时区")
           )
           .format("%H:%M"),
-        spec.server,
+        server,
       );
       // 这条记录对应未执行的旧计划点，用实际写入时间会挡住后续补跑。
       let id = insert_run_at(
@@ -240,14 +280,23 @@ async fn tick(
         TaskStatus::Failed,
         "catch_up",
         due.timestamp_millis(),
+        service,
       )
       .await?;
       finish(state, id, TaskStatus::Failed, None, &output, None)
         .await;
       let state = state.clone();
+      let server = server.to_string();
       tokio::spawn(async move {
-        notify_result(&state, &name, id, TaskStatus::Failed, &output)
-          .await;
+        notify_result(
+          &state,
+          &name,
+          id,
+          TaskStatus::Failed,
+          &output,
+          Some(&server),
+        )
+        .await;
       });
     }
   }
@@ -272,9 +321,21 @@ async fn record_skipped(
   name: &str,
   trigger: &str,
   service: &str,
+  snap: &snapshot::Snapshot,
 ) -> Result<(), ApiError> {
-  let id =
-    insert_run(state, name, TaskStatus::Skipped, trigger).await?;
+  let instance = snap
+    .world
+    .services
+    .get(service)
+    .map(|row| row.instance_id.as_str());
+  let id = insert_run(
+    state,
+    name,
+    TaskStatus::Skipped,
+    trigger,
+    Some((service, instance)),
+  )
+  .await?;
   finish(
     state,
     id,
@@ -351,6 +412,20 @@ async fn load_one(
     })
 }
 
+pub(crate) async fn notification_server(
+  state: &AppState,
+  name: &str,
+) -> Option<String> {
+  let spec = load_one(state, name).await.ok()?;
+  match spec.how {
+    TaskKind::Exec { service, .. } => {
+      let snap = snapshot::load_inner(&state.db).await.ok()?;
+      exec_target(&snap, &service).ok().map(str::to_owned)
+    }
+    _ => Some(spec.server),
+  }
+}
+
 /// 记一条运行记录并在后台执行，返回记录 id。上一次还没跑完时记为跳过。
 async fn start(
   state: &Arc<AppState>,
@@ -370,6 +445,43 @@ async fn start(
   .await
 }
 
+fn exec_target<'a>(
+  snap: &'a snapshot::Snapshot,
+  service: &str,
+) -> Result<&'a str, String> {
+  if !snap.world.services.contains_key(service) {
+    return Err(format!("服务 {service} 已不存在，跳过本次执行"));
+  }
+  if let Some(migration) = snap.pending.migrations.get(service) {
+    if migration.phase == crate::pending::MigratePhase::UpDone {
+      return Ok(&migration.payload.to);
+    }
+    return Err(format!("服务 {service} 正在迁移中，跳过本次执行"));
+  }
+  snap
+    .deployed
+    .get(service)
+    .map(String::as_str)
+    .ok_or_else(|| format!("服务 {service} 尚未部署，跳过本次执行"))
+}
+
+fn run_service<'s>(
+  spec: &'s TaskSpec,
+  snap: &'s snapshot::Snapshot,
+) -> Option<(&'s str, Option<&'s str>)> {
+  let TaskKind::Exec { service, .. } = &spec.how else {
+    return None;
+  };
+  Some((
+    service,
+    snap
+      .world
+      .services
+      .get(service)
+      .map(|row| row.instance_id.as_str()),
+  ))
+}
+
 async fn start_with_guard(
   state: &Arc<AppState>,
   name: &str,
@@ -378,33 +490,46 @@ async fn start_with_guard(
   input: Option<TaskInput>,
   guard: Option<RunGuard>,
 ) -> Result<(i64, bool), ApiError> {
-  let busy = guard.is_none();
-  let status = if busy {
+  let snap = snapshot::load(&state.db).await?;
+  let service = run_service(&spec, &snap);
+  let target = service
+    .map_or(Ok(spec.server.as_str()), |(name, _)| {
+      exec_target(&snap, name)
+    });
+  let skip = if guard.is_none() {
+    Some("上一次还没跑完".to_string())
+  } else {
+    target.as_ref().err().cloned()
+  };
+  let status = if skip.is_some() {
     TaskStatus::Skipped
   } else {
     TaskStatus::Running
   };
-  let id = insert_run(state, name, status, trigger).await?;
-  if busy {
-    finish(
-      state,
-      id,
-      TaskStatus::Skipped,
-      None,
-      "上一次还没跑完",
-      None,
-    )
-    .await;
+  let id = insert_run(state, name, status, trigger, service).await?;
+  if let Some(reason) = skip {
+    finish(state, id, TaskStatus::Skipped, None, &reason, None).await;
     return Ok((id, true));
   }
+  let server = target.expect("可执行任务已有目标").to_string();
+  let mut spec = spec;
+  spec.server = server;
   let state = state.clone();
   let name = name.to_string();
   tokio::spawn(async move {
     let (status, code, output, mem_peak) =
-      execute(&state, &name, &spec, input).await;
+      execute(&state, &name, &spec, &snap, input).await;
     finish(&state, id, status, code, &output, mem_peak).await;
     drop(guard);
-    notify_result(&state, &name, id, status, &output).await;
+    notify_result(
+      &state,
+      &name,
+      id,
+      status,
+      &output,
+      Some(&spec.server),
+    )
+    .await;
   });
   Ok((id, false))
 }
@@ -416,7 +541,11 @@ pub(crate) async fn notify_result(
   run_id: i64,
   status: TaskStatus,
   output: &str,
+  target: Option<&str>,
 ) {
+  if status == TaskStatus::Skipped {
+    return;
+  }
   let ok = status == TaskStatus::Succeeded;
   let task = name.to_string();
   let server = state.db.call(move |c| {
@@ -450,7 +579,11 @@ pub(crate) async fn notify_result(
     ok,
     crate::notify::Event {
       title,
-      body: format!("服务器 {}\n{}", server, last_lines(output, 10)),
+      body: format!(
+        "服务器 {}\n{}",
+        target.unwrap_or(&server),
+        last_lines(output, 10)
+      ),
     },
   )
   .await;
@@ -486,12 +619,9 @@ async fn execute(
   state: &Arc<AppState>,
   name: &str,
   spec: &TaskSpec,
+  snap: &snapshot::Snapshot,
   input: Option<TaskInput>,
 ) -> (TaskStatus, Option<i32>, String, Option<u64>) {
-  let snap = match snapshot::load(&state.db).await {
-    Ok(s) => s,
-    Err(e) => return (TaskStatus::Failed, None, e.message, None),
-  };
   if let Err(e) = crate::secret_policy::validate_task_restrictions(
     name,
     &spec.how,
@@ -505,7 +635,7 @@ async fn execute(
   let redact =
     |s: String| crate::log_redact::redact_text_with(&s, &used);
   let result =
-    run_on_agent(state, name, spec, &snap, &secrets, input).await;
+    run_on_agent(state, name, spec, snap, &secrets, input).await;
   match result {
     Ok(r) => {
       let status = if r.timed_out {
@@ -676,8 +806,9 @@ pub(crate) async fn insert_run(
   name: &str,
   status: TaskStatus,
   trigger: &str,
+  service: Option<(&str, Option<&str>)>,
 ) -> Result<i64, ApiError> {
-  insert_run_at(state, name, status, trigger, now_ms()).await
+  insert_run_at(state, name, status, trigger, now_ms(), service).await
 }
 
 async fn insert_run_at(
@@ -686,25 +817,31 @@ async fn insert_run_at(
   status: TaskStatus,
   trigger: &str,
   started_at: i64,
+  service: Option<(&str, Option<&str>)>,
 ) -> Result<i64, ApiError> {
   let (name, trigger) = (name.to_string(), trigger.to_string());
   let status = enc(status);
+  let (service, instance) = service.unzip();
+  let (service, instance) = (
+    service.map(str::to_string),
+    instance.flatten().map(str::to_string),
+  );
   state
     .db
     .call(move |c| {
-      c.execute(
-        "INSERT INTO task_runs (task, status, trigger, started_at) VALUES (?1, ?2, ?3, ?4)",
-        params![name, status, trigger, started_at],
+      let tx = c.transaction().map_err(sql_err)?;
+      tx.execute(
+        "INSERT INTO task_runs (task, status, trigger, started_at, service, service_instance_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![name, status, trigger, started_at, service, instance],
       )
       .map_err(sql_err)?;
-      let id = c.last_insert_rowid();
-      c.execute(
-        "DELETE FROM task_runs WHERE task = ?1 AND id NOT IN (
-           SELECT id FROM task_runs WHERE task = ?1 ORDER BY id DESC LIMIT ?2
-         )",
+      let id = tx.last_insert_rowid();
+      tx.execute(
+        "DELETE FROM task_runs WHERE task = ?1 AND id NOT IN (SELECT id FROM task_runs WHERE task = ?1 ORDER BY id DESC LIMIT ?2)",
         params![name, KEEP_RUNS],
       )
       .map_err(sql_err)?;
+      tx.commit().map_err(sql_err)?;
       Ok(id)
     })
     .await
@@ -740,8 +877,8 @@ pub(crate) async fn record_ping(
     }
     let id = tx.last_insert_rowid();
     tx.execute(
-      "DELETE FROM task_runs WHERE task = ?1 AND id <= ?2 - ?3",
-      params![name, id, KEEP_RUNS],
+      "DELETE FROM task_runs WHERE task = ?1 AND id NOT IN (SELECT id FROM task_runs WHERE task = ?1 ORDER BY id DESC LIMIT ?2)",
+      params![name, KEEP_RUNS],
     ).map_err(sql_err)?;
     tx.commit().map_err(sql_err)?;
     Ok(Some(id))
@@ -906,16 +1043,11 @@ fn validate(
     TaskKind::Exec {
       service, command, ..
     } => {
-      let svc =
-        snap.world.services.get(service).ok_or_else(|| {
+      if !snap.world.services.contains_key(service) {
+        return Err(
           ApiError::not_found(format!("没有服务 {service}"))
-            .with_hint("wharf service list")
-        })?;
-      if svc.spec.server != spec.server {
-        return Err(ApiError::invalid(format!(
-          "服务 {service} 在 {}，任务的服务器要一致",
-          svc.spec.server
-        )));
+            .with_hint("wharf service list"),
+        );
       }
       if blank(command) {
         return Err(ApiError::invalid("命令不能为空"));
@@ -995,10 +1127,11 @@ fn run_view(r: &rusqlite::Row) -> rusqlite::Result<TaskRunView> {
     exit_code: r.get(6)?,
     output: crate::log_redact::redact_text(&r.get::<_, String>(7)?),
     mem_peak: r.get(8)?,
+    service: r.get(9)?,
   })
 }
 
-const RUN_COLS: &str = "id, task, status, trigger, started_at, ended_at, exit_code, output, mem_peak";
+const RUN_COLS: &str = "id, task, status, trigger, started_at, ended_at, exit_code, output, mem_peak, service";
 
 /// `GET /api/tasks`
 pub async fn list(
@@ -1061,9 +1194,15 @@ pub async fn put(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
-  Json(spec): Json<TaskSpec>,
+  Json(mut spec): Json<TaskSpec>,
 ) -> ApiResult<TaskSpec> {
   let snap = snapshot::load(&s.db).await?;
+  if let TaskKind::Exec { service, .. } = &spec.how
+    && let Some(server) =
+      snapshot::service_runtime_server(&snap, service)
+  {
+    spec.server = server.to_string();
+  }
   let core_server = crate::join::core_server_of(&snap);
   need_perm(&auth, &spec, &snap.world, core_server.as_deref())?;
   if let Ok(old) = load_one(&s, &name).await {
@@ -1251,21 +1390,31 @@ pub async fn runs(
     }
   }
   let limit = q.limit.clamp(1, KEEP_RUNS);
+  let visible = visible_services(&auth)?;
   let rows = s
     .db
     .call(move |c| {
       let mut stmt = c
         .prepare(&format!(
-          "SELECT {RUN_COLS} FROM task_runs WHERE task = ?1 ORDER BY id DESC LIMIT ?2"
+          "SELECT {RUN_COLS} FROM task_runs WHERE task = ?1 AND (?3 IS NULL OR service IN (SELECT value FROM json_each(?3))) ORDER BY id DESC LIMIT ?2"
         ))
         .map_err(sql_err)?;
       let rows = stmt
-        .query_map(params![name, limit], run_view)
+        .query_map(params![name, limit, visible], run_view)
         .map_err(sql_err)?;
       rows.collect::<Result<Vec<_>, _>>().map_err(sql_err)
     })
     .await?;
   Ok(Json(rows))
+}
+
+fn visible_services(auth: &Auth) -> Result<Option<String>, ApiError> {
+  auth
+    .services
+    .as_ref()
+    .map(serde_json::to_string)
+    .transpose()
+    .map_err(db::json_err)
 }
 
 fn validate_schedule(spec: &TaskSpec) -> Result<(), ApiError> {
@@ -1380,7 +1529,7 @@ pub async fn hook(
   )
 }
 
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
   let mut diff = a.len() ^ b.len();
   for (i, byte) in a.bytes().enumerate() {
     diff |=
@@ -1393,6 +1542,75 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 mod tests {
   use super::*;
 
+  #[test]
+  fn exec_task_follows_migrated_service_and_skips_in_flight() {
+    let world = crate::world::World::from_rows(vec![db::ResourceRow {
+      kind: "service".into(), name: "web".into(),
+      spec: serde_json::json!({"server":"s2","source":{"image":"nginx"}}),
+      meta: serde_json::json!({}), version: 1,
+    }]).unwrap();
+    let mut snap = snapshot::Snapshot {
+      world,
+      ..Default::default()
+    };
+    snap.pending.migrations.insert(
+      "web".into(),
+      crate::pending::Migration {
+        phase: crate::pending::MigratePhase::Synced,
+        payload: serde_json::from_value(
+          serde_json::json!({"service":"web","from":"s1","to":"s2"}),
+        )
+        .unwrap(),
+      },
+    );
+    assert!(exec_target(&snap, "web").is_err());
+    snap.pending.migrations.get_mut("web").unwrap().phase =
+      crate::pending::MigratePhase::UpDone;
+    assert_eq!(exec_target(&snap, "web"), Ok("s2"));
+  }
+
+  #[tokio::test]
+  async fn rebind_exec_task_preserves_run_token_scope() {
+    let state = crate::rules::tests::test_state();
+    let task = serde_json::json!({"server":"s1","kind":"exec","service":"notes","command":"true","schedule":"0 4 * * *"}).to_string();
+    state.db.call(move |c| {
+      c.execute("INSERT INTO tasks (name,spec,created_at,updated_at) VALUES ('dump',?1,0,0)", [task]).map_err(sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    insert_run(
+      &state,
+      "dump",
+      TaskStatus::Failed,
+      "manual",
+      Some(("web", Some("old"))),
+    )
+    .await
+    .unwrap();
+    insert_run(
+      &state,
+      "dump",
+      TaskStatus::Succeeded,
+      "manual",
+      Some(("notes", Some("new"))),
+    )
+    .await
+    .unwrap();
+    let mut auth =
+      crate::host_access::tests::auth([Perm::Read], false);
+    auth.services = Some(BTreeSet::from(["notes".into()]));
+    let Json(rows) = runs(
+      State(state),
+      auth,
+      Path("dump".into()),
+      Query(RunsQuery { limit: 10 }),
+    )
+    .await
+    .map_err(|error| error.0)
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].service.as_deref(), Some("notes"));
+  }
+
   #[tokio::test]
   async fn quiet_task_clears_legacy_dedup_and_disabled_task_is_hidden()
    {
@@ -1403,8 +1621,15 @@ mod tests {
       c.execute("INSERT INTO task_runs (id, task, status, trigger, started_at) VALUES (1,'daily','succeeded','ping',0)", []).map_err(sql_err)?;
       db::set_setting(c, &task_notice_key("daily"), Some("fail"))
     }).await.unwrap();
-    notify_result(&state, "daily", 1, TaskStatus::Succeeded, "")
-      .await;
+    notify_result(
+      &state,
+      "daily",
+      1,
+      TaskStatus::Succeeded,
+      "",
+      None,
+    )
+    .await;
     state.db.call(|c| {
       assert!(db::setting(c, &task_notice_key("daily"))?.is_none());
       c.execute("UPDATE tasks SET spec = json_set(spec, '$.enabled', json('false'))", []).map_err(sql_err)?;
@@ -1690,6 +1915,40 @@ async fn task_skips_when_service_stopped_and_catches_up_once_after_offline()
       |r| Ok((r.get(0)?, r.get(1)?)),
     ).map_err(sql_err)?;
     assert_eq!(expired, (1, "failed".into()));
+    Ok(())
+  }).await.unwrap();
+}
+
+#[tokio::test]
+async fn expired_exec_catch_up_skips_an_undeployed_service() {
+  let state = crate::rules::tests::test_state();
+  let at = DateTime::parse_from_rfc3339("2026-11-20T10:30:00+08:00")
+    .unwrap()
+    .with_timezone(&Utc);
+  let due = at - chrono::Duration::minutes(30);
+  state.db.call(|c| {
+    db::apply_write(c, &db::Write::Upsert {
+      kind: "service".into(), name: "web".into(),
+      spec: serde_json::json!({"server":"s2","source":{"image":"app:1"}}),
+      meta: serde_json::json!({}),
+    })?;
+    c.execute_batch(
+      "INSERT INTO tasks (name, spec, created_at, updated_at) VALUES
+       ('dump', '{\"server\":\"s1\",\"kind\":\"exec\",\"service\":\"web\",\"command\":\"true\",\"schedule\":\"0 10 * * *\",\"catch_up_mins\":30}', 0, 0)",
+    ).map_err(sql_err)
+  }).await.unwrap();
+  let before = at - chrono::Duration::minutes(1);
+  tick(&state, before, at).await.unwrap();
+  tick(&state, before, at).await.unwrap();
+  state.db.call(move |c| {
+    let row: (i64, String, String, i64) = c.query_row(
+      "SELECT COUNT(*), status, output, started_at FROM task_runs WHERE task = 'dump' AND trigger = 'catch_up'",
+      [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).map_err(sql_err)?;
+    assert_eq!(row, (
+      1, "skipped".into(), "服务 web 尚未部署，跳过本次执行".into(),
+      due.timestamp_millis(),
+    ));
     Ok(())
   }).await.unwrap();
 }

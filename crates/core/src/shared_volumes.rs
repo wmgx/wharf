@@ -338,9 +338,10 @@ mod tests {
       world: shared_world(),
       ..Snapshot::default()
     };
+    let state = crate::rules::tests::test_state();
     let view = |name| {
       crate::views::service_view(
-        &crate::hub::Hub::default(),
+        &state,
         &snap,
         &Net::default(),
         name,

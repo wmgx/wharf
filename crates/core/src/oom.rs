@@ -19,18 +19,27 @@ pub async fn record_at(
     }
   };
   for (name, row) in &snap.world.services {
-    if row.spec.server != server || row.spec.stopped {
+    if row.spec.stopped
+      || (crate::report_guard::metric_owner_server(
+        name,
+        &snap.deployed,
+        &snap.pending,
+      ) != Some(server))
+    {
       continue;
     }
     if oom.contains(name) {
       metrics::event_at(state, at, "oom.kill", name, 1.0).await;
-      let detail = row
-        .spec
-        .limits
-        .as_ref()
-        .and_then(|l| l.memory_mb)
-        .map(|mb| format!("上限 {mb} MB"))
-        .unwrap_or_else(|| "没有在 Wharf 里设内存上限".into());
+      let detail = rules::resources::service_limit_with_source(&row.spec)
+        .map(|(bytes, from_compose)| {
+          let limit = rules::resources::mib(bytes as f64);
+          if from_compose {
+            format!("Compose 上限 {limit}，可调整 mem_limit / deploy.resources.limits.memory")
+          } else {
+            format!("上限 {limit}")
+          }
+        })
+        .unwrap_or_else(|| "没有整服务内存上限".into());
       rules::observe_at(
         state,
         at,

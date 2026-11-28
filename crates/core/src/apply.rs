@@ -519,7 +519,7 @@ pub(crate) async fn start_with_actor(
       .await?;
     crate::log_redact::refresh(&state.db).await;
     if removed_firing {
-      crate::rules::flush_unsuppressed(&state, now_ms()).await;
+      crate::rules::schedule_unsuppress(&state, now_ms()).await;
     }
   }
 
@@ -989,7 +989,7 @@ async fn execute(
     .and_then(|a| a.scope_services.clone());
   let scope_services = scope_services.as_deref();
   // 部署过服务就重新查一次版本，免得页面还按旧镜像提示升级。
-  let mut deployed = false;
+  let mut deployed = std::collections::BTreeSet::new();
   for (i, step) in steps.iter().enumerate() {
     let index = offset + i;
     if (failed && !independent) || cancel.is_cancelled() {
@@ -1103,11 +1103,22 @@ async fn execute(
           Some(crate::log_redact::redact_text(&e.message)),
         ),
       };
-      deployed |= result.is_ok()
+      if result.is_ok()
         && matches!(
           step.step,
           Step::ServiceUp { .. } | Step::Rebuild { .. }
-        );
+        )
+      {
+        deployed.insert(service.to_string());
+        if matches!(step.step, Step::ServiceUp { .. })
+          && let Ok(snap) = snapshot::load(&state.db).await
+          && let Some(server) =
+            snapshot::service_runtime_server(&snap, service)
+        {
+          crate::service_monitor::sync_watches(&state, Some(server))
+            .await;
+        }
+      }
       record_op(&state, service, action, &run_id, status, error)
         .await;
     }
@@ -1165,10 +1176,10 @@ async fn execute(
     &steps,
     &final_run.steps[offset..],
   );
-  if deployed {
-    tokio::spawn(
-      async move { crate::updates::versions(&state).await },
-    );
+  if !deployed.is_empty() {
+    tokio::spawn(async move {
+      crate::updates::refresh_services(&state, deployed).await
+    });
   }
   if independent { guard } else { None }
 }
@@ -3094,7 +3105,7 @@ async fn service_down(
     })
     .await?;
   if removed_firing {
-    crate::rules::flush_unsuppressed(state, now_ms()).await;
+    crate::rules::schedule_unsuppress(state, now_ms()).await;
   }
   Ok(())
 }

@@ -223,6 +223,12 @@ pub async fn ensure_loaded(state: &AppState) {
   with(|m| {
     if !m.loaded {
       m.config = cfg;
+      let deadline = db::now_ms() + 180_000;
+      m.unsuppress_grace = firing
+        .iter()
+        .filter(|(_, f)| f.suppressed && f.delivery == Delivery::None)
+        .map(|(key, _)| (key.clone(), deadline))
+        .collect();
       m.firing = firing;
       m.acks = acks;
       m.suppressions = suppressions;
@@ -238,6 +244,7 @@ pub(super) async fn set_firing(
   state: &AppState,
   key: (String, String),
   fire: Option<FiringEntry>,
+  now: i64,
 ) {
   let update = with(|m| match &fire {
     Some(v) => {
@@ -253,7 +260,10 @@ pub(super) async fn set_firing(
         Some(false)
       }
     }
-    None => m.firing.remove(&key).map(|_| false),
+    None => {
+      m.unsuppress_grace.remove(&key);
+      m.firing.remove(&key).map(|_| false)
+    }
   });
   let Some(update) = update else { return };
   let result = state
@@ -278,10 +288,17 @@ pub(super) async fn set_firing(
             i64::from(f.suppressed),
           ],
         ),
-        None => c.execute(
-          "DELETE FROM alert_firing WHERE rule = ?1 AND subject = ?2",
-          rusqlite::params![rule, subject],
-        ),
+        None => {
+          let tx = c.transaction().map_err(db::sql_err)?;
+          // 告警清除和汇总恢复同事务，即使静默期间也记恢复时刻。
+          super::digest::mark_recovered(&tx, &rule, Some(&subject), now)?;
+          let deleted = tx.execute(
+            "DELETE FROM alert_firing WHERE rule = ?1 AND subject = ?2",
+            rusqlite::params![rule, subject],
+          ).map_err(db::sql_err)?;
+          tx.commit().map_err(db::sql_err)?;
+          Ok(deleted)
+        },
       }
       .map(|_| ())
       .map_err(db::sql_err)

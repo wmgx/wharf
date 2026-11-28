@@ -13,9 +13,9 @@ use wharf_api_types::{
 };
 
 use super::{
-  CONFIG_KEY, KEEP, Mode, NOTICES, Override, RULES, SuppressionRule,
-  ack, config, custom, default_level, ensure_loaded,
-  service_overrides, store, suppress, with,
+  CONFIG_KEY, Mode, NOTICES, Override, RULES, SuppressionRule, ack,
+  config, custom, default_level, ensure_loaded, service_overrides,
+  store, suppress, with,
 };
 use crate::{
   api::ApiResult,
@@ -276,12 +276,7 @@ pub async fn patch(
     if p.threshold.is_some_and(|t| !t.is_finite()) {
       return Err(ApiError::invalid("阈值要是数字").into());
     }
-    if p.for_n.is_some_and(|n| n == 0 || n as usize > KEEP) {
-      return Err(
-        ApiError::invalid(format!("连续次数在 1 到 {KEEP} 之间"))
-          .into(),
-      );
-    }
+    super::validate_for_n(r, p.for_n)?;
   }
   let mut cfg = config(&s).await;
   let o = cfg.entry(id.clone()).or_default();
@@ -335,7 +330,7 @@ pub async fn patch(
     .await;
   }
   if builtin_sup && p.enabled == Some(false) {
-    suppress::flush_unsuppressed(&s, now_ms()).await;
+    suppress::flush_unsuppressed_now(&s, now_ms()).await;
   }
   Ok(Json(view(&s).await?))
 }

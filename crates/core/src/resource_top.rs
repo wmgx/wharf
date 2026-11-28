@@ -62,11 +62,10 @@ pub async fn usage(
     let sample = report.and_then(|r| r.metrics.as_deref());
     let project =
       |name: &str| sample.and_then(|m| m.projects.get(name));
-    for (name, row) in snap
-      .world
-      .services
-      .iter()
-      .filter(|(_, s)| s.spec.server == server)
+    for (name, row) in
+      snap.world.services.iter().filter(|(name, _)| {
+        snapshot::service_runtime_server(&snap, name) == Some(server)
+      })
     {
       rows.push(project_row(
         name,

@@ -619,9 +619,9 @@ mod tests {
     let mut desired = current.clone();
     desired.apply_changes(&[change(redacted)]).unwrap();
     crate::service_monitor::heartbeat::prepare(
-      &state,
       &current,
       &mut desired,
+      state.public_url.as_deref(),
     )
     .unwrap();
     assert_eq!(

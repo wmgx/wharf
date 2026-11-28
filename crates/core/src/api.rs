@@ -1025,7 +1025,7 @@ async fn list_services(
       })
       .filter_map(|n| {
         let mut view = views::service_view(
-          &s.hub,
+          &s,
           &snap,
           &net,
           n,
@@ -1103,7 +1103,7 @@ async fn show_service(
   let history = crate::data::history(&s.db).await?;
   let live = views::cached_live(&s, &snap.world).await;
   let mut view = views::service_view(
-    &s.hub,
+    &s,
     &snap,
     &net,
     &name,
@@ -1115,8 +1115,12 @@ async fn show_service(
     crate::scope_filter::filter_service_links(allowed, &mut view);
   }
   if query.reveal {
-    view.heartbeat =
-      crate::service_monitor::heartbeat::view(&snap, &name, true);
+    view.heartbeat = crate::service_monitor::heartbeat::view(
+      &snap,
+      &name,
+      net.heartbeat_url.as_deref(),
+      true,
+    );
   }
   Ok(Json(view))
 }

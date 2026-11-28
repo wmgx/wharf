@@ -220,6 +220,7 @@ async fn monitoring_only_plan_skips_deploy_but_heartbeat_changes_compose()
     let changed = ServiceSpec {
       heartbeat: Some(
         wharf_api_types::service_checks::HeartbeatSpec {
+          targeted: false,
           every_mins,
           grace_mins,
           token: String::new(),
@@ -346,4 +347,25 @@ async fn port_deployment_grace_stays_active_with_operation_silence_off()
   assert!(!rules::op_silence::service_busy(&state, "web"));
   assert!(deploying(&snap, "web", now + MINUTE));
   assert!(!deploying(&snap, "web", now + 2 * MINUTE));
+}
+
+#[test]
+fn port_target_changes_with_server_connection_and_check() {
+  let row = crate::world::World::from_rows(vec![crate::db::ResourceRow {
+    kind: "service".into(), name: "web".into(),
+    spec: serde_json::json!({"server":"s1", "source":{"image":"nginx"}}),
+    meta: serde_json::json!({}), version: 1,
+  }]).unwrap().services.remove("web").unwrap();
+  let target = |server, conn, port| {
+    super::port_target(
+      &row,
+      PortCheck { port, udp: None },
+      server,
+      conn,
+    )
+  };
+  let before = target("s1", 1, 8080);
+  assert!(before != target("s2", 2, 8080));
+  assert!(before != target("s1", 2, 8080));
+  assert!(before != target("s1", 1, 9090));
 }

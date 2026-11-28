@@ -177,7 +177,8 @@ async fn tick(
       rec.pending_run = None;
     }
     let busy = state.is_service_busy(name);
-    let observed = live.get(&row.spec.server);
+    let observed = snapshot::service_runtime_server(&snap, name)
+      .and_then(|server| live.get(server));
     if !ready_to_observe(
       rec,
       busy,

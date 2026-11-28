@@ -305,6 +305,7 @@ async fn main() -> anyhow::Result<()> {
   disk_forecast::spawn(state.clone());
   mem_forecast::spawn(state.clone());
   traffic::spawn(state.clone());
+  http_stats::spawn(state.clone());
   host_units::spawn(state.clone());
   ssh_login::spawn(state.clone());
   exposure::spawn(state.clone());
