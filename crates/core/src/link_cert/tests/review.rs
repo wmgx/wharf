@@ -22,6 +22,7 @@ async fn offline_gateway_blocks_gateway_sync_but_allows_frpc_recovery()
 
   let sync = Step::GatewaySync {
     gateway: "gw-a".into(),
+    after_dns: false,
     expect: None,
   };
   let err = apply::run_step(
@@ -36,6 +37,9 @@ async fn offline_gateway_blocks_gateway_sync_but_allows_frpc_recovery()
   assert_eq!(err.code, ErrorCode::AgentOffline);
 
   let recover = Step::LinkUp {
+    hot_reload: false,
+    admin_port: None,
+    after_dns: false,
     server: "s3".into(),
     project: link::client_project("s1"),
   };

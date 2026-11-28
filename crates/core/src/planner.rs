@@ -125,6 +125,8 @@ pub enum Step {
   },
   GatewaySync {
     gateway: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    after_dns: bool,
     /// 计划时渲染出的 compose 和配置的指纹，执行前重算比对。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     expect: Option<String>,
@@ -138,6 +140,8 @@ pub enum Step {
     extra: Vec<RemoteRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     expected_gateway: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    verify_target: bool,
   },
   GatewayDown {
     server: String,
@@ -155,6 +159,12 @@ pub enum Step {
   LinkUp {
     server: String,
     project: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    hot_reload: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    admin_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    after_dns: bool,
   },
   LinkDown {
     server: String,
@@ -289,7 +299,13 @@ impl Step {
       {
         3
       }
+      Self::GatewaySync {
+        after_dns: true, ..
+      } => 7,
       Self::GatewaySync { .. } => 4,
+      Self::LinkUp {
+        after_dns: true, ..
+      } => 7,
       Self::LinkUp { .. } => 5,
       Self::DnsUpsert { .. } | Self::EdgeAttach { .. } => 6,
       Self::GatewayDown { .. }
@@ -512,6 +528,7 @@ pub(crate) async fn make_plan_inner(
     &snap.secret_restrictions,
   )?;
   desired.validate_against(&current)?;
+  crate::link::validate_new_admin_port_bindings(&current, &desired)?;
   for (name, row) in &desired.services {
     if current
       .services
@@ -902,7 +919,14 @@ pub(crate) async fn make_plan_inner(
       .map(crate::apply::safe_rollback_warning),
   );
   leftover_items(&mut b, &snap, &current, &desired, &status);
-  link_items(&mut b, &snap, &desired, &net, &status)?;
+  link_items(
+    &mut b,
+    &snap,
+    &desired,
+    (&before_net, &net),
+    &status,
+    &state.hub,
+  )?;
   tailscale_items(&mut b, &snap, &desired, &status);
   egress_items(&mut b, &snap, &current, &desired);
   docker_proxy_items(&mut b, &snap, &current, &desired);
@@ -945,10 +969,19 @@ pub(crate) async fn make_plan_inner(
         })
         .map(|(host, _)| host.clone()),
     );
+    affected.extend(snap.pending.dns_cutovers.iter().cloned());
     affected
   });
-  dns_items(&mut b, &snap, &desired, &net, scope.as_ref(), true)
-    .await?;
+  dns_items(
+    &mut b,
+    &snap,
+    &desired,
+    &net,
+    scope.as_ref(),
+    true,
+    None,
+  )
+  .await?;
   mark("DNS");
   crate::edge_plan::edge_items(
     state, &mut b, &snap, &current, &desired,
@@ -2385,11 +2418,45 @@ fn link_items(
   b: &mut Builder,
   snap: &Snapshot,
   desired: &World,
-  net: &Net,
+  (before_net, net): (&Net, &Net),
   status: &StatusMap,
+  hub: &crate::hub::Hub,
 ) -> Result<(), ApiError> {
-  let want =
-    crate::link::projects_with_secrets(desired, net, &snap.secrets)?;
+  let before =
+    crate::link::tunnels(&snap.world, before_net).unwrap_or_default();
+  let after = crate::link::tunnels(desired, net)?;
+  let existing_ports = status
+    .iter()
+    .flat_map(|(server, projects)| {
+      projects.iter().flatten().filter_map(|(name, status)| {
+        if !name.starts_with("wharf-link-") {
+          return None;
+        }
+        Some((
+          (server.as_str(), name.as_str()),
+          status.frpc_admin_port?,
+        ))
+      })
+    })
+    .collect();
+  let want = crate::link::projects_for_servers(
+    desired,
+    net,
+    &snap.secrets,
+    &existing_ports,
+    |p| {
+      hub.supports_frpc_reload(&p.server)
+        && status.get(&p.server).and_then(Option::as_ref).is_some_and(
+          |projects| {
+            projects.get(&p.project).is_none_or(|s| {
+              s.config_hash.is_some()
+                || s.hash.as_deref() != Some(p.hash.as_str())
+                || !s.all_running()
+            })
+          },
+        )
+    },
+  )?;
   for p in &want {
     // 查不到现状的服务器已经单独提醒过。
     let Some(Some(projects)) = status.get(&p.server) else {
@@ -2415,6 +2482,17 @@ fn link_items(
               describe_containers(s)
             ),
           ))
+        } else if p.reload.as_ref().is_some_and(|r| {
+          s.config_hash.as_deref() != Some(r.config_hash.as_str())
+        }) {
+          Some((
+            Action::Update,
+            vec![],
+            format!(
+              "{}（热重载隧道配置，同机其他隧道不断开）",
+              p.summary
+            ),
+          ))
         } else {
           None
         }
@@ -2424,6 +2502,18 @@ fn link_items(
     let Some((action, risk, reason)) = decision else {
       continue;
     };
+    if p.project != crate::link::SERVER_PROJECT
+      && hub.is_online(&p.server)
+      && !hub.supports_frpc_reload(&p.server)
+    {
+      let server = &p.server;
+      let warning = format!(
+        "服务器 {server} 的 agent 版本较旧，修改隧道仍会重启 frpc；可执行 wharf server upgrade {server}"
+      );
+      if !b.warnings.contains(&warning) {
+        b.warnings.push(warning);
+      }
+    }
     let id = b.item(
       format!("link/{}/{}", p.server, p.project),
       Layer::Gateway,
@@ -2439,6 +2529,14 @@ fn link_items(
       Step::LinkUp {
         server: p.server.clone(),
         project: p.project.clone(),
+        hot_reload: p.reload.is_some(),
+        admin_port: p.reload.as_ref().map(|r| r.admin_port),
+        after_dns: snap
+          .pending
+          .links_after_dns
+          .contains(&format!("{}/{}", p.server, p.project))
+          || action == Action::Update
+            && only_withdraws_tunnels(p, &before, &after),
       },
     );
   }
@@ -2664,6 +2762,25 @@ fn shown(value: &str) -> String {
   } else {
     format!("代理 {value}")
   }
+}
+
+fn only_withdraws_tunnels(
+  project: &crate::link::LinkProject,
+  before: &[crate::link::Tunnel],
+  after: &[crate::link::Tunnel],
+) -> bool {
+  let Some(gateway_server) =
+    project.project.strip_prefix("wharf-link-")
+  else {
+    return false;
+  };
+  let belongs = |t: &&crate::link::Tunnel| {
+    t.service_server == project.server
+      && t.gateway_server == gateway_server
+  };
+  let old: Vec<_> = before.iter().filter(belongs).collect();
+  let new: Vec<_> = after.iter().filter(belongs).collect();
+  new.len() < old.len() && new.iter().all(|t| old.contains(t))
 }
 
 fn tailscale_items(
@@ -3004,6 +3121,27 @@ fn gateway_items(
         format!("在 {server} 上应用网关 {name}"),
         Step::GatewaySync {
           gateway: name.clone(),
+          after_dns: snap.pending.gateways_after_dns.contains(name)
+            || action == Action::Update
+              && current.gateways.get(name) == Some(gw)
+              && status
+                .get(server)
+                .and_then(Option::as_ref)
+                .and_then(|p| p.get(&project))
+                .is_some_and(|applied| {
+                  applied.all_running()
+                    && applied.hash.as_deref()
+                      == Some(r.compose_hash.as_str())
+                })
+              && snapshot::gateway_render(current, before_net, name)
+                .is_ok_and(|before| {
+                  r.forwards == before.forwards
+                    && r.sites.len() < before.sites.len()
+                    && r
+                      .sites
+                      .iter()
+                      .all(|site| before.sites.contains(site))
+                }),
           expect: (gw.spec.kind == GatewayKind::Caddy)
             .then(|| r.fingerprint()),
         },
@@ -3150,10 +3288,22 @@ pub(crate) fn desired_record(
   net: &Net,
   hostname: &str,
 ) -> Result<DnsSpec, ApiError> {
+  desired_record_at(snap, desired, net, hostname, None)
+}
+
+pub(crate) fn desired_record_at(
+  snap: &Snapshot,
+  desired: &World,
+  net: &Net,
+  hostname: &str,
+  target: Option<&str>,
+) -> Result<DnsSpec, ApiError> {
   let route = &desired.routes[hostname];
-  let gateway = desired
-    .live_gateway(hostname, &route.spec)
-    .unwrap_or_default();
+  let gateway = target
+    .or_else(|| desired.live_gateway(hostname, &route.spec))
+    .ok_or_else(|| {
+      ApiError::invalid(format!("路由 {hostname} 没有网关"))
+    })?;
   let gw = &desired.gateways[gateway].spec;
   if gw.kind == GatewayKind::CloudflareTunnel {
     return Ok(DnsSpec {
@@ -3329,6 +3479,7 @@ fn affected_hosts(
 pub(crate) async fn plan_dns_for_hosts(
   snap: &Snapshot,
   hosts: &BTreeSet<String>,
+  target: Option<&str>,
 ) -> Vec<(String, Result<Option<StepPlan>, ApiError>)> {
   let net = snap.net(&snap.world);
   futures_util::future::join_all(hosts.iter().map(|host| {
@@ -3340,7 +3491,8 @@ pub(crate) async fn plan_dns_for_hosts(
             "没有厂商账号管理 {host} 的 DNS"
           )));
         }
-        if desired_record(snap, &snap.world, net, host)?.content
+        if desired_record_at(snap, &snap.world, net, host, target)?
+          .content
           == TUNNEL_PENDING
         {
           return Err(
@@ -3360,6 +3512,7 @@ pub(crate) async fn plan_dns_for_hosts(
           net,
           Some(&hosts),
           false,
+          target,
         )
         .await?;
         if b.items.iter().any(|item| item.action == Action::Adopt) {
@@ -3382,6 +3535,15 @@ pub(crate) async fn plan_dns_for_hosts(
   .await
 }
 
+fn dns_endpoint_changed(
+  existing: &serde_json::Value,
+  desired: &serde_json::Value,
+) -> bool {
+  ["type", "content", "proxied"]
+    .iter()
+    .any(|field| existing[*field] != desired[*field])
+}
+
 async fn dns_items(
   b: &mut Builder,
   snap: &Snapshot,
@@ -3389,6 +3551,7 @@ async fn dns_items(
   net: &Net,
   scope: Option<&BTreeSet<String>>,
   include_cleanup: bool,
+  target_gateway: Option<&str>,
 ) -> Result<(), ApiError> {
   let in_scope = |h: &str| scope.is_none_or(|s| s.contains(h));
   let edge_ids: Vec<String> = desired
@@ -3483,7 +3646,9 @@ async fn dns_items(
       Some((name, app)) => {
         crate::edge_plan::pages_record(snap, name, app).await?
       }
-      None => desired_record(snap, desired, net, host)?,
+      None => {
+        desired_record_at(snap, desired, net, host, target_gateway)?
+      }
     };
     let provider = snapshot::dns_provider(account)?;
     let want = spec.to_provider();
@@ -3508,22 +3673,35 @@ async fn dns_items(
       &owner_id,
       &mut deleting_owned,
     );
+    let gateway_changed = target_gateway.is_none()
+      && (snap.pending.dns_cutovers.contains(host)
+        || snap.world.routes.get(host).is_some_and(|old| {
+          desired.routes.get(host).is_some_and(|new| {
+            snap.world.live_gateway(host, &old.spec)
+              != desired.live_gateway(host, &new.spec)
+          })
+        }));
     let canonical = want.canonical();
     let address = format!("{KIND_ROUTE}/{host}");
     let after = Some(canonical.clone());
     let upsert = |existing: Option<&RemoteRecord>,
-                  extra: Vec<RemoteRef>| {
+                  extra: Vec<RemoteRef>,
+                  verify_target: bool| {
       Step::DnsUpsert {
         hostname: host.clone(),
         account: account.name.clone(),
         spec: spec.clone(),
         existing: existing.map(remote_ref),
         extra,
-        expected_gateway: desired
-          .routes
-          .get(host)
-          .and_then(|r| desired.live_gateway(host, &r.spec))
+        expected_gateway: target_gateway
+          .or_else(|| {
+            desired
+              .routes
+              .get(host)
+              .and_then(|r| desired.live_gateway(host, &r.spec))
+          })
           .map(str::to_string),
+        verify_target,
       }
     };
     let title = format!("写入 {host} 的 DNS 记录");
@@ -3556,7 +3734,7 @@ async fn dns_items(
           }
         ),
       );
-      b.step(vec![id], title, upsert(Some(existing), extra));
+      b.step(vec![id], title, upsert(Some(existing), extra, true));
       continue;
     }
     prefer_dns_record(&mut ours, &canonical);
@@ -3579,9 +3757,12 @@ async fn dns_items(
             format!("新建 {} 记录", spec.record_type)
           },
         );
-        b.step(vec![id], title, upsert(None, vec![]));
+        b.step(vec![id], title, upsert(None, vec![], true));
       }
-      [only] if !handover && only.canonical == canonical => {}
+      [only]
+        if !handover
+          && !gateway_changed
+          && only.canonical == canonical => {}
       [first, rest @ ..] => {
         let id = b.item(
           address,
@@ -3599,7 +3780,15 @@ async fn dns_items(
           },
         );
         let extra = rest.iter().map(|r| remote_ref(r)).collect();
-        b.step(vec![id], title, upsert(Some(first), extra));
+        let verify_target =
+          dns_endpoint_changed(&first.canonical, &canonical)
+            || handover
+            || gateway_changed;
+        b.step(
+          vec![id],
+          title,
+          upsert(Some(first), extra, verify_target),
+        );
       }
     }
   }
@@ -4265,6 +4454,18 @@ mod tests {
   }
 
   #[test]
+  fn ttl_only_keeps_default_dns_verification_off() {
+    let existing =
+      wharf_providers::dns_canonical("A", "203.0.113.1", 60, false);
+    let ttl =
+      wharf_providers::dns_canonical("A", "203.0.113.1", 120, false);
+    let ip =
+      wharf_providers::dns_canonical("A", "203.0.113.2", 120, false);
+    assert!(!dns_endpoint_changed(&existing, &ttl));
+    assert!(dns_endpoint_changed(&existing, &ip));
+  }
+
+  #[test]
   fn server_ip_change_affects_dns_and_respects_ttl() {
     let mut current = world();
     current
@@ -4330,6 +4531,255 @@ mod tests {
       assert_eq!(ours[0].remote_id, "R1");
       assert!(handover && deleting.is_empty() && foreign.is_empty());
     }
+  }
+
+  #[test]
+  fn old_gateway_site_is_removed_after_dns() {
+    let host = "a.example.com";
+    let mut current = world();
+    current
+      .gateways
+      .insert("edge".into(), gateway_fixture("caddy", "s1"));
+    current
+      .gateways
+      .insert("edge2".into(), gateway_fixture("caddy", "s1"));
+    current.gateways.get_mut("edge2").unwrap().spec.http_port =
+      Some(8080);
+    current.routes.insert(host.into(), route_fixture());
+    let mut desired = current.clone();
+    desired.routes.get_mut(host).unwrap().spec.gateway =
+      Some("edge2".into());
+    let snap = Snapshot {
+      world: current.clone(),
+      ..Default::default()
+    };
+    let net = snap.net(&current);
+    let before =
+      snapshot::gateway_render(&current, &net, "edge").unwrap();
+    let running: ProjectState = serde_json::from_value(json!({
+      "project": "wharf-gw-edge",
+      "hash": before.compose_hash,
+      "config_hash": before.config_hash,
+      "containers": [{"service":"caddy","name":"edge-1","state":"running"}]
+    })).unwrap();
+    let status = StatusMap::from([(
+      "s1".into(),
+      Some(BTreeMap::from([(running.project.clone(), running)])),
+    )]);
+    let mut b = Builder::default();
+    gateway_items(
+      &mut b,
+      &snap,
+      (&current, &net),
+      (&desired, &net),
+      &status,
+      &crate::hub::Hub::default(),
+    )
+    .unwrap();
+    assert!(b.steps.iter().any(|s| matches!(&s.step, Step::GatewaySync { gateway, after_dns: true, .. } if gateway == "edge")));
+    assert!(b.steps.iter().any(|s| matches!(&s.step, Step::GatewaySync { gateway, after_dns: false, .. } if gateway == "edge2")));
+  }
+
+  #[tokio::test]
+  async fn replanning_after_failed_dns_keeps_old_gateway_and_frpc_after_dns()
+   {
+    let state = crate::rules::tests::test_state();
+    let host = "a.example.com";
+    let mut current = world();
+    current.servers.insert(
+      "s2".into(),
+      ServerRow {
+        settings: serde_json::from_value(
+          json!({"public_ip":"203.0.113.2"}),
+        )
+        .unwrap(),
+        version: 1,
+      },
+    );
+    current
+      .gateways
+      .insert("edge".into(), gateway_fixture("caddy", "s2"));
+    current
+      .gateways
+      .insert("edge2".into(), gateway_fixture("caddy", "s1"));
+    let mut moved = route_fixture();
+    moved.spec.link = wharf_api_types::spec::LinkMode::Tunnel;
+    current.routes.insert(host.into(), moved.clone());
+    let mut app2 = current.services["app"].clone();
+    app2.instance_id = "svc_fixture2".into();
+    app2.host_ports.insert("http".into(), 21001);
+    current.services.insert("app2".into(), app2);
+    let mut retained = moved.clone();
+    retained.spec.hostname = "b.example.com".into();
+    retained.spec.service = "app2".into();
+    retained.id = "rt_retained".into();
+    current
+      .routes
+      .insert(retained.spec.hostname.clone(), retained);
+    let mut desired = current.clone();
+    let route = &mut desired.routes.get_mut(host).unwrap().spec;
+    route.gateway = Some("edge2".into());
+    route.link = wharf_api_types::spec::LinkMode::Auto;
+
+    let state_for =
+      |project: &str, hash: String, config_hash: Option<String>| {
+        ProjectState {
+          project: project.into(),
+          hash: Some(hash),
+          config_hash,
+          acme_dns_url_hash: None,
+          frpc_admin_port: None,
+          containers: vec![container("running")],
+        }
+      };
+    let mut snap = Snapshot {
+      world: current.clone(),
+      ..Default::default()
+    };
+    let net = snap.net(&current);
+    let old_gateway =
+      snapshot::gateway_render(&current, &net, "edge").unwrap();
+    let link = crate::link::projects(&current, &net)
+      .unwrap()
+      .into_iter()
+      .find(|p| p.project == "wharf-link-s2")
+      .unwrap();
+    let status = StatusMap::from([
+      (
+        "s1".into(),
+        Some(BTreeMap::from([(
+          link.project.clone(),
+          state_for(&link.project, link.hash, None),
+        )])),
+      ),
+      (
+        "s2".into(),
+        Some(BTreeMap::from([(
+          "wharf-gw-edge".into(),
+          state_for(
+            "wharf-gw-edge",
+            old_gateway.compose_hash,
+            Some(old_gateway.config_hash),
+          ),
+        )])),
+      ),
+    ]);
+    let plan = |snap: &Snapshot| {
+      let mut b = Builder::default();
+      link_items(
+        &mut b,
+        snap,
+        &desired,
+        (&net, &net),
+        &status,
+        &state.hub,
+      )
+      .unwrap();
+      gateway_items(
+        &mut b,
+        snap,
+        (&snap.world, &net),
+        (&desired, &net),
+        &status,
+        &state.hub,
+      )
+      .unwrap();
+      b
+    };
+    let assert_cleanup = |b: &Builder| {
+      assert_eq!(b.steps.iter().find(|s| matches!(&s.step, Step::GatewaySync { gateway, .. } if gateway == "edge")).unwrap().step.order(), 7);
+      assert_eq!(b.steps.iter().find(|s| matches!(&s.step, Step::LinkUp { project, .. } if project == "wharf-link-s2")).unwrap().step.order(), 7);
+    };
+    let mut first = plan(&snap);
+    assert_cleanup(&first);
+    first.step(vec![], "写 DNS", serde_json::from_value(json!({
+      "kind": "dns_upsert", "hostname": host, "account": "cf1",
+      "spec": {"record_type":"A","content":"203.0.113.1","proxied":false},
+      "existing": null, "extra": [], "expected_gateway": "edge2", "verify_target": true
+    })).unwrap());
+
+    let writes = desired.writes_from(&current);
+    let planned = finish_plan(
+      &snap,
+      &desired,
+      first,
+      writes,
+      BTreeSet::new(),
+      None,
+    );
+    let base_writes = current.writes_from(&World::default());
+    snap.pending = state
+      .db
+      .call(move |c| {
+        for w in base_writes.iter().chain(&planned.writes) {
+          db::apply_write(c, w)?;
+        }
+        crate::pending::stage(
+          c,
+          "run-first",
+          &planned.plan,
+          &planned.writes,
+          &planned.steps,
+        )?;
+        crate::pending::load(c)
+      })
+      .await
+      .unwrap();
+    // DNS 未写入，模拟配置已提交而撤旧步骤被跳过。
+    snap.world = desired.clone();
+    assert!(snap.pending.dns_cutovers.contains(host));
+    assert_cleanup(&plan(&snap));
+  }
+
+  #[test]
+  fn changed_layer4_upstream_is_synced_before_dns() {
+    let host = "a.example.com";
+    let mut current = world();
+    let mut old = gateway_fixture("caddy", "s1");
+    old.spec.layer4 = serde_json::from_value(json!([
+      {"listen": 9000, "service": "tcp", "port": "http"}
+    ]))
+    .unwrap();
+    current.gateways.insert("edge".into(), old);
+    let mut new = gateway_fixture("caddy", "s1");
+    new.spec.http_port = Some(8080);
+    current.gateways.insert("edge2".into(), new);
+    let mut layer4_service = current.services["app"].clone();
+    layer4_service.host_ports.insert("http".into(), 21001);
+    current.services.insert("tcp".into(), layer4_service);
+    current.routes.insert(host.into(), route_fixture());
+    let mut desired = current.clone();
+    desired.routes.get_mut(host).unwrap().spec.gateway =
+      Some("edge2".into());
+    desired
+      .services
+      .get_mut("tcp")
+      .unwrap()
+      .host_ports
+      .insert("http".into(), 21002);
+    let snap = Snapshot {
+      world: current.clone(),
+      ..Default::default()
+    };
+    let net = snap.net(&current);
+    let running = applied_gateway(
+      snapshot::gateway_render(&current, &net, "edge").unwrap(),
+    );
+    let status = StatusMap::from([(
+      "s1".into(),
+      Some(BTreeMap::from([(running.project.clone(), running)])),
+    )]);
+    let mut b = Builder::default();
+    gateway_items(
+      &mut b,
+      &snap,
+      (&current, &net),
+      (&desired, &net),
+      &status,
+      &crate::hub::Hub::default(),
+    )
+    .unwrap();
+    assert_eq!(b.steps.iter().find(|s| matches!(&s.step, Step::GatewaySync { gateway, .. } if gateway == "edge")).unwrap().step.order(), 4);
   }
 
   #[test]
@@ -4445,6 +4895,7 @@ mod tests {
       hash: Some(rendered.compose_hash),
       config_hash: Some(rendered.config_hash),
       acme_dns_url_hash: None,
+      frpc_admin_port: None,
       containers: vec![container("running")],
     }
   }
@@ -4584,7 +5035,8 @@ mod tests {
       ErrorCode::PlanStale
     );
     let plans =
-      plan_dns_for_hosts(&snap, &BTreeSet::from([host.into()])).await;
+      plan_dns_for_hosts(&snap, &BTreeSet::from([host.into()]), None)
+        .await;
     assert_eq!(
       plans[0].1.as_ref().unwrap_err().code,
       ErrorCode::PlanStale
@@ -4817,10 +5269,212 @@ mod tests {
       down.step.order()
         > Step::GatewaySync {
           gateway: "edge".into(),
+          after_dns: false,
           expect: None
         }
         .order()
     );
+  }
+
+  #[tokio::test]
+  async fn existing_frpc_migrates_only_with_an_actual_change() {
+    let mut current = world();
+    current.servers.insert(
+      "s2".into(),
+      ServerRow {
+        settings: Default::default(),
+        version: 1,
+      },
+    );
+    current
+      .gateways
+      .insert("edge".into(), gateway_fixture("caddy", "s2"));
+    let mut route = route_fixture();
+    route.spec.link = wharf_api_types::spec::LinkMode::Tunnel;
+    current.routes.insert("a.example.com".into(), route.clone());
+    let net = Net {
+      public_ip: BTreeMap::from([(
+        "s2".into(),
+        "203.0.113.2".into(),
+      )]),
+      ..Default::default()
+    };
+    let project = "wharf-link-s2";
+    let running = |hot| {
+      let rendered = crate::link::projects_for_servers(
+        &current,
+        &net,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        |_| hot,
+      )
+      .unwrap()
+      .into_iter()
+      .find(|p| p.project == project)
+      .unwrap();
+      StatusMap::from([(
+        "s1".into(),
+        Some(BTreeMap::from([(
+          project.into(),
+          ProjectState {
+            project: project.into(),
+            hash: Some(rendered.hash),
+            frpc_admin_port: rendered
+              .reload
+              .as_ref()
+              .map(|r| r.admin_port),
+            config_hash: rendered.reload.map(|r| r.config_hash),
+            acme_dns_url_hash: None,
+            containers: vec![container("running")],
+          },
+        )])),
+      )])
+    };
+    let hub = crate::hub::Hub::default();
+    hub.mock_agent("s1", false, |_| panic!("计划不可下发操作"));
+    hub.enable_mock_failover_features("s1");
+    let snap = Snapshot {
+      world: current.clone(),
+      ..Default::default()
+    };
+    let mut b = Builder::default();
+    link_items(
+      &mut b,
+      &snap,
+      &current,
+      (&net, &net),
+      &running(false),
+      &hub,
+    )
+    .unwrap();
+    assert!(b.steps.is_empty());
+
+    let mut desired = current.clone();
+    let mut service = desired.services["app"].clone();
+    service.host_ports.insert("http".into(), 21001);
+    desired.services.insert("app2".into(), service);
+    route.spec.hostname = "b.example.com".into();
+    route.spec.service = "app2".into();
+    desired.routes.insert(route.spec.hostname.clone(), route);
+    for already_migrated in [false, true] {
+      let mut b = Builder::default();
+      link_items(
+        &mut b,
+        &snap,
+        &desired,
+        (&net, &net),
+        &running(already_migrated),
+        &hub,
+      )
+      .unwrap();
+      assert!(matches!(
+        b.steps[0].step,
+        Step::LinkUp {
+          hot_reload: true,
+          ..
+        }
+      ));
+      assert_eq!(
+        b.items[0].impacts.contains(&Impact::Restart),
+        !already_migrated
+      );
+      assert!(
+        !b.items[0]
+          .after
+          .as_ref()
+          .unwrap()
+          .to_string()
+          .contains("webServer")
+      );
+    }
+    let legacy = crate::hub::Hub::default();
+    legacy.mock_agent("s1", false, |_| panic!("计划不可下发操作"));
+    let mut b = Builder::default();
+    link_items(
+      &mut b,
+      &snap,
+      &desired,
+      (&net, &net),
+      &running(false),
+      &legacy,
+    )
+    .unwrap();
+    assert!(matches!(
+      b.steps[0].step,
+      Step::LinkUp {
+        hot_reload: false,
+        ..
+      }
+    ));
+    assert!(
+      b.warnings
+        .iter()
+        .any(|w| w.contains("wharf server upgrade s1"))
+    );
+  }
+
+  #[test]
+  fn frpc_admin_ports_stay_stable_when_other_gateways_collide() {
+    let mut current = world();
+    for server in ["s2", "s3", "s1135"] {
+      current.servers.insert(
+        server.into(),
+        ServerRow {
+          settings: Default::default(),
+          version: 1,
+        },
+      );
+    }
+    current
+      .gateways
+      .insert("edge".into(), gateway_fixture("caddy", "s2"));
+    let mut route = route_fixture();
+    route.spec.link = wharf_api_types::spec::LinkMode::Tunnel;
+    current
+      .routes
+      .insert(route.spec.hostname.clone(), route.clone());
+    let net = Net {
+      public_ip: BTreeMap::from([
+        ("s2".into(), "203.0.113.2".into()),
+        ("s1135".into(), "203.0.113.3".into()),
+      ]),
+      ..Default::default()
+    };
+    let render = |world: &World, ports: &BTreeMap<_, _>| {
+      crate::link::projects_for_servers(
+        world,
+        &net,
+        &BTreeMap::new(),
+        ports,
+        |_| true,
+      )
+      .unwrap()
+    };
+    let first = render(&current, &BTreeMap::new())
+      .into_iter()
+      .find(|p| p.project == "wharf-link-s2")
+      .unwrap();
+    let port = first.reload.as_ref().unwrap().admin_port;
+    let ports = BTreeMap::from([(("s1", "wharf-link-s2"), port)]);
+    let mut separate = gateway_fixture("caddy", "s3");
+    separate.spec.http_port = Some(port);
+    current.gateways.insert("separate".into(), separate);
+    current
+      .gateways
+      .insert("collision".into(), gateway_fixture("caddy", "s1135"));
+    route.spec.hostname = "b.example.com".into();
+    route.spec.gateway = Some("collision".into());
+    current.routes.insert(route.spec.hostname.clone(), route);
+    let after = render(&current, &ports);
+    let existing =
+      after.iter().find(|p| p.project == "wharf-link-s2").unwrap();
+    let new = after
+      .iter()
+      .find(|p| p.project == "wharf-link-s1135")
+      .unwrap();
+    assert_eq!(existing.hash, first.hash);
+    assert_eq!(existing.reload.as_ref().unwrap().admin_port, port);
+    assert_ne!(new.reload.as_ref().unwrap().admin_port, port);
   }
 
   #[test]
@@ -4831,6 +5485,7 @@ mod tests {
       hash: Some("existing".into()),
       config_hash: None,
       acme_dns_url_hash: None,
+      frpc_admin_port: None,
       containers: vec![],
     };
     let status = StatusMap::from([
@@ -4854,8 +5509,9 @@ mod tests {
       &mut b,
       &Snapshot::default(),
       &world,
-      &Net::default(),
+      (&Net::default(), &Net::default()),
       &status,
+      &crate::hub::Hub::default(),
     )
     .unwrap();
     assert_eq!(
@@ -4946,6 +5602,7 @@ mod tests {
         existing: None,
         extra: vec![],
         expected_gateway: Some("edge".into()),
+        verify_target: false,
       },
     );
     let p = finish_plan(
@@ -4973,6 +5630,7 @@ mod tests {
       wharf_api_types::plan::ApplyRequest {
         plan_id: p.plan.plan_id,
         confirm: vec![],
+        verify_before_dns: None,
         skip_snapshot: false,
       },
       &wharf_api_types::view::Perm::ALL.into_iter().collect(),
@@ -5121,6 +5779,7 @@ mod tests {
       hash: hash.map(str::to_string),
       config_hash: None,
       acme_dns_url_hash: None,
+      frpc_admin_port: None,
       containers: vec![],
     };
     let status = StatusMap::from([(
@@ -5310,6 +5969,7 @@ mod tests {
           hash: Some("partial".into()),
           config_hash: None,
           acme_dns_url_hash: None,
+          frpc_admin_port: None,
           containers: vec![],
         },
       )])),
@@ -5580,6 +6240,7 @@ mod tests {
           hash,
           config_hash: None,
           acme_dns_url_hash: None,
+          frpc_admin_port: None,
           containers,
         },
       )])),
@@ -5786,6 +6447,7 @@ mod tests {
         hash: Some(hash("idle")),
         config_hash: None,
         acme_dns_url_hash: None,
+        frpc_admin_port: None,
         containers: vec![ContainerInfo {
           service: "idle".into(),
           ..container("running")
@@ -5880,6 +6542,7 @@ mod tests {
           hash: Some(before.compose_hash),
           config_hash: Some(before.config_hash),
           acme_dns_url_hash: None,
+          frpc_admin_port: None,
           containers: vec![container("running")],
         },
       )])),
@@ -5969,6 +6632,7 @@ mod tests {
         hash: Some(idle_hash),
         config_hash: None,
         acme_dns_url_hash: None,
+        frpc_admin_port: None,
         containers: vec![ContainerInfo {
           service: "idle".into(),
           ..container("running")

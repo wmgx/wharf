@@ -373,6 +373,8 @@ pub enum Command {
     /// 紧急跳过数据库热快照，需要 Admin。
     #[arg(long)]
     skip_snapshot: bool,
+    #[command(flatten)]
+    dns_verify: DnsVerifyFlags,
     /// 确认高风险项，可以多次使用。
     #[arg(long)]
     confirm: Vec<String>,
@@ -578,6 +580,25 @@ pub struct BuildOpts {
   pub print_dockerfile: bool,
 }
 
+#[derive(Args, Clone, Default)]
+pub struct DnsVerifyFlags {
+  /// 写入路由 DNS 前始终预验目标网关。
+  #[arg(long, conflicts_with = "no_verify_before_dns")]
+  verify_before_dns: bool,
+  /// 写入路由 DNS 前跳过目标网关预验。
+  #[arg(long)]
+  no_verify_before_dns: bool,
+}
+
+impl DnsVerifyFlags {
+  fn mode(&self) -> Option<bool> {
+    self
+      .verify_before_dns
+      .then_some(true)
+      .or(self.no_verify_before_dns.then_some(false))
+  }
+}
+
 // 修改类命令共用：生成计划后是否直接执行。
 // 用普通注释：文档注释会被 clap 当成没写说明的子命令（例如 `rm`）的说明。
 #[derive(Args, Clone, Default)]
@@ -588,6 +609,8 @@ pub struct ApplyFlags {
   /// 和 `--apply` 一起用：确认高风险项。
   #[arg(long)]
   pub confirm: Vec<String>,
+  #[command(flatten)]
+  pub dns_verify: DnsVerifyFlags,
   /// 计划备注，随计划保存，执行时记进操作记录。
   #[arg(long)]
   pub note: Option<String>,
@@ -1414,6 +1437,22 @@ pub enum GatewayCmd {
 #[derive(Subcommand)]
 pub enum RouteCmd {
   List,
+  /// 查看主备状态，或手动切备、切回、解除锁定。
+  Failover {
+    hostname: String,
+    /// backup 切备并锁定，primary 切回并恢复自动，auto 仅解除锁定。
+    #[arg(long, value_parser = ["backup", "primary", "auto"])]
+    to: Option<String>,
+    /// 跳过改 DNS 前的预验。
+    #[arg(long, requires = "to")]
+    no_verify: bool,
+    /// 即使目标入口不健康或未同步也执行。
+    #[arg(long, requires = "to")]
+    force: bool,
+    /// 记录到审计和通知的切换原因。
+    #[arg(long, requires = "to")]
+    reason: Option<String>,
+  },
   /// 按域名看访问日志。例：wharf route logs blog.example.com --status 5xx --since 1h。
   Logs(access_logs::RouteArgs),
   /// 向三个公共 DNS 检查 A 和 AAAA 是否生效。
@@ -1445,10 +1484,16 @@ pub enum RouteCmd {
     /// 网关，不填用默认网关。
     #[arg(long)]
     gateway: Option<String>,
-    /// 备用入口：另一台机器上的网关。主网关那台连续离线 5 分钟，DNS 自动切到它，恢复后切回。
+    /// 备用入口：另一台机器上的网关。主入口连续不可达且备用可达时切换 DNS。
     /// 传空字符串清除。
     #[arg(long)]
     backup_gateway: Option<String>,
+    /// 自动切备或切回所需连续分钟数，默认 5。
+    #[arg(long, conflicts_with = "no_failover_minutes", value_parser = clap::value_parser!(u32).range(1..=60))]
+    failover_minutes: Option<u32>,
+    /// 恢复默认切换门槛。
+    #[arg(long)]
+    no_failover_minutes: bool,
     /// DNS TTL（秒），1 表示自动。
     #[arg(
       long,

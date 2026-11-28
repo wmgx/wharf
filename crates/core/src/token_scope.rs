@@ -138,7 +138,7 @@ pub fn check_service_scope(
       ]
       | ["", "api", "logs", "services"]
       | ["", "api", "metrics"]
-      | ["", "api", "routes", _, "cert" | "dns-check"]
+      | ["", "api", "routes", _, "cert" | "dns-check" | "failover"]
       | ["", "api", "tasks", _]
       | ["", "api", "tasks", _, "runs"]
       | ["", "api", "runs", _, "logs"]
@@ -160,6 +160,7 @@ pub fn check_service_scope(
         *method == Method::PUT
       }
       ["", "api", "routes", _, "cert", "retry"]
+      | ["", "api", "routes", _, "failover"]
       | ["", "api", "routes", _, "sso", "test"]
       | ["", "api", "plan" | "apply"]
       | ["", "api", "runs", _, "cancel" | "retry"]
@@ -523,6 +524,7 @@ mod tests {
       "/api/services/blog/files/download",
       "/api/routes/blog.example.com/cert",
       "/api/routes/blog.example.com/dns-check",
+      "/api/routes/blog.example.com/failover",
       "/api/metrics",
       "/api/alerts",
       "/api/export",
@@ -547,6 +549,7 @@ mod tests {
       (Method::POST, "/api/alerts/custom"),
       (Method::DELETE, "/api/alerts/custom/slow"),
       (Method::POST, "/api/routes/blog.example.com/cert/retry"),
+      (Method::POST, "/api/routes/blog.example.com/failover"),
       (Method::PUT, "/api/routes/blog.example.com/note"),
     ] {
       assert!(check_service_scope(&scope, &method, path), "{path}");

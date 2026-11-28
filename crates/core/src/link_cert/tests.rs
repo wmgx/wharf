@@ -456,6 +456,7 @@ fn running_project(
     hash: Some(hash),
     config_hash,
     acme_dns_url_hash: None,
+    frpc_admin_port: None,
     containers: vec![serde_json::from_value::<ContainerInfo>(json!({
       "service": project, "name": "container", "image": "fixture:1", "state": "running",
     })).unwrap()],
@@ -524,6 +525,7 @@ async fn old_agent_defaults_and_capability_gate_only_tunnel_gateways()
   assert_eq!(error.suggest, ["wharf server upgrade s1"]);
   let step = Step::GatewaySync {
     gateway: "gw-a".into(),
+    after_dns: false,
     expect: None,
   };
   let cancel = tokio_util::sync::CancellationToken::new();

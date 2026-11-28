@@ -260,6 +260,7 @@ fn empty_project(name: &str) -> ProjectState {
     hash: None,
     config_hash: None,
     acme_dns_url_hash: None,
+    frpc_admin_port: None,
     containers: Vec::new(),
   }
 }
@@ -554,6 +555,7 @@ pub(crate) fn route_view_with_upstream_error(
   Some((
     RouteView {
       failover_pending: crate::failover::pending_view(hostname),
+      failover_pinned: crate::failover::pinned(hostname),
       core: crate::gate::is_core_host(world, net, hostname),
       note: snap.route_notes.get(hostname).cloned(),
       sso_login: row

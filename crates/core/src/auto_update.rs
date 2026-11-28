@@ -256,6 +256,7 @@ async fn execute(
       ApplyRequest {
         plan_id: planned.plan.plan_id.clone(),
         confirm: vec![],
+        verify_before_dns: None,
         skip_snapshot: false,
       },
       &BTreeSet::from([Perm::Read, Perm::Plan, Perm::Apply]),

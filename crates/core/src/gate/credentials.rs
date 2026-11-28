@@ -231,6 +231,18 @@ mod tests {
   }
 
   #[test]
+  fn probe_token_is_scoped_to_one_host_and_thirty_seconds() {
+    let key = SigningKey::from_bytes(&[0; 32]);
+    let token = probe_token(&key, HOST, 1000);
+    assert_eq!(
+      verify(&key, &token, HOST, 1029).as_deref(),
+      Some("_wharf_probe")
+    );
+    assert!(verify(&key, &token, HOST, 1030).is_none());
+    assert!(verify(&key, &token, "b.example.test", 1000).is_none());
+  }
+
+  #[test]
   fn refresh_signature_and_expiry() {
     let hash = "a".repeat(64);
     let key = [7; 32];

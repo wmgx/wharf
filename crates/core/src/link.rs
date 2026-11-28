@@ -36,6 +36,8 @@ pub const GATEWAY_SECRET_PREFIXES: &[&str] =
   &[TOKEN_PREFIX, CERT_PREFIX, KEY_PREFIX];
 /// frps 只监听 127.0.0.1，Caddy 把 `FRP_PATH` 转发过来。
 pub const FRPS_PORT: u16 = 7000;
+pub const FRPC_ADMIN_PORTS: std::ops::RangeInclusive<u16> =
+  47400..=47499;
 /// frp 的 websocket 路径，frps 认这个路径。
 pub const FRP_PATH: &str = "/~!frp";
 /// frpc 握手时带的名字（SNI 和 Host）。按 IP 连时不带 SNI，Caddy 选不出证书。
@@ -325,8 +327,70 @@ pub fn tunnels(
 }
 
 fn pick_port(key: &str, taken: &mut BTreeSet<u16>) -> Option<u16> {
-  let base = *TUNNEL_PORTS.start() as u32;
-  let n = TUNNEL_PORTS.len() as u32;
+  pick_from(TUNNEL_PORTS, key, taken)
+}
+
+// 与当前配置比较，兼容升级前已经占用这段端口的服务和网关。
+pub(crate) fn validate_new_admin_port_bindings(
+  current: &World,
+  desired: &World,
+) -> Result<(), ApiError> {
+  let old = configured_admin_port_bindings(current);
+  if let Some((server, port)) =
+    configured_admin_port_bindings(desired)
+      .difference(&old)
+      .next()
+  {
+    return Err(ApiError::invalid(format!(
+      "服务器 {server} 上的 {port} 是 frpc 管理保留端口"
+    )));
+  }
+  Ok(())
+}
+
+fn configured_admin_port_bindings(
+  world: &World,
+) -> BTreeSet<(&str, u16)> {
+  let mut bindings = BTreeSet::new();
+  for service in world.services.values() {
+    for port in service
+      .host_ports
+      .values()
+      .copied()
+      .filter(|p| FRPC_ADMIN_PORTS.contains(p))
+    {
+      bindings.insert((service.spec.server.as_str(), port));
+    }
+  }
+  for gateway in world.gateways.values() {
+    let spec = &gateway.spec;
+    let ports = spec
+      .layer4
+      .iter()
+      .map(|f| f.listen)
+      .chain(spec.http_port)
+      .chain(spec.https_port);
+    for port in ports.filter(|p| FRPC_ADMIN_PORTS.contains(p)) {
+      bindings.insert((spec.server.as_str(), port));
+    }
+  }
+  bindings
+}
+
+fn pick_admin_port(
+  key: &str,
+  taken: &mut BTreeSet<u16>,
+) -> Option<u16> {
+  pick_from(FRPC_ADMIN_PORTS, key, taken)
+}
+
+fn pick_from(
+  range: std::ops::RangeInclusive<u16>,
+  key: &str,
+  taken: &mut BTreeSet<u16>,
+) -> Option<u16> {
+  let base = u32::from(*range.start());
+  let n = range.len() as u32;
   // FNV-1a：跨版本稳定，同一个服务端口每次算出来一样。
   let hash = key.bytes().fold(0x811c9dc5u32, |h, b| {
     (h ^ b as u32).wrapping_mul(0x01000193)
@@ -364,6 +428,7 @@ pub struct LinkProject {
   pub project: String,
   pub compose: String,
   pub hash: String,
+  pub reload: Option<render::FrpcRender>,
   /// 给人看的说明。
   pub summary: String,
 }
@@ -379,6 +444,18 @@ pub fn projects_with_secrets(
   world: &World,
   net: &Net,
   secrets: &BTreeMap<String, String>,
+) -> Result<Vec<LinkProject>, ApiError> {
+  projects_for_servers(world, net, secrets, &BTreeMap::new(), |_| {
+    false
+  })
+}
+
+pub fn projects_for_servers(
+  world: &World,
+  net: &Net,
+  secrets: &BTreeMap<String, String>,
+  existing_ports: &BTreeMap<(&str, &str), u16>,
+  hot_reload: impl Fn(&LinkProject) -> bool,
 ) -> Result<Vec<LinkProject>, ApiError> {
   let token = |gateway: &str| {
     secrets
@@ -400,11 +477,11 @@ pub fn projects_with_secrets(
     })
   };
   let tunnels = tunnels(world, net)?;
-  let mut clients: BTreeMap<(String, String), Vec<&Tunnel>> =
+  let mut clients: BTreeMap<(&str, &str), Vec<&Tunnel>> =
     BTreeMap::new();
   for t in &tunnels {
     clients
-      .entry((t.service_server.clone(), t.gateway_server.clone()))
+      .entry((&t.service_server, &t.gateway_server))
       .or_default()
       .push(t);
   }
@@ -421,15 +498,29 @@ pub fn projects_with_secrets(
       project: SERVER_PROJECT.to_string(),
       hash: render::hash(&compose),
       compose,
+      reload: None,
       summary: "隧道服务端 frps，经 Caddy 网关的 443 接入"
         .to_string(),
     });
   }
+  // frpc 使用宿主网络。保留同机已有端口，再给新连接分配。
+  let mut taken: BTreeMap<&str, BTreeSet<u16>> = BTreeMap::new();
+  for (server, port) in configured_admin_port_bindings(world) {
+    taken.entry(server).or_default().insert(port);
+  }
+  let mut reserved = BTreeMap::new();
+  for (&(server, project), &port) in existing_ports {
+    if FRPC_ADMIN_PORTS.contains(&port)
+      && taken.entry(server).or_default().insert(port)
+    {
+      reserved.insert((server, project), port);
+    }
+  }
   for ((service_server, gateway_server), list) in clients {
-    let addr = frps_addr(net, &gateway_server)?;
-    let (gateway, spec) = carrier(&gateway_server)?;
+    let addr = frps_addr(net, gateway_server)?;
+    let (gateway, spec) = carrier(gateway_server)?;
     let port = spec.https_port.unwrap_or(443);
-    let project = client_project(&gateway_server);
+    let project = client_project(gateway_server);
     let proxies: Vec<(String, u16, u16)> = list
       .iter()
       .map(|t| {
@@ -452,9 +543,10 @@ pub fn projects_with_secrets(
       .iter()
       .map(|t| format!("{}:{}", t.service, t.port))
       .collect();
-    out.push(LinkProject {
+    let mut rendered = LinkProject {
       gateway: gateway.to_string(),
-      server: service_server.clone(),
+      server: service_server.to_string(),
+      reload: None,
       hash: render::hash(&compose),
       compose,
       project,
@@ -462,7 +554,31 @@ pub fn projects_with_secrets(
         "{service_server} → {gateway_server} 反向隧道：{}",
         names.join("、")
       ),
-    });
+    };
+    if hot_reload(&rendered) {
+      let admin_port = reserved
+        .get(&(service_server, rendered.project.as_str()))
+        .copied()
+        .or_else(|| {
+          pick_admin_port(
+            gateway_server,
+            taken.entry(service_server).or_default(),
+          )
+        })
+        .ok_or_else(|| ApiError::invalid("frpc 管理端口已用完"))?;
+      let reload = render::frpc_render(
+        &rendered.project,
+        (&addr, port),
+        admin_port,
+        &proxies,
+        token(gateway),
+        ca,
+      );
+      rendered.hash = render::hash(&reload.compose);
+      rendered.compose.clone_from(&reload.compose);
+      rendered.reload = Some(reload);
+    }
+    out.push(rendered);
   }
   Ok(out)
 }
@@ -786,6 +902,39 @@ mod tests {
   }
 
   use super::*;
+
+  #[test]
+  fn existing_admin_port_bindings_are_grandfathered() {
+    let mut world = World::default();
+    world.gateways.insert(
+      "edge".into(),
+      crate::world::GatewayRow {
+        spec: serde_json::from_str(
+          r#"{"kind":"caddy","server":"s1","http_port":47400}"#,
+        )
+        .unwrap(),
+        version: 1,
+      },
+    );
+    assert!(validate_new_admin_port_bindings(&world, &world).is_ok());
+    assert!(
+      validate_new_admin_port_bindings(&World::default(), &world)
+        .is_err()
+    );
+  }
+
+  #[test]
+  fn frpc_admin_ports_do_not_collide() {
+    let mut taken = BTreeSet::new();
+    let first = pick_admin_port("s1", &mut taken).unwrap();
+    let second = pick_admin_port("s2", &mut taken).unwrap();
+    assert_ne!(first, second);
+    assert!(taken.iter().all(|port| FRPC_ADMIN_PORTS.contains(port)));
+    assert_eq!(
+      pick_admin_port("s1", &mut BTreeSet::new()),
+      Some(first)
+    );
+  }
 
   /// edge1 上一个 caddy 网关，home1 上一个服务，一条路由。
   fn world() -> World {

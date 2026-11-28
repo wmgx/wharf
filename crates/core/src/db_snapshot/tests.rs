@@ -143,6 +143,7 @@ async fn apply_snapshot_failure_is_atomic_and_admin_skip_is_audited()
     plan_id: id.into(),
     confirm: vec!["service/app".into()],
     skip_snapshot,
+    verify_before_dns: None,
   };
   let path = s.data_dir.join("snapshots");
   fs::write(&path, b"blocked").unwrap();

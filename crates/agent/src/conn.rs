@@ -269,6 +269,8 @@ async fn handshake(
     safe_delete: true,
     shared_volumes: true,
     safe_gateway: true,
+    gateway_probe: true,
+    frpc_reload: true,
     safe_adopt: true,
     safe_migrate: true,
     safe_backup: true,

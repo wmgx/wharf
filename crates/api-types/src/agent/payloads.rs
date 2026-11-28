@@ -620,6 +620,9 @@ pub struct ProjectState {
   /// 只上报 DNS-01 回调地址的指纹，不上报 Caddyfile。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub acme_dns_url_hash: Option<String>,
+  /// 管理端口只用于保持同机已有 frpc 的分配。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub frpc_admin_port: Option<u16>,
   pub containers: Vec<ContainerInfo>,
 }
 
@@ -1079,6 +1082,50 @@ pub fn normalize_image_digests(images: &mut [ImageInfo]) {
       .as_deref()
       .and_then(|d| normalize_image_digest(&image.image, d));
   }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayProbeJob {
+  pub hostname: String,
+  pub path: String,
+  pub tls: bool,
+  #[serde(default)]
+  pub allow_pending_cert: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub gate_cookie: Option<OneTimeSecret>,
+  pub http_port: u16,
+  pub https_port: u16,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub upstream: Option<String>,
+  #[serde(default)]
+  pub upstream_only: bool,
+  #[serde(default = "default_gateway_probe_timeout")]
+  pub timeout_secs: u16,
+}
+
+fn default_gateway_probe_timeout() -> u16 {
+  5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayProbeResult {
+  pub ok: bool,
+  pub stage: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub status: Option<u16>,
+  #[serde(default)]
+  pub cert_pending: bool,
+  pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkApply {
+  pub up: ProjectUp,
+  pub config: String,
+  pub config_hash: String,
+  #[serde(default)]
+  pub extra_files: BTreeMap<String, String>,
+  pub image: String,
 }
 
 #[test]

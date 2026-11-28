@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{AgentOp, HttpCheckResult, ProbeTarget},
+  gateway_http::inspect,
   spec::{
     GatewayKind, GatewaySpec, GatewayTls, MonitorSpec, Region,
     RouteSpec, SsoMode,
@@ -988,23 +989,12 @@ impl RouteChecks<'_> {
       .get::<reqwest::tls::TlsInfo>()
       .and_then(|t| t.peer_certificate())
       .and_then(crate::cert::not_after);
-    let code = response.status();
-    let login_redirect = code.as_u16() == 302
-      && response
-        .headers()
-        .get(reqwest::header::LOCATION)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.contains("/gate/login"));
-    let body = if (options.gate && code.as_u16() == 401)
-      || options.monitor.is_some_and(|m| m.keyword.is_some())
-    {
-      http_prefix(response).await
-    } else {
-      Vec::new()
-    };
-    let gate_rejected = login_redirect
-      || (code.as_u16() == 401
-        && String::from_utf8_lossy(&body).trim() == "需要登录");
+    let (code, gate_rejected, body) = inspect(
+      response,
+      options.gate,
+      options.monitor.is_some_and(|m| m.keyword.is_some()),
+    )
+    .await;
     let (status, mut detail, bad_gateway) =
       http_status(code, &options, gate_rejected, &body);
     if options.internal {
@@ -1159,19 +1149,6 @@ fn http_status(
     detail.push_str("（已穿过门禁）");
   }
   (status, detail, bad_gateway)
-}
-
-async fn http_prefix(mut response: reqwest::Response) -> Vec<u8> {
-  let mut bytes = Vec::new();
-  while bytes.len() < 64 * 1024 {
-    match response.chunk().await {
-      Ok(Some(chunk)) => bytes.extend_from_slice(
-        &chunk[..chunk.len().min(64 * 1024 - bytes.len())],
-      ),
-      _ => break,
-    }
-  }
-  bytes
 }
 
 fn append_cert(

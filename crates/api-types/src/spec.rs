@@ -698,10 +698,12 @@ pub struct RouteSpec {
   /// 入口网关。不填则用默认网关；边缘应用的域名不经过网关，不填。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub gateway: Option<String>,
-  /// 备用入口：这个网关也配好这个域名；主网关所在机器连续离线 5 分钟，
-  /// DNS 自动切到它，主网关恢复后切回。caddy 备用入口在切过去后才申请证书。
+  /// 备用入口：主入口持续不可达且备用可达时切换 DNS，主入口持续恢复后切回。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub backup_gateway: Option<String>,
+  /// 自动切备和切回所需的连续异常或恢复分钟数，默认 5 分钟。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub failover_minutes: Option<u32>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub dns_ttl: Option<u32>,
   /// 门禁。
