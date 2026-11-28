@@ -54,6 +54,12 @@ export type Action = "create" | "update" | "delete" | "adopt";
 
 export type Actual = "running" | "restarting" | "stopped" | "partial" | "missing" | "offline" | "unknown";
 
+export interface AdoptMountSpec {
+  source: string | null;
+  target: string | null;
+  volume_name: string | null;
+}
+
 /**
  * 导入前容器是怎么跑的。和服务同名的 compose 项目不需要接管，Wharf 直接沿用。
  */
@@ -582,10 +588,15 @@ export type Change = {
    */
   adopt?: AdoptSpec | null;
   commit?: string | null;
+  migrate?: MigrateOptions | null;
   name: string;
   op: "upsert_service";
   pins?: Record<string, string> | null;
   spec: ServiceSpec;
+} | {
+  mounts?: AdoptMountSpec[];
+  op: "adopt_data";
+  service: string;
 } | {
   name: string;
   op: "remove_service";
@@ -1771,6 +1782,10 @@ export interface Metrics {
    * compose project 名到它的容器合计。
    */
   projects?: Record<string, ProjectMetrics>;
+}
+
+export interface MigrateOptions {
+  bwlimit?: string | null;
 }
 
 export interface MigrationView {
