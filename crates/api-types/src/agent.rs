@@ -735,14 +735,18 @@ pub struct FileGrepMatch {
 pub struct FileGrepResult {
   pub matches: Vec<FileGrepMatch>,
   pub scanned_files: u32,
-  #[serde(default)]
+  #[serde(default, skip_serializing_if = "is_zero_u32")]
   pub skipped_binary: u32,
-  #[serde(default)]
+  #[serde(default, skip_serializing_if = "is_zero_u32")]
   pub skipped_large: u32,
-  #[serde(default)]
+  #[serde(default, skip_serializing_if = "is_zero_u32")]
   pub skipped_links: u32,
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub truncated: bool,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+  *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

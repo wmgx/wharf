@@ -437,8 +437,11 @@ mod tests {
         errors: false,
         max_line: 500,
         limit: 5,
+        filters: None,
+        until: None,
       },
-    );
+    )
+    .unwrap();
     assert_eq!(found.matched, 0);
   }
 }
