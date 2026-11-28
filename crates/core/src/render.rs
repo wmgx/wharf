@@ -249,6 +249,9 @@ pub fn volume_host_dir(
   service: &str,
   v: &wharf_api_types::spec::VolumeSpec,
 ) -> Result<String, ApiError> {
+  if let Some(path) = &v.host_path {
+    return Ok(path.clone());
+  }
   match &v.from_service {
     Some(raw) => {
       let (owner, volume) = crate::shared_volumes::parse_ref(raw)?;
@@ -263,6 +266,7 @@ pub fn service_dirs(name: &str, spec: &ServiceSpec) -> Vec<String> {
   spec
     .volumes
     .iter()
+    .filter(|v| v.host_path.is_none())
     .filter_map(|v| volume_host_dir(name, v).ok())
     .filter(|dir| seen.insert(dir.clone()))
     .collect()
@@ -1191,6 +1195,7 @@ fn service_compose_base(
       service.volumes = spec
         .volumes
         .iter()
+        .filter(|v| v.host_path.is_none())
         .map(|v| {
           let host = volume_host_dir(name, v)?;
           let ro = if v.read_only { ":ro" } else { "" };
@@ -1202,9 +1207,41 @@ fn service_compose_base(
         name: name.to_string(),
         services: BTreeMap::from([(name.to_string(), service)]),
       };
-      Ok((to_yaml(&file), image_mounts(name, files)))
+      let text = to_yaml(&file);
+      Ok((
+        render_external_binds(name, spec, text)?,
+        image_mounts(name, files),
+      ))
     }
   }
+}
+
+fn render_external_binds(
+  name: &str,
+  spec: &ServiceSpec,
+  text: String,
+) -> Result<String, ApiError> {
+  let binds: Vec<_> = spec.volumes.iter().filter_map(|v| {
+    v.host_path.as_ref().map(|path| serde_json::json!({
+      "type": "bind", "source": path, "target": v.target, "read_only": v.read_only,
+      "bind": {"create_host_path": false, "propagation": "rprivate"}
+    }))
+  }).collect();
+  if binds.is_empty() {
+    return Ok(text);
+  }
+  let mut doc = parse_compose(&text)?;
+  let volumes = &mut doc["services"][name]["volumes"];
+  let mut all = volumes.as_sequence().cloned().unwrap_or_default();
+  for bind in binds {
+    all.push(
+      serde_yaml_ng::to_value(bind)
+        .map_err(|_| ApiError::internal("无法渲染外部挂载"))?,
+    );
+  }
+  *volumes = Value::Sequence(all);
+  serde_yaml_ng::to_string(&doc)
+    .map_err(|_| ApiError::internal("无法渲染外部挂载"))
 }
 
 pub(crate) fn extra_host_error(host: &str) -> ApiError {
@@ -2640,6 +2677,7 @@ mod tests {
       ]),
       volumes: vec![VolumeSpec {
         from_service: None,
+        host_path: None,
         read_only: false,
         name: "data".into(),
         target: "/data".into(),

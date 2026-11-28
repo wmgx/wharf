@@ -3735,6 +3735,7 @@ export interface VolumeSpec {
    * 同机拥有者的托管卷，格式为 <服务名>:<卷名>。
    */
   from_service?: string | null;
+  host_path?: string | null;
   /**
    * 本地卷名。共享卷省略时取拥有者的卷名。
    */

@@ -83,6 +83,7 @@ struct Conn {
   safe_delete: bool,
   named_networks_v1: bool,
   compose_env_v1: bool,
+  safe_host_bind_v1: bool,
   data_cleanup: bool,
   exec_v2: bool,
   files_v2: bool,
@@ -218,7 +219,15 @@ fn safe_adopt_required(server: &str) -> ApiError {
   .suggest("wharf upgrade")
 }
 
-pub fn old_compose_env_agent(server: &str) -> ApiError {
+pub fn old_host_bind_agent(server: &str) -> ApiError {
+  ApiError::new(
+    ErrorCode::Conflict,
+    format!("服务器 {server} 的 agent 不支持安全外部挂载"),
+  )
+  .with_hint("运行 wharf upgrade，升级后重新生成计划")
+}
+
+fn old_compose_env_agent(server: &str) -> ApiError {
   ApiError::new(
     ErrorCode::Conflict,
     format!("服务器 {server} 的 agent 不支持 Compose 项目变量"),
@@ -816,6 +825,21 @@ impl Hub {
     }
   }
 
+  pub(crate) fn host_bind_conn_id(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.safe_host_bind_v1 {
+      return Err(old_host_bind_agent(server));
+    }
+    Ok(conn.conn_id)
+  }
+
   pub(crate) fn compose_env_conn_id(
     &self,
     server: &str,
@@ -1122,6 +1146,11 @@ impl Hub {
       {
         progress(crate::build::old_agent_warning(server));
       }
+    }
+    if matches!(&op, AgentOp::ProjectUp(up) if !up.host_binds.is_empty())
+      && (conn.upgrade_only || !conn.safe_host_bind_v1)
+    {
+      return Err(old_host_bind_agent(server));
     }
     if (matches!(&op, AgentOp::ComposeEnvCheck { .. })
       || matches!(&op, AgentOp::ProjectUp(up) if up.project_env.is_some()))
@@ -1483,6 +1512,7 @@ async fn handle_socket(
     safe_delete,
     named_networks_v1,
     compose_env_v1,
+    safe_host_bind_v1,
     data_cleanup,
     exec_v2,
     files_v2,
@@ -1668,6 +1698,7 @@ async fn handle_socket(
     safe_delete,
     named_networks_v1,
     compose_env_v1,
+    safe_host_bind_v1,
     data_cleanup,
     exec_v2,
     files_v2,

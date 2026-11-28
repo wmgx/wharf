@@ -1577,6 +1577,7 @@ mod tests {
     w.services.get_mut("app").unwrap().spec.volumes.push(
       wharf_api_types::spec::VolumeSpec {
         from_service: None,
+        host_path: None,
         read_only: false,
         name: "data".into(),
         target: "/run/fixture/../wharf-secrets//PG_PASS".into(),

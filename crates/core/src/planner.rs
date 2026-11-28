@@ -610,6 +610,32 @@ pub(crate) async fn make_plan_inner(
       svc.host_ports.clear();
     }
   }
+  for (name, row) in &desired.services {
+    let has_external = |spec: &wharf_api_types::spec::ServiceSpec| {
+      spec.volumes.iter().any(|v| v.host_path.is_some())
+    };
+    let old = current.services.get(name);
+    if old.is_some_and(|old| {
+      old.spec.server != row.spec.server
+        && (has_external(&old.spec) || has_external(&row.spec))
+    }) {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!(
+            "服务 {name} 含外部卷，迁移前需单独准备目标路径并重配挂载"
+          ),
+        )
+        .with_hint("解除外部挂载后迁移，再挂载目标机准备好的目录"),
+      );
+    }
+    if old.is_none_or(|old| old.spec != row.spec)
+      && (has_external(&row.spec)
+        || old.is_some_and(|old| has_external(&old.spec)))
+    {
+      state.hub.host_bind_conn_id(&row.spec.server)?;
+    }
+  }
   let mut heartbeat_net = snap.net(&desired);
   if let Some(public) = snap
     .heartbeat_url
@@ -1182,6 +1208,12 @@ pub(crate) async fn make_plan_inner(
     &desired,
   );
   for step in &b.steps {
+    if let Step::ServiceUp { service, .. } = &step.step
+      && let Some(row) = desired.services.get(service)
+      && row.spec.volumes.iter().any(|v| v.host_path.is_some())
+    {
+      state.hub.host_bind_conn_id(&row.spec.server)?;
+    }
     if let Step::ServiceUp { service, .. } = &step.step
       && let Some(row) = desired.services.get(service)
       && (row.spec.compose_env

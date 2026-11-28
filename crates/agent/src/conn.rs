@@ -270,6 +270,7 @@ async fn handshake(
     safe_delete: true,
     named_networks_v1: true,
     compose_env_v1: true,
+    safe_host_bind_v1: true,
     data_cleanup: true,
     exec_v2: true,
     shared_volumes: true,

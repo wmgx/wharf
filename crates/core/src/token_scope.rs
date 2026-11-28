@@ -385,6 +385,16 @@ pub fn require_plan_request(
       Change::UpsertService { spec, .. } => Some(spec),
       _ => None,
     }));
+  if shared_refs
+    .clone()
+    .any(|spec| spec.volumes.iter().any(|v| v.host_path.is_some()))
+  {
+    return Err(forbidden(
+      &auth.name,
+      services,
+      "；外部挂载需要全局令牌",
+    ));
+  }
   blocked.extend(
     shared_refs
       .flat_map(crate::shared_volumes::owners)

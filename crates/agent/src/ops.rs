@@ -25,6 +25,7 @@ use crate::{
 
 mod gateway;
 mod gateway_probe;
+mod host_binds;
 mod link;
 mod named_networks;
 mod validation;
@@ -959,11 +960,23 @@ impl Ops {
       self
         .up_with_crash_logs(
           &up.project,
-          up.no_start,
+          up.no_start || !up.host_binds.is_empty(),
           previous_grace,
           ctx,
         )
         .await?;
+      if !up.host_binds.is_empty() {
+        host_binds::verify_mounted(
+          &self.docker,
+          &up.project,
+          &up.host_binds,
+          ctx,
+        )
+        .await?;
+        if !up.no_start {
+          self.docker.stop_start(&up.project, true, ctx).await?;
+        }
+      }
       let state = if up.no_start {
         let mut state =
           self.docker.one_status(&up.project, ctx).await?;
@@ -1074,6 +1087,8 @@ impl Ops {
     up: &ProjectUp,
     ctx: &Ctx,
   ) -> Result<ProjectUpResult, ApiError> {
+    host_binds::validate_sources(&self.docker, &up.host_binds, ctx)
+      .await?;
     named_networks::ensure(&self.docker, &up.networks, true, ctx)
       .await?;
     if up.trial.is_some()

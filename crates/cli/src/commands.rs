@@ -3484,7 +3484,9 @@ async fn service(
           || !ops.add_network.is_empty()
           || !ops.rm_network.is_empty()
           || ops.compose_env
-          || ops.no_compose_env)
+          || ops.no_compose_env
+          || !ops.add_host_volume.is_empty()
+          || !ops.rm_host_volume.is_empty())
       {
         apply.check_read_only()?;
         wharf_api_types::filter_note(
@@ -3723,6 +3725,11 @@ async fn service(
         spec.volumes.retain(|x| x.name != v.name);
         spec.volumes.push(v);
       }
+      set_host_volumes(
+        &mut spec,
+        &ops.add_host_volume,
+        &ops.rm_host_volume,
+      )?;
       deploy_plan(c, name, spec, apply, j, warnings, detected).await
     }
     ServiceCmd::AdoptData {
@@ -6792,6 +6799,41 @@ fn infer_ignore_image(source: &Source) -> CliResult<String> {
   }
 }
 
+fn set_host_volumes(
+  spec: &mut ServiceSpec,
+  add: &[String],
+  remove: &[String],
+) -> CliResult<()> {
+  for target in remove {
+    spec.volumes.retain(|v| {
+      v.host_path.is_none()
+        || v.target != target.trim_end_matches('/')
+    });
+  }
+  for entry in add {
+    let (source, target) =
+      entry.split_once(':').ok_or_else(|| {
+        ApiError::invalid("外部挂载写成 HOST_PATH:/TARGET[:ro|:rw]")
+      })?;
+    let (target, read_only) = match target.strip_suffix(":ro") {
+      Some(target) => (target, true),
+      None => (target.strip_suffix(":rw").unwrap_or(target), false),
+    };
+    wharf_api_types::adopt_data::validate_host_bind(source, target)?;
+    spec
+      .volumes
+      .retain(|v| v.host_path.is_none() || v.target != target);
+    spec.volumes.push(VolumeSpec {
+      host_path: Some(source.into()),
+      target: target.into(),
+      name: String::new(),
+      from_service: None,
+      read_only,
+    });
+  }
+  Ok(())
+}
+
 fn parse_volume_arg(raw: &str) -> Result<VolumeSpec, ApiError> {
   let invalid = || {
     ApiError::invalid(format!("--volume {raw} 格式不对"))
@@ -6829,6 +6871,7 @@ fn parse_volume_arg(raw: &str) -> Result<VolumeSpec, ApiError> {
     target: format!("/{target}"),
     from_service,
     read_only,
+    host_path: None,
   })
 }
 

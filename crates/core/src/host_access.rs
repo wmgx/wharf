@@ -320,6 +320,14 @@ fn service_reasons(
     .map_or_else(Vec::new, |content| {
       compose_host_reasons(name, content)
     });
+  reasons.extend(
+    row
+      .spec
+      .volumes
+      .iter()
+      .filter_map(|v| v.host_path.as_ref())
+      .map(|p| format!("挂载了宿主机路径 {p}")),
+  );
   if adopting {
     reasons.push("接管宿主机上的未纳管容器".into());
   }

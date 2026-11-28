@@ -36,6 +36,7 @@ fn old_hello_has_no_host_shell_capability() {
     safe_delete,
     named_networks_v1,
     compose_env_v1,
+    safe_host_bind_v1,
     data_cleanup,
     exec_v2,
     shared_volumes,
@@ -68,6 +69,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!safe_delete);
   assert!(!named_networks_v1);
   assert!(!compose_env_v1);
+  assert!(!safe_host_bind_v1);
   assert!(!data_cleanup);
   assert!(!exec_v2);
   assert!(!shared_volumes);
@@ -126,6 +128,7 @@ fn old_core_ignores_new_hello_capability() {
     safe_delete: true,
     named_networks_v1: true,
     compose_env_v1: true,
+    safe_host_bind_v1: true,
     data_cleanup: false,
     exec_v2: true,
     shared_volumes: true,
@@ -377,6 +380,7 @@ impl Hub {
         safe_delete: false,
         named_networks_v1: false,
         compose_env_v1: false,
+        safe_host_bind_v1: false,
         data_cleanup: false,
         exec_v2: false,
         shared_volumes: false,
@@ -532,6 +536,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     safe_delete: false,
     named_networks_v1: false,
     compose_env_v1: false,
+    safe_host_bind_v1: false,
     data_cleanup: false,
     exec_v2: false,
     shared_volumes: false,
@@ -613,6 +618,7 @@ fn probe_connection(
     safe_delete: false,
     named_networks_v1: false,
     compose_env_v1: false,
+    safe_host_bind_v1: false,
     data_cleanup: false,
     exec_v2: false,
     shared_volumes: false,

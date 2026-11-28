@@ -47,7 +47,9 @@ pub fn mounts(name: &str, spec: &ServiceSpec) -> Vec<DataMount> {
           from_service: v.from_service.clone(),
           read_only: v.read_only,
           resolved: None,
-          kind: if v.from_service.is_some() {
+          kind: if v.host_path.is_some() {
+            DataKind::ExternalDir
+          } else if v.from_service.is_some() {
             DataKind::Shared
           } else {
             DataKind::Managed

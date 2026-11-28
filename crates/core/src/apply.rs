@@ -380,6 +380,14 @@ pub(crate) async fn start_with_actor(
         })
         .transpose()?;
       if let Some(spec) = next.as_ref().or(previous)
+        && (spec.volumes.iter().any(|v| v.host_path.is_some())
+          || previous.is_some_and(|old| {
+            old.volumes.iter().any(|v| v.host_path.is_some())
+          }))
+      {
+        state.hub.host_bind_conn_id(&spec.server)?;
+      }
+      if let Some(spec) = next.as_ref().or(previous)
         && (spec.compose_env
           || previous.is_some_and(|old| old.compose_env))
       {
@@ -1997,6 +2005,7 @@ async fn run_step_with_dns(
               init: None,
               networks: Default::default(),
               project_env: None,
+              host_binds: Vec::new(),
             },
             caddyfile: r.config,
             caddyfile_hash: r.config_hash,
@@ -2113,6 +2122,7 @@ async fn run_step_with_dns(
         init: None,
         networks: Default::default(),
         project_env: None,
+        host_binds: Vec::new(),
       };
       let op = match p.reload {
         Some(r) => {
@@ -2168,6 +2178,7 @@ async fn run_step_with_dns(
             init: None,
             networks: Default::default(),
             project_env: None,
+            host_binds: Vec::new(),
           }),
           GATEWAY_TIMEOUT,
           Some(progress),
@@ -2876,6 +2887,13 @@ async fn service_up(
     )
   })?;
   let server = &row.spec.server;
+  let bind_conn = row
+    .spec
+    .volumes
+    .iter()
+    .any(|v| v.host_path.is_some())
+    .then(|| state.hub.host_bind_conn_id(server))
+    .transpose()?;
   let env_conn = row
     .spec
     .compose_env
@@ -3048,6 +3066,13 @@ async fn service_up(
     trial,
     init,
     networks: row.spec.networks.clone(),
+    host_binds: row
+      .spec
+      .volumes
+      .iter()
+      .filter(|v| v.host_path.is_some())
+      .cloned()
+      .collect(),
     project_env: crate::compose_env::inputs(
       world,
       &net,
@@ -3060,8 +3085,8 @@ async fn service_up(
   let deploy_conn = required
     .map(|what| state.hub.deploy_v2_conn_id(server, what))
     .transpose()?;
-  let conn = network_conn.or(deploy_conn).or(env_conn);
-  if [network_conn, deploy_conn, env_conn]
+  let conn = network_conn.or(deploy_conn).or(env_conn).or(bind_conn);
+  if [network_conn, deploy_conn, env_conn, bind_conn]
     .into_iter()
     .flatten()
     .any(|id| Some(id) != conn)

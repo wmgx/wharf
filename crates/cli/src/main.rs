@@ -582,6 +582,10 @@ pub struct DeployOps {
   pub compose_env: bool,
   #[arg(long)]
   pub no_compose_env: bool,
+  #[arg(long, value_name = "HOST_PATH:/TARGET[:ro|:rw]")]
+  pub add_host_volume: Vec<String>,
+  #[arg(long, value_name = "TARGET")]
+  pub rm_host_volume: Vec<String>,
 }
 
 /// 看日志的公共参数。

@@ -510,6 +510,7 @@ pub(crate) async fn deploy_server(
         init: None,
         networks: Default::default(),
         project_env: None,
+        host_binds: Vec::new(),
       }),
       SERVER_TIMEOUT,
       Some(progress.clone()),

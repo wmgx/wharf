@@ -204,6 +204,7 @@ pub async fn sync(
         init: None,
         networks: Default::default(),
         project_env: None,
+        host_binds: Vec::new(),
       }),
       CONNECTOR_TIMEOUT,
       Some(progress.clone()),

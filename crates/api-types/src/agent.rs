@@ -198,6 +198,8 @@ pub enum AgentMsg {
     named_networks_v1: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     compose_env_v1: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    safe_host_bind_v1: bool,
   },
   KeyReady {
     core_public_key: String,

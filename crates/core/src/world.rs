@@ -2145,6 +2145,16 @@ fn validate_service(
     }
   }
   if let Some(backup) = &spec.backup {
+    if spec.volumes.iter().any(|v| v.host_path.is_some())
+      && !spec
+        .volumes
+        .iter()
+        .any(|v| v.host_path.is_none() && v.from_service.is_none())
+    {
+      return Err(ApiError::invalid(format!(
+        "服务 {name} 没有自有托管卷，外部卷和共享卷需要单独备份"
+      )));
+    }
     wharf_api_types::backup::validate_backup_excludes(
       &backup.exclude,
     )?;
@@ -2243,6 +2253,33 @@ fn validate_service(
   crate::shared_volumes::validate_service(name, spec)?;
   let mut volume_names = BTreeSet::new();
   for volume in &spec.volumes {
+    if let Some(host_path) = &volume.host_path {
+      if !volume.name.is_empty() || volume.from_service.is_some() {
+        return Err(ApiError::invalid(
+          "外部挂载不能同时声明卷名或共享卷",
+        ));
+      }
+      wharf_api_types::adopt_data::validate_host_bind(
+        host_path,
+        &volume.target,
+      )?;
+      let target = std::path::Path::new(&volume.target);
+      if spec.volumes.iter().any(|v| {
+        !std::ptr::eq(v, volume)
+          && (target.starts_with(&v.target)
+            || std::path::Path::new(&v.target).starts_with(target))
+      }) || spec
+        .files
+        .iter()
+        .any(|f| std::path::Path::new(&f.path).starts_with(target))
+      {
+        return Err(ApiError::invalid(format!(
+          "外部挂载 {} 与其他挂载或文件重叠",
+          volume.target
+        )));
+      }
+      continue;
+    }
     validate_name("数据卷", &volume.name)?;
     if !volume_names.insert(&volume.name) {
       return Err(ApiError::invalid(format!(
@@ -3228,6 +3265,7 @@ services:
     .unwrap();
     spec.volumes.push(wharf_api_types::spec::VolumeSpec {
       from_service: None,
+      host_path: None,
       read_only: false,
       name: "data".into(),
       target: "/data".into(),

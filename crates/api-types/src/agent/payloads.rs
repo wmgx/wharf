@@ -629,6 +629,8 @@ pub struct ProjectUp {
   pub networks: BTreeMap<String, crate::spec::NetworkAttachment>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub project_env: Option<BTreeMap<String, String>>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub host_binds: Vec<crate::spec::VolumeSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
