@@ -2065,14 +2065,14 @@ export interface NetProbeTls {
   verify_error: string | null;
 }
 
-/**
- * 机器的接入方式（design 2.10）。不指定时按检测到的地址推断：有 Tailscale 地址是 `tailscale`，
- * 有别的内网地址是 `lan`，都没有是 `public`（只能经公网和反向隧道）。
- */
 export interface NetworkAttachment {
   internal?: boolean;
 }
 
+/**
+ * 机器的接入方式（design 2.10）。不指定时按检测到的地址推断：有 Tailscale 地址是 `tailscale`，
+ * 有别的内网地址是 `lan`，都没有是 `public`（只能经公网和反向隧道）。
+ */
 export type NetworkMode = "tailscale" | "lan" | "public";
 
 export interface NetworkServer {
@@ -3131,10 +3131,10 @@ export interface ServiceSpec {
   networks?: Record<string, NetworkAttachment>;
   port_checks?: Record<string, PortCheckSpec>;
   ports?: PortSpec[];
+  self_refs?: boolean;
   /**
    * 运行在哪台服务器上。
    */
-  self_refs?: boolean;
   server: string;
   source: Source;
   /**
