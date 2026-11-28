@@ -12,8 +12,8 @@ use crate::{
   exec::{Cmd, Ctx},
 };
 
-pub(super) const ROOT: &Path = Path::new("/srv/.wharf-copy");
-const SRV: &Path = Path::new("/srv");
+pub(super) const ROOT: &str = "/srv/.wharf-copy";
+const SRV: &str = "/srv";
 
 #[derive(Serialize, Deserialize)]
 struct Receipt {
@@ -74,6 +74,12 @@ pub(crate) async fn run(
   ctx: &Ctx,
 ) -> Result<Value, ApiError> {
   let (target, id) = match &job {
+    ServiceCopy::CheckBackup { service } => {
+      return check_backup(service);
+    }
+    ServiceCopy::Archive { service, receipt } => {
+      return archive(docker, service, receipt, ctx).await;
+    }
     ServiceCopy::Check { target } => (target, None),
     ServiceCopy::Stage { target, receipt }
     | ServiceCopy::Local {
@@ -85,12 +91,14 @@ pub(crate) async fn run(
   };
   validate_name("服务", target)?;
   check_project(docker, target, ctx).await?;
-  let srv = DirFd::open_dir(SRV).map_err(|e| dir_error(SRV, e))?;
-  let name = component(target.as_ref()).map_err(io_err(SRV))?;
+  let srv = DirFd::open_dir(Path::new(SRV))
+    .map_err(|e| dir_error(Path::new(SRV), e))?;
+  let name =
+    component(target.as_ref()).map_err(io_err(Path::new(SRV)))?;
   let target_stat = match srv.lstat(&name) {
     Ok(stat) => Some(stat),
     Err(e) if missing(&e) => None,
-    Err(e) => return Err(io_err(SRV)(e)),
+    Err(e) => return Err(io_err(Path::new(SRV))(e)),
   };
   let Some(id) = id else {
     return if target_stat.is_none() {
@@ -100,11 +108,13 @@ pub(crate) async fn run(
     };
   };
   validate_name("复制暂存", id)?;
-  let stage = component(id.as_ref()).map_err(io_err(ROOT))?;
+  let stage =
+    component(id.as_ref()).map_err(io_err(Path::new(ROOT)))?;
   let stage_root = srv
     .ensure_subdir(c".wharf-copy", 0o700)
-    .map_err(io_err(ROOT))?;
-  let stat = stage_root.stat_self().map_err(io_err(ROOT))?;
+    .map_err(io_err(Path::new(ROOT)))?;
+  let stat =
+    stage_root.stat_self().map_err(io_err(Path::new(ROOT)))?;
   if stat.st_uid != 0 || stat.st_mode & 0o077 != 0 {
     return Err(ApiError::invalid("复制暂存目录权限不安全"));
   }
@@ -120,8 +130,11 @@ pub(crate) async fn run(
     return Err(occupied());
   }
   if receipt.is_none() && matches!(job, ServiceCopy::Stage { .. }) {
-    stage_root.mkdir(&stage, 0o700).map_err(io_err(ROOT))?;
-    let stat = stage_root.lstat(&stage).map_err(io_err(ROOT))?;
+    stage_root
+      .mkdir(&stage, 0o700)
+      .map_err(io_err(Path::new(ROOT)))?;
+    let stat =
+      stage_root.lstat(&stage).map_err(io_err(Path::new(ROOT)))?;
     let new = Receipt {
       target: target.clone(),
       device: stat.st_dev,
@@ -132,7 +145,8 @@ pub(crate) async fn run(
     write_private(&meta_path, &raw)?;
     receipt = Some(new);
   }
-  let stat = stage_root.lstat(&stage).map_err(io_err(ROOT))?;
+  let stat =
+    stage_root.lstat(&stage).map_err(io_err(Path::new(ROOT)))?;
   if !receipt
     .as_ref()
     .is_some_and(|r| r.target == *target && r.matches(&stat))
@@ -142,14 +156,15 @@ pub(crate) async fn run(
       "复制暂存目录归属无法核实",
     ));
   }
-  let staged =
-    stage_root.open_subdir(&stage).map_err(io_err(ROOT))?;
+  let staged = stage_root
+    .open_subdir(&stage)
+    .map_err(io_err(Path::new(ROOT)))?;
   match &job {
     ServiceCopy::Local { source, .. } => {
       if source == target {
         return Err(ApiError::invalid("源和目标服务不能相同"));
       }
-      let source = DirFd::open_service_root(SRV, source)?;
+      let source = DirFd::open_service_root(Path::new(SRV), source)?;
       crate::dirfd::validate_tree(&source, true)?;
       Cmd::new("rsync")
         .args([
@@ -180,7 +195,7 @@ pub(crate) async fn run(
           if error.kind() == io::ErrorKind::AlreadyExists {
             occupied()
           } else {
-            io_err(SRV)(error)
+            io_err(Path::new(SRV))(error)
           }
         },
       )?;
@@ -196,4 +211,91 @@ fn in_child(fd: &DirFd) -> std::path::PathBuf {
     .join(std::process::id().to_string())
     .join("fd")
     .join(fd.fd_path().file_name().expect("fd"))
+}
+
+fn check_backup(service: &str) -> Result<Value, ApiError> {
+  validate_name("服务", service)?;
+  let root = Path::new(wharf_api_types::agent::BACKUP_ROOT);
+  let ok = json!({"committed": false});
+  let dir = match DirFd::open_dir(root) {
+    Ok(dir) => dir,
+    Err(e) if missing(&e) => return Ok(ok),
+    Err(e) => return Err(dir_error(root, e)),
+  };
+  let key = component(service.as_ref()).map_err(io_err(root))?;
+  let occupied = || {
+    ApiError::new(
+      ErrorCode::Conflict,
+      "无法安全改名：存在备份仓库或归档",
+    )
+    .with_hint("先克隆后手动切换")
+  };
+  match dir.lstat(&key) {
+    Ok(_) => return Err(occupied()),
+    Err(e) if missing(&e) => {}
+    Err(e) => return Err(io_err(root)(e)),
+  }
+  match dir.open_subdir(c".wharf-backup-archive") {
+    Ok(archive) => {
+      if archive.read_names().map_err(io_err(root))?.iter().any(
+        |name| {
+          name
+            .to_string_lossy()
+            .starts_with(&format!("{service}-replaced-"))
+        },
+      ) {
+        return Err(occupied());
+      }
+    }
+    Err(e) if missing(&e) => {}
+    Err(e) => return Err(io_err(root)(e)),
+  }
+  Ok(ok)
+}
+
+async fn archive(
+  docker: &Docker,
+  name: &str,
+  receipt: &str,
+  ctx: &Ctx,
+) -> Result<Value, ApiError> {
+  validate_name("服务", name)?;
+  let stamp = receipt
+    .strip_prefix("rename-")
+    .filter(|stamp| {
+      chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%d-%H%M%S")
+        .is_ok()
+    })
+    .ok_or_else(|| ApiError::invalid("改名归档凭据无效"))?;
+  check_project(docker, name, ctx).await?;
+  let srv = DirFd::open_dir(Path::new(SRV))
+    .map_err(|e| dir_error(Path::new(SRV), e))?;
+  let dir = srv
+    .ensure_subdir(c".wharf-migrate", 0o700)
+    .map_err(io_err(Path::new(SRV)))?;
+  let key =
+    component(name.as_ref()).map_err(io_err(Path::new(SRV)))?;
+  let target = component(std::ffi::OsStr::new(&format!(
+    "{name}-before-{stamp}"
+  )))
+  .map_err(io_err(Path::new(SRV)))?;
+  match srv.open_subdir(&key) {
+    Ok(root) => {
+      crate::dirfd::validate_tree(&root, true)?;
+      if ctx.cancel.is_cancelled() {
+        return Err(ApiError::new(
+          ErrorCode::Cancelled,
+          "改名归档已取消",
+        ));
+      }
+      srv
+        .rename_noreplace(&key, &dir, &target)
+        .map_err(io_err(Path::new(SRV)))?;
+    }
+    Err(e) if missing(&e) => {
+      dir.open_subdir(&target).map_err(io_err(Path::new(SRV)))?;
+    }
+    Err(e) => return Err(io_err(Path::new(SRV))(e)),
+  }
+  Ok(json!({"committed": true}))
 }

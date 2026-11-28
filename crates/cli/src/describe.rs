@@ -244,6 +244,7 @@ fn effect(
     "service import" => return ("plan", &["plan", "host"]),
     "service export-compose" => return ("read", &["read"]),
     "service clone" => return ("plan", &["plan"]),
+    "service rename" => return ("plan", &["plan", "admin"]),
     "import" => return ("plan", &["admin", "plan"]),
     _ => {}
   }
@@ -365,7 +366,7 @@ fn returns(command: &str) -> Option<&'static str> {
     "data push" => "data-push-plan",
     "import" => "bundle-import-preview",
     "service adopt-data" | "service move" | "server set"
-    | "service import" | "service clone" => "plan",
+    | "service import" | "service clone" | "service rename" => "plan",
     "service files" | "service files ls" => "file_entry",
     "service files tail" => "file_tail",
     "service files grep" => "file_grep",

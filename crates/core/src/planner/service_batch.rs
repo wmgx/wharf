@@ -21,6 +21,22 @@ pub(crate) async fn make_service_action_plan(
     ));
   }
   match req.service_action {
+    Some(ServiceAction::Rename { source, target }) => {
+      if !admin || allowed.is_some() {
+        return Err(ApiError::new(
+          ErrorCode::Forbidden,
+          "服务改名需要不限制服务范围的管理员令牌",
+        ));
+      }
+      service_rename::plan(
+        state,
+        snap,
+        source,
+        target,
+        req.note.as_deref(),
+      )
+      .await
+    }
     Some(ServiceAction::Clone {
       source,
       target,

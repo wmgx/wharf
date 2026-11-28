@@ -248,7 +248,7 @@ async fn require_retry_access(
     let mut plan = stored.body.plan;
     let items: BTreeSet<_> =
       steps.iter().flat_map(|s| s.items.iter().copied()).collect();
-    let needs_confirm: BTreeSet<_> = plan
+    let mut needs_confirm: BTreeSet<_> = plan
       .items
       .iter()
       .filter(|item| item.needs_confirm())
@@ -278,6 +278,21 @@ async fn require_retry_access(
       })
       .map(|item| item.address.clone())
       .collect();
+    if plan.service_action.is_some() {
+      needs_confirm.extend(plan.needs_confirm.iter().cloned());
+    }
+    if plan.service_action.as_ref().is_some_and(|action| {
+      action.action
+        == wharf_api_types::plan::ServiceActionKind::Rename
+    }) {
+      auth.require(Perm::Admin).map_err(|e| e.0)?;
+      if auth.services.is_some() {
+        return Err(ApiError::new(
+          ErrorCode::Forbidden,
+          "服务改名需要不限制服务范围的管理员令牌",
+        ));
+      }
+    }
     confirm::require(
       &plan.plan_id,
       &needs_confirm.into_iter().collect::<Vec<_>>(),

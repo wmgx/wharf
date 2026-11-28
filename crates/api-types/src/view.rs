@@ -932,6 +932,8 @@ pub struct DeploymentView {
   pub started: bool,
   pub id: i64,
   pub service: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub original_service: Option<String>,
   pub server: String,
   pub run_id: String,
   /// 渲染后的 compose（密钥未替换）。

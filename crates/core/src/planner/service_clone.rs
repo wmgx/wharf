@@ -22,7 +22,7 @@ pub(crate) struct CloneRequest {
   pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct CloneJob {
   pub source: String,
   pub source_instance: String,
@@ -256,6 +256,9 @@ pub(crate) async fn plan(
     format!("准备 {to} 上的 {target}（停止）"),
     Step::ServiceUp {
       service: target.clone(),
+      instance_id: Some(
+        desired.services[&target].instance_id.clone(),
+      ),
       expect: Some(expect),
     },
   );
@@ -285,7 +288,7 @@ pub(crate) async fn plan(
   Ok(planned)
 }
 
-fn validate_source(
+pub(super) fn validate_source(
   snap: &Snapshot,
   source: &str,
   target_server: &str,
@@ -373,7 +376,7 @@ fn validate_source(
   Ok(mounts.len())
 }
 
-async fn inspect_source(
+pub(super) async fn inspect_source(
   state: &AppState,
   snap: &Snapshot,
   (name, server, conn): (&str, &str, u64),

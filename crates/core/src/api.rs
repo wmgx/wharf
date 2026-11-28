@@ -1861,7 +1861,7 @@ pub(crate) async fn deployments(
       ).optional().map_err(sql_err)?.ok_or_else(|| service_not_found(&name))?;
       let mut stmt = c
         .prepare(
-          "SELECT id, service, server, run_id, compose, images, created_at, spec, hash, commit_sha, started FROM deployments
+          "SELECT id, service, server, run_id, compose, images, created_at, spec, hash, commit_sha, started, original_service FROM deployments
            WHERE service = ?1 AND instance_id = ?2 ORDER BY id DESC LIMIT 50",
         )
         .map_err(sql_err)?;
@@ -1879,6 +1879,7 @@ pub(crate) async fn deployments(
             r.get::<_, String>(8)?,
             r.get::<_, Option<String>>(9)?,
             r.get::<_, bool>(10)?,
+            r.get::<_, Option<String>>(11)?,
           ))
         })
         .map_err(sql_err)?;
@@ -1898,6 +1899,7 @@ pub(crate) async fn deployments(
     hash,
     commit,
     started,
+    original_service,
   ) in rows
   {
     let mut images: Vec<wharf_api_types::agent::ImageInfo> =
@@ -1905,6 +1907,7 @@ pub(crate) async fn deployments(
     wharf_api_types::agent::normalize_image_digests(&mut images);
     out.push(DeploymentView {
       started,
+      original_service,
       id,
       service,
       server,

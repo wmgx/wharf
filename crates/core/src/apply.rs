@@ -257,6 +257,17 @@ pub(crate) async fn start_with_actor(
   let auth = caller.as_ref().map(|(auth, _)| *auth);
   let stored = stored_plan(&state, &req.plan_id).await?;
   let plan = &stored.body.plan;
+  if plan.service_action.as_ref().is_some_and(|action| {
+    action.action == wharf_api_types::plan::ServiceActionKind::Rename
+  }) {
+    crate::auth::require_perm(perms, Perm::Admin)?;
+    if auth.is_some_and(|auth| auth.services.is_some()) {
+      return Err(ApiError::new(
+        ErrorCode::Forbidden,
+        "服务改名需要不限制服务范围的管理员令牌",
+      ));
+    }
+  }
   if let Some(auth) = auth {
     crate::token_scope::require_plan(
       auth,
@@ -1540,6 +1551,12 @@ async fn run_step_with_dns(
   let world = &snap.world;
   let net = snap.net(world);
   match step {
+    Step::RenameService { job } => {
+      crate::planner::service_rename::execute(
+        state, &snap, run_id, job, progress, cancel,
+      )
+      .await?;
+    }
     Step::CloneData { job } => {
       crate::planner::service_clone::execute(
         state, &snap, run_id, job, progress, cancel,

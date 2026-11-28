@@ -1138,6 +1138,11 @@ pub enum ServiceCmd {
   Render {
     name: String,
   },
+  /// 为已停止且依赖可核实的服务生成改名计划。
+  Rename {
+    source: String,
+    target: String,
+  },
   /// 克隆服务，生成保持停止的计划。
   Clone {
     source: String,

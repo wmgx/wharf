@@ -440,6 +440,26 @@ pub fn stage(
       continue;
     }
     match &step.step {
+      Step::RenameService { job } => {
+        if pending.clones.contains(&job.target)
+          || world.services.contains_key(&job.target)
+        {
+          return Err(
+            ApiError::new(
+              wharf_api_types::ErrorCode::Conflict,
+              "改名目标已存在",
+            )
+            .with_hint("换一个名称"),
+          );
+        }
+        put(
+          c,
+          ("clone_data", &job.target),
+          ids,
+          Some(&job.instance),
+          &job.receipt,
+        )?;
+      }
       Step::CloneData { job } => {
         if pending.clones.contains(&job.target)
           || world.services.contains_key(&job.target)

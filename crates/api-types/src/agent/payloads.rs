@@ -199,6 +199,13 @@ pub enum SyncKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum ServiceCopy {
+  CheckBackup {
+    service: String,
+  },
+  Archive {
+    service: String,
+    receipt: String,
+  },
   Check {
     target: String,
   },

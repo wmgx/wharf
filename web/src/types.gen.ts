@@ -970,6 +970,7 @@ export interface DeploymentView {
   hash: string;
   id: number;
   images: ImageInfo[];
+  original_service?: string | null;
   run_id: string;
   server: string;
   service: string;
@@ -2974,7 +2975,7 @@ export interface ServerView {
 /**
  * 按服务的内置告警规则覆盖。
  */
-export type ServiceActionKind = "restart" | "stop" | "update" | "clone";
+export type ServiceActionKind = "restart" | "stop" | "update" | "clone" | "rename";
 
 export interface ServiceAlertOverrideView {
   enabled?: boolean | null;

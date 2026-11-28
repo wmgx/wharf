@@ -42,6 +42,7 @@ pub(super) fn step_services(step: &Step) -> Vec<String> {
     | Step::ServiceDown { service, .. }
     | Step::CleanupData { service, .. }
     | Step::VolumeSync { service, .. } => vec![service.clone()],
+    Step::RenameService { job } => job.services.clone(),
     Step::CloneData { job } => {
       vec![job.source.clone(), job.target.clone()]
     }

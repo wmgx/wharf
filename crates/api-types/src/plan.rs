@@ -49,6 +49,10 @@ pub enum ServiceAction {
   Update {
     tag: String,
   },
+  Rename {
+    source: String,
+    target: String,
+  },
   Clone {
     source: String,
     target: String,
@@ -75,6 +79,7 @@ pub enum ServiceActionKind {
   Stop,
   Update,
   Clone,
+  Rename,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

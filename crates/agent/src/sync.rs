@@ -46,7 +46,7 @@ fn sync_root(
     SyncKind::ServiceData | SyncKind::CloneSource => {
       Ok(Path::new("/srv"))
     }
-    SyncKind::CloneData => Ok(service_copy::ROOT),
+    SyncKind::CloneData => Ok(Path::new(service_copy::ROOT)),
     SyncKind::BackupRepo => Ok(Path::new(BACKUP_ROOT)),
     SyncKind::CoreBackupRepo if service == "wharf-core" => {
       Ok(Path::new(CORE_BACKUP_ROOT))

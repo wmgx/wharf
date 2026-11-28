@@ -2883,6 +2883,15 @@ async fn service(
       )
       .await
     }
+    ServiceCmd::Rename { source, target } => {
+      plan_batch(
+        c,
+        ServiceAction::Rename { source, target },
+        ApplyFlags::default(),
+        j,
+      )
+      .await
+    }
     ServiceCmd::Clone {
       source,
       target,

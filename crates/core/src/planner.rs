@@ -273,6 +273,9 @@ pub enum Step {
   CloneData {
     job: Box<service_clone::CloneJob>,
   },
+  RenameService {
+    job: Box<service_rename::RenameJob>,
+  },
   /// 重启服务的容器。单独发起，不来自计划。
   ServiceRestart {
     service: String,
@@ -321,7 +324,7 @@ impl Step {
           1
         }
       }
-      Self::CloneData { .. } => 1,
+      Self::CloneData { .. } | Self::RenameService { .. } => 1,
       Self::VolumeSync { .. } | Self::AdoptData { .. } => 2,
       Self::ServiceUp { .. }
       | Self::EdgeDeploy { .. }
@@ -1442,6 +1445,7 @@ fn spec_json(world: &World, kind: &str, name: &str) -> Option<Value> {
 mod route_impact;
 mod service_batch;
 pub(crate) mod service_clone;
+pub(crate) mod service_rename;
 pub(crate) use service_batch::make_service_action_plan;
 
 fn config_items(
