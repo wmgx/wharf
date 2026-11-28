@@ -154,7 +154,20 @@ pub fn url(
   Ok(format!("http://127.0.0.1:{port}{path}"))
 }
 
-pub fn validate(m: &MonitorSpec) -> Result<(), ApiError> {
+pub fn validate(
+  m: &MonitorSpec,
+  old: Option<&MonitorSpec>,
+) -> Result<(), ApiError> {
+  if old.is_none_or(|old| old.port != m.port)
+    && m.port.as_deref().is_some_and(|p| p.trim().is_empty())
+  {
+    return Err(ApiError::invalid("监控端口名不能为空"));
+  }
+  if old.is_none_or(|old| old.expect != m.expect)
+    && m.expect.is_some_and(|code| !(100..=599).contains(&code))
+  {
+    return Err(ApiError::invalid("期望状态码应为 100 到 599"));
+  }
   if m.headers.len() > 16 {
     return Err(ApiError::invalid("自定义监控最多设置 16 个请求头"));
   }
@@ -765,4 +778,24 @@ fn readiness_skips_udp_but_rejects_invalid_headers_for_tcp() {
     "Bearer fixture",
   );
   assert!(readiness(&row, &m, &BTreeMap::new()).is_err());
+}
+
+#[test]
+fn service_monitor_rejects_new_blank_config() {
+  let monitor = MonitorSpec {
+    port: Some(" ".into()),
+    ..Default::default()
+  };
+  assert!(validate(&monitor, None).is_err());
+  assert!(validate(&monitor, Some(&monitor)).is_ok());
+  assert!(
+    validate(
+      &MonitorSpec {
+        expect: Some(0),
+        ..Default::default()
+      },
+      None
+    )
+    .is_err()
+  );
 }

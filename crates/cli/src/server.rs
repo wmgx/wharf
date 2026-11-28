@@ -95,6 +95,38 @@ pub async fn host_logs(
   Ok(())
 }
 
+pub async fn show_watch_unit(
+  c: &Client,
+  name: &str,
+  unit: &str,
+  j: bool,
+) -> CliResult<()> {
+  let units: Vec<Value> = c
+    .get(&format!("/api/servers/{}/host-units", seg(name)))
+    .await?;
+  let value = units.into_iter().find(|value| value["unit"] == unit);
+  let hint = "不带参数现为只读查看；开启请加 --on，关闭请加 --off";
+  let status = value
+    .as_ref()
+    .and_then(|value| value["state"].as_str())
+    .unwrap_or("没有在运行");
+  let watched = value
+    .as_ref()
+    .and_then(|value| value["watched"].as_bool())
+    .unwrap_or(false);
+  out(
+    j,
+    &json!({"server": name, "unit": unit, "state": status, "watched": watched, "hint": hint}),
+    |_| {
+      println!(
+        "{unit}  {status}  {}\n{hint}",
+        if watched { "已监视" } else { "未监视" }
+      );
+    },
+  );
+  Ok(())
+}
+
 pub async fn watch_unit(
   c: &Client,
   name: &str,

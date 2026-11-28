@@ -59,6 +59,14 @@ pub async fn gateway(
 ) -> CliResult<()> {
   let base = format!("/api/gateways/{}", seg(&args.name));
   if args.follow {
+    if json {
+      return Err(
+        wharf_api_types::ApiError::invalid(
+          "--json 需要一次性输出，跟随日志请去掉 --json 或 --follow",
+        )
+        .into(),
+      );
+    }
     follow_logs(
       c,
       &format!("{base}/logs/stream?tail={}", args.logs.tail),
@@ -120,10 +128,10 @@ async fn show(
     }
   }
   let result: AccessLogsResult = c.get(&path).await?;
-  for warning in &result.warnings {
-    eprintln!("{warning}");
-  }
   out(json, &result, |result| {
+    for warning in &result.warnings {
+      eprintln!("{warning}");
+    }
     for entry in &result.entries {
       let query_prefix =
         if entry.query.is_empty() { "" } else { "?" };

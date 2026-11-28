@@ -229,7 +229,9 @@ pub async fn run(c: &Client, cmd: WaitCmd, j: bool) -> CliResult<()> {
         Err(_) => (false, last.clone()),
       };
     if now != last {
-      eprintln!("{}s  {now}", start.elapsed().as_secs());
+      if !j {
+        eprintln!("{}s  {now}", start.elapsed().as_secs());
+      }
       last = now.clone();
     }
     if ok {
@@ -243,16 +245,16 @@ pub async fn run(c: &Client, cmd: WaitCmd, j: bool) -> CliResult<()> {
     let remaining =
       deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
+      let elapsed = start.elapsed().as_secs();
+      let error = ApiError::new(ErrorCode::Timeout, format!("等了 {elapsed} 秒还没满足：{now}"))
+        .with_hint("看现状再决定：wharf service show / wharf doctor / wharf status");
       if j {
         print::json(
-          &json!({ "met": false, "state": now, "waited_secs": start.elapsed().as_secs() }),
+          &json!({ "met": false, "state": now, "waited_secs": elapsed, "error": error }),
         );
+        return Err(CliError::Exit(1));
       }
-      return Err(
-        ApiError::invalid(format!("等了 {} 秒还没满足：{now}", start.elapsed().as_secs()))
-          .with_hint("看现状再决定：wharf service show / wharf doctor / wharf status")
-          .into(),
-      );
+      return Err(error.into());
     }
     tokio::time::sleep(poll_delay(remaining)).await;
   }

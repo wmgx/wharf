@@ -1644,13 +1644,17 @@ pub fn check_compose(
 }
 
 pub fn gateway_image(spec: &GatewaySpec) -> String {
-  spec.image.clone().unwrap_or_else(|| {
-    match spec.kind {
-      GatewayKind::Caddy => DEFAULT_CADDY_IMAGE,
-      GatewayKind::CloudflareTunnel => DEFAULT_CLOUDFLARED_IMAGE,
-    }
-    .to_string()
-  })
+  spec
+    .image
+    .clone()
+    .filter(|s| !s.trim().is_empty())
+    .unwrap_or_else(|| {
+      match spec.kind {
+        GatewayKind::Caddy => DEFAULT_CADDY_IMAGE,
+        GatewayKind::CloudflareTunnel => DEFAULT_CLOUDFLARED_IMAGE,
+      }
+      .to_string()
+    })
 }
 
 /// cloudflare_tunnel 网关的连接器：host 网络，上游用 127.0.0.1 和内网地址都能访问。

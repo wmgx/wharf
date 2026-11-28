@@ -2,7 +2,9 @@ use clap::Subcommand;
 use serde_json::{Value, json};
 use wharf_api_types::{
   ApiError,
-  service_checks::{HeartbeatSpec, LogAlertSpec, PortCheckSpec},
+  service_checks::{
+    HeartbeatReportView, HeartbeatSpec, LogAlertSpec, PortCheckSpec,
+  },
   spec::{Change, ServiceSpec},
   view::ServiceView,
 };
@@ -127,6 +129,7 @@ pub async fn log(
       flags
     }
     None => {
+      flags.check_read_only()?;
       let rows: Vec<_> = spec
         .log_alerts
         .iter()
@@ -181,8 +184,21 @@ pub struct PortArgs {
   /// 关闭此端口的检查。
   #[arg(long)]
   off: bool,
+  /// 开启或恢复 TCP 端口检查。
+  #[arg(long, conflicts_with_all = ["off", "udp_dns", "udp_send", "udp_expect"])]
+  on: bool,
   #[command(flatten)]
   apply: ApplyFlags,
+}
+
+impl PortArgs {
+  fn has_edits(&self) -> bool {
+    self.on
+      || self.off
+      || self.udp_dns.is_some()
+      || self.udp_send.is_some()
+      || self.udp_expect.is_some()
+  }
 }
 
 pub async fn port(
@@ -190,12 +206,14 @@ pub async fn port(
   args: PortArgs,
   j: bool,
 ) -> CliResult<()> {
+  let has_edits = args.has_edits();
   let PortArgs {
     name,
     port,
     udp_dns,
     udp_send,
     udp_expect,
+    on,
     off,
     apply,
   } = args;
@@ -205,6 +223,56 @@ pub async fn port(
     spec.ports.iter().find(|p| p.name == port).ok_or_else(|| {
       ApiError::not_found(format!("服务 {name} 没有端口 {port}"))
     })?;
+  if !has_edits {
+    apply.check_read_only()?;
+    let host_port = view.host_ports.get(&port).copied().or(p.host);
+    let check = spec.port_checks.get(&port);
+    let mode = match check {
+      Some(PortCheckSpec::Off) => "off",
+      Some(PortCheckSpec::Dns { .. }) => "udp_dns",
+      Some(PortCheckSpec::Custom { .. }) => "udp_custom",
+      None if p.udp => "off",
+      None => "tcp",
+    };
+    let hint =
+      "不带参数现为只读查看；恢复 TCP 检查请加 --on，关闭请加 --off";
+    let protocol = if p.udp { "udp" } else { "tcp" };
+    let ok = view.port_checks.get(&port);
+    let supported = view.port_checks_supported.unwrap_or(false);
+    out(
+      j,
+      &json!({
+        "service": name, "port": port, "protocol": protocol,
+        "published": host_port.is_some(), "host_port": host_port, "supported": supported,
+        "enabled": mode != "off" && host_port.is_some(), "mode": mode, "spec": check,
+        "ok": ok, "hint": hint,
+      }),
+      |_| {
+        println!(
+          "{name}/{port} {protocol}  发布端口：{}  模式：{mode}",
+          host_port
+            .map_or_else(|| "未发布".into(), |p| p.to_string())
+        );
+        println!(
+          "最近检查：{}",
+          match ok {
+            Some(true) => "正常",
+            Some(false) => "异常",
+            None => "暂无数据",
+          }
+        );
+        if !supported {
+          println!("当前服务器 agent 暂不支持端口探测，请升级 agent");
+        }
+        println!("{hint}");
+      },
+    );
+    return Ok(());
+  }
+  if on && p.udp {
+    return Err(ApiError::invalid("UDP 端口开启检查需要指定探针")
+      .with_hint("用 --udp-dns <域名> 或 --udp-send <hex> --udp-expect <hex>").into());
+  }
   if !view.host_ports.contains_key(&port) && p.host.is_none() {
     return Err(
       ApiError::invalid(format!("端口 {port} 没有发布到宿主机"))
@@ -234,17 +302,129 @@ pub async fn port(
   put(c, name, spec, apply, j).await
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn heartbeat(
-  c: &Client,
-  name: String,
-  every: Option<u32>,
-  grace: Option<u32>,
-  off: bool,
-  container: Option<String>,
-  apply: ApplyFlags,
+pub fn show_auto_update(
+  name: &str,
+  enabled: bool,
   j: bool,
 ) -> CliResult<()> {
+  let hint = "不带参数现为只读查看；开启请加 --on，关闭请加 --off";
+  out(
+    j,
+    &json!({"service": name, "auto_update": enabled, "hint": hint}),
+    |_| {
+      println!(
+        "{name} 自动更新：{}\n{hint}",
+        if enabled { "已开启" } else { "已关闭" }
+      );
+    },
+  );
+  Ok(())
+}
+
+pub fn show_monitor(
+  name: &str,
+  spec: &ServiceSpec,
+  last: Option<&wharf_api_types::view::MonitorView>,
+  j: bool,
+) -> CliResult<()> {
+  let hint = "不带参数现为只读查看；开启请加 --on 或 --path /health，关闭请加 --off";
+  let enabled = spec.monitor.is_some();
+  out(
+    j,
+    &json!({"service": name, "enabled": enabled, "spec": spec.monitor,
+    "start_timeout_secs": spec.start_timeout_secs, "last": last, "hint": hint}),
+    |value| {
+      pretty(value);
+      println!("{hint}");
+    },
+  );
+  Ok(())
+}
+
+#[derive(clap::Args)]
+pub struct HeartbeatArgs {
+  name: String,
+  /// 目标 Compose 容器。
+  #[arg(long)]
+  container: Option<String>,
+  /// 报到间隔，例如 10m。
+  #[arg(long, conflicts_with = "off", value_parser = minutes)]
+  every: Option<u32>,
+  /// 宽限，默认 5 分钟。
+  #[arg(long, conflicts_with = "off", value_parser = minutes)]
+  grace: Option<u32>,
+  #[arg(long)]
+  off: bool,
+  /// 换新口令并重新部署。
+  #[arg(long, conflicts_with = "off")]
+  rotate: bool,
+  /// 只读查看时最多显示多少条报到记录，上限 50。
+  #[arg(long, conflicts_with_all = ["every", "grace", "off", "rotate", "container"])]
+  limit: Option<u32>,
+  /// 显示完整报到地址，需要 apply 权限。
+  #[arg(long, conflicts_with_all = ["every", "grace", "off", "rotate", "container"])]
+  reveal: bool,
+  #[command(flatten)]
+  apply: ApplyFlags,
+}
+
+pub async fn heartbeat(
+  c: &Client,
+  args: HeartbeatArgs,
+  j: bool,
+) -> CliResult<()> {
+  let HeartbeatArgs {
+    name,
+    every,
+    grace,
+    container,
+    off,
+    rotate,
+    limit,
+    reveal,
+    apply,
+  } = args;
+  let target = format!("/api/services/{}", seg(&name));
+  if every.is_none()
+    && grace.is_none()
+    && !off
+    && !rotate
+    && container.is_none()
+  {
+    apply.check_read_only()?;
+    let service_path = if reveal {
+      format!("{target}?reveal=true")
+    } else {
+      target.clone()
+    };
+    let view: ServiceView = c.get(&service_path).await?;
+    let reports: Vec<HeartbeatReportView> = c
+      .get(&format!(
+        "{target}/heartbeat/reports?limit={}",
+        limit.unwrap_or(20)
+      ))
+      .await?;
+    let mut spec = view.spec.heartbeat;
+    if let Some(h) = &mut spec {
+      h.token.clear();
+    }
+    let heartbeat = view.heartbeat;
+    out(
+      j,
+      &json!({"service": name, "enabled": spec.is_some(), "spec": spec,
+        "status": heartbeat.as_ref().map(|h| &h.status),
+        "url": heartbeat.as_ref().map(|h| &h.url),
+        "last_at": heartbeat.as_ref().and_then(|h| h.last_at), "reports": reports,
+      }),
+      |value| {
+        pretty(value);
+        if !reveal && spec.is_some() {
+          println!("加 --reveal 查看完整报到地址");
+        }
+      },
+    );
+    return Ok(());
+  }
   let mut spec = get(c, &name).await?.spec;
   if let Some(container) = container {
     spec.container = Some(container);
@@ -254,8 +434,12 @@ pub async fn heartbeat(
     let every_mins = every
       .or_else(|| current.as_ref().map(|h| h.every_mins))
       .ok_or_else(|| {
-        ApiError::invalid("开启心跳需要指定报到间隔")
-          .with_hint("加上 --every 10m")
+        ApiError::invalid(if rotate {
+          "服务尚未开启心跳，无法轮换口令"
+        } else {
+          "开启心跳需要指定报到间隔"
+        })
+        .with_hint("加上 --every 10m")
       })?;
     let grace_mins = grace
       .or_else(|| current.as_ref().map(|h| h.grace_mins))
@@ -265,9 +449,10 @@ pub async fn heartbeat(
       grace_mins,
       token: String::new(),
       targeted: false,
+      rotate,
     });
   }
-  if current.is_some() != spec.heartbeat.is_some() {
+  if !j && (rotate || current.is_some() != spec.heartbeat.is_some()) {
     eprintln!("心跳配置需要重新部署才生效");
   }
   put(c, name, spec, apply, j).await
@@ -287,4 +472,22 @@ pub async fn ignore(
   ).await?;
   out(j, &result, pretty);
   Ok(())
+}
+
+#[test]
+fn port_check_no_args_is_read_only() {
+  use clap::Parser;
+  fn edit(flags: &[&str]) -> bool {
+    let argv = ["wharf", "service", "port-check", "app", "metrics"]
+      .into_iter()
+      .chain(flags.iter().copied());
+    match crate::Cli::try_parse_from(argv).unwrap().command {
+      crate::Command::Service(crate::ServiceCmd::PortCheck(args)) => {
+        args.has_edits()
+      }
+      _ => panic!("应解析成端口检查命令"),
+    }
+  }
+  assert!(!edit(&["--json"]));
+  assert!(edit(&["--on"]));
 }

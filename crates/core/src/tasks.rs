@@ -421,15 +421,38 @@ pub(crate) fn load_rows(
   )
 }
 
+async fn load_one_row(
+  state: &AppState,
+  name: &str,
+) -> Result<Option<(String, TaskSpec, i64)>, ApiError> {
+  let name = name.to_string();
+  state
+    .db
+    .call(move |c| {
+      let row: Option<(String, i64)> = c
+        .query_row(
+          "SELECT spec, updated_at FROM tasks WHERE name = ?1",
+          [&name],
+          |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(sql_err)?;
+      Ok(row.and_then(|(spec, updated)| {
+        serde_json::from_str(&spec)
+          .ok()
+          .map(|spec| (name, spec, updated))
+      }))
+    })
+    .await
+}
+
 async fn load_one(
   state: &AppState,
   name: &str,
 ) -> Result<TaskSpec, ApiError> {
-  load(state)
+  load_one_row(state, name)
     .await?
-    .into_iter()
-    .find(|(n, _, _)| n == name)
-    .map(|(_, s, _)| s)
+    .map(|(_, spec, _)| spec)
     .ok_or_else(|| {
       ApiError::not_found(format!("没有定时任务 {name}"))
         .with_hint("wharf task ls")
@@ -1276,11 +1299,18 @@ pub async fn get(
   Ok(Json(task))
 }
 
+#[derive(Deserialize)]
+pub struct PutTaskQuery {
+  #[serde(default)]
+  rotate_token: bool,
+}
+
 /// `PUT /api/tasks/{name}`：新建或修改。
 pub async fn put(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
+  Query(query): Query<PutTaskQuery>,
   Json(mut spec): Json<TaskSpec>,
 ) -> ApiResult<TaskSpec> {
   let snap = snapshot::load(&s.db).await?;
@@ -1303,6 +1333,9 @@ pub async fn put(
     )?;
     let rows = load_rows(c)?;
     let old = rows.iter().find(|(n, _, _)| n == &name).map(|(_, spec, _)| spec);
+    if query.rotate_token {
+      rotate_task_token(&mut spec.how)?;
+    }
     if let TaskKind::Ping { token, .. } = &mut spec.how && token.is_empty() {
       *token = old.filter(|s| matches!(s.how, TaskKind::Ping { .. }))
         .and_then(task_token).map(str::to_string).unwrap_or_else(crate::auth::new_token);
@@ -1673,6 +1706,35 @@ fn validate_schedule(spec: &TaskSpec) -> Result<(), ApiError> {
     return Ok(());
   }
   Cron::parse(&spec.schedule).map(|_| ())
+}
+
+fn rotate_task_token(kind: &mut TaskKind) -> Result<(), ApiError> {
+  let token = match kind {
+    TaskKind::Ping { token, .. }
+    | TaskKind::Script {
+      hook: Some(token), ..
+    } => token,
+    _ => {
+      return Err(ApiError::invalid(
+        "只有开启了 --hook 的脚本任务或 --ping 外部报到任务支持轮换口令",
+      ));
+    }
+  };
+  *token = crate::auth::new_token();
+  Ok(())
+}
+
+#[test]
+fn task_disable_hook_and_rotate_token() {
+  assert_eq!(next_hook(Some("fixture".into()), None), None);
+  let mut kind = TaskKind::Ping {
+    token: "fixture".into(),
+    grace_mins: 5,
+  };
+  rotate_task_token(&mut kind).unwrap();
+  assert!(
+    matches!(kind, TaskKind::Ping { token, .. } if !token.is_empty() && token != "fixture")
+  );
 }
 
 fn next_hook(

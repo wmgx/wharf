@@ -186,7 +186,7 @@ curl -sf --max-time 2 --noproxy '*' http://127.0.0.1:5005/v2/ >/dev/null || fail
 APP=127.0.0.1:5005/app:latest
 docker tag traefik/whoami "$APP" && docker push -q "$APP"
 wharf service deploy app --image "$APP" --port http=80 --apply
-wharf service auto-update app --apply
+wharf service auto-update app --on --apply
 wharf route add app.localhost --service app --apply --confirm route/app.localhost
 HOST=app.localhost
 printf 'FROM traefik/whoami\nENV E2E=2\n' | docker build -q -t "$APP" - >/dev/null && docker push -q "$APP"

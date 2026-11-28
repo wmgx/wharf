@@ -105,18 +105,6 @@ pub async fn run(
   token: Option<String>,
   j: bool,
 ) -> CliResult<()> {
-  if matches!(
-    &cmd,
-    TokenCmd::Set {
-      perms: None,
-      expires: None,
-      from: None,
-      services: None,
-      ..
-    }
-  ) {
-    return Err(ApiError::invalid("没有要改的").into());
-  }
   if let TokenCmd::Explain {
     path: Some(path), ..
   } = &cmd
@@ -247,7 +235,15 @@ pub async fn run(
       from,
       services,
       dry_run,
+      unset_expires,
+      unset_from,
+      unset_services,
     } => {
+      let expires =
+        expires.or_else(|| unset_expires.then(|| "never".into()));
+      let from = from.or_else(|| unset_from.then(|| "any".into()));
+      let services =
+        services.or_else(|| unset_services.then(|| "all".into()));
       let from = from
         .as_deref()
         .map(|raw| parse_non_empty_csv("--from", raw, Some("any")))
@@ -270,6 +266,19 @@ pub async fn run(
           ApiError::not_found(format!("访问令牌 {name} 不存在"))
             .with_hint("执行 wharf token list")
         })?;
+      if perms.is_none()
+        && expires.is_none()
+        && from.is_none()
+        && services.is_none()
+      {
+        if dry_run {
+          return Err(
+            ApiError::invalid("--dry-run 需要指定修改项").into(),
+          );
+        }
+        out(j, &token, crate::commands::pretty);
+        return Ok(());
+      }
       let before = TokenSettings {
         perms: token.perms,
         expires_at: token.expires_at,

@@ -207,8 +207,8 @@ fn apply_task_set(
   if args.no_catch_up || args.catch_up.is_some() {
     spec.catch_up_mins = args.catch_up;
   }
-  let new_command =
-    (!args.command.is_empty()).then(|| args.command.join(" "));
+  let new_command = (!args.command.is_empty())
+    .then(|| super::shell_join(&args.command));
   match &mut spec.how {
     TaskKind::Exec {
       service,
@@ -303,9 +303,13 @@ pub(super) async fn set(
   args: SetArgs,
   j: bool,
 ) -> CliResult<()> {
+  let has_edits = args.has_edits();
+  if !has_edits && args.dry_run {
+    return Err(ApiError::invalid("--dry-run 需要修改参数").into());
+  }
   let path = format!("/api/tasks/{}", seg(&args.name));
   let task: TaskView = c.get(&path).await?;
-  if !args.has_edits() && !args.dry_run {
+  if !has_edits {
     super::show(&task, false, j);
     if !j {
       println!(

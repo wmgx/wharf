@@ -8,7 +8,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_yaml_ng::{Mapping, Value};
 use wharf_api_types::{
   ApiError,
-  service_checks::{HeartbeatSpec, HeartbeatView},
+  service_checks::{
+    HeartbeatReportView, HeartbeatSpec, HeartbeatView,
+  },
   spec::ServiceSpec,
 };
 
@@ -88,6 +90,44 @@ pub(crate) fn base_url(
     })
 }
 
+pub const ROTATE_MIGRATION: &str = "
+DROP TRIGGER IF EXISTS service_heartbeat_change;
+CREATE TRIGGER service_heartbeat_change AFTER UPDATE OF spec ON resources WHEN NEW.kind='service'
+BEGIN
+  DELETE FROM service_heartbeats WHERE service = NEW.name
+    AND COALESCE(json_extract(NEW.spec, '$.heartbeat.token'), '') = '';
+  INSERT INTO service_heartbeats (service, token, enabled_at)
+    SELECT NEW.name, json_extract(NEW.spec, '$.heartbeat.token'), NEW.updated_at
+    WHERE json_extract(NEW.spec, '$.heartbeat.token') != ''
+    ON CONFLICT(service) DO UPDATE SET token = excluded.token, enabled_at = excluded.enabled_at,
+      failed = 0 WHERE service_heartbeats.token != excluded.token;
+  UPDATE service_heartbeats SET enabled_at = NEW.updated_at, failed = 0 WHERE service = NEW.name
+    AND COALESCE(json_extract(OLD.spec, '$.stopped'), 0) = 1
+    AND COALESCE(json_extract(NEW.spec, '$.stopped'), 0) = 0;
+END;
+";
+
+pub fn reports(
+  c: &Connection,
+  service: &str,
+  limit: u32,
+) -> Result<Vec<HeartbeatReportView>, ApiError> {
+  let mut stmt = c.prepare(
+    "SELECT at, ok, output FROM service_heartbeat_reports WHERE service = ?1 ORDER BY id DESC LIMIT ?2",
+  ).map_err(sql_err)?;
+  stmt
+    .query_map(params![service, limit.clamp(1, 50)], |row| {
+      Ok(HeartbeatReportView {
+        at: row.get(0)?,
+        ok: row.get(1)?,
+        output: row.get(2)?,
+      })
+    })
+    .map_err(sql_err)?
+    .collect::<Result<_, _>>()
+    .map_err(sql_err)
+}
+
 pub fn prepare(
   current: &World,
   desired: &mut World,
@@ -97,17 +137,22 @@ pub fn prepare(
     let before = current.services.get(name).map(|r| &r.spec);
     let old = before.and_then(|spec| spec.heartbeat.as_ref());
     if let Some(h) = &mut row.spec.heartbeat {
+      let rotate = std::mem::take(&mut h.rotate);
       h.token = old
-        .filter(|h| !h.token.is_empty())
+        .filter(|h| !rotate && !h.token.is_empty())
         .map_or_else(crate::auth::new_token, |h| h.token.clone());
       h.targeted = old.is_some_and(|old| old.targeted);
-      let changed = old != Some(h)
-        || before
-          .is_some_and(|spec| spec.container != row.spec.container);
-      if changed && base.is_none_or(str::is_empty) {
+      let config_changed = old.is_none_or(|old| {
+        old.every_mins != h.every_mins
+          || old.grace_mins != h.grace_mins
+          || old.token.is_empty()
+      }) || before
+        .is_some_and(|spec| spec.container != row.spec.container);
+      if (config_changed || rotate) && base.is_none_or(str::is_empty)
+      {
         return Err(missing_url());
       }
-      h.targeted |= changed;
+      h.targeted |= config_changed;
       if h.targeted
         && let wharf_api_types::spec::Source::Compose {
           content: Some(yaml),
@@ -567,6 +612,7 @@ mod tests {
   #[test]
   fn heartbeat_deadline_and_env_injection() {
     let h = HeartbeatSpec {
+      rotate: false,
       every_mins: 10,
       grace_mins: 5,
       token: "fixture".into(),
@@ -684,6 +730,7 @@ mod tests {
   #[test]
   fn heartbeat_recovers_on_relax_and_redeploy() {
     let h = HeartbeatSpec {
+      rotate: false,
       every_mins: 60,
       grace_mins: 1,
       token: String::new(),
@@ -709,6 +756,7 @@ mod tests {
       "services: {app: {<<: *b, image: nginx}}\n",
     );
     let heartbeat = HeartbeatSpec {
+      rotate: false,
       every_mins: 10,
       grace_mins: 5,
       token: "fixture".into(),

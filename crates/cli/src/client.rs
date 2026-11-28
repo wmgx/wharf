@@ -342,7 +342,6 @@ pub struct Client {
   /// 实际发请求的地址：本机加密通道的入口。
   endpoint: String,
   tunnel_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-  quiet: bool,
   token: Option<String>,
 }
 
@@ -354,7 +353,6 @@ impl Client {
       base: endpoint.clone(),
       endpoint,
       tunnel_error: Default::default(),
-      quiet: false,
       token: Some("fixture-token".into()),
     }
   }
@@ -404,14 +402,8 @@ impl Client {
       base,
       endpoint: tunnel.local,
       tunnel_error: tunnel.last_error,
-      quiet: false,
       token,
     })
-  }
-
-  pub(crate) fn quiet(mut self, quiet: bool) -> Self {
-    self.quiet = quiet;
-    self
   }
 
   pub(crate) fn is_for(&self, url: &str) -> bool {
@@ -420,9 +412,6 @@ impl Client {
 
   /// 控制面和本机 CLI 的构建号不一致时提醒一次（写 stderr，不影响 `--json`）。
   fn check_build(&self, headers: &reqwest::header::HeaderMap) {
-    if self.quiet {
-      return;
-    }
     static WARNED: std::sync::atomic::AtomicBool =
       std::sync::atomic::AtomicBool::new(false);
     let mine = env!("WHARF_CLI_BUILD");

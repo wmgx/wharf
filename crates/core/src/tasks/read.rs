@@ -1,7 +1,7 @@
 use super::{
   ApiError, AppState, Auth, Cron, ErrorCode, OptionalExtension,
-  RUN_COLS, TaskKind, TaskView, Utc, load, need_perm, params,
-  run_view, sql_err, to_time, visible_services,
+  RUN_COLS, TaskKind, TaskView, Utc, load, load_one_row, need_perm,
+  params, run_view, sql_err, to_time, visible_services,
 };
 
 pub(super) async fn build_views(
@@ -10,7 +10,10 @@ pub(super) async fn build_views(
   only: Option<&str>,
   reveal: bool,
 ) -> Result<Vec<TaskView>, crate::api::AppError> {
-  let tasks = load(s).await?;
+  let tasks = match only {
+    Some(name) => load_one_row(s, name).await?.into_iter().collect(),
+    None => load(s).await?,
+  };
   let snap = crate::snapshot::load(&s.db).await?;
   let base = reveal
     .then(|| crate::join::default_url_from(s, &snap))
@@ -21,9 +24,6 @@ pub(super) async fn build_views(
   let mut out = Vec::new();
   let now = Utc::now();
   for (name, spec, updated) in tasks {
-    if only.is_some_and(|only| only != name.as_str()) {
-      continue;
-    }
     if let Some(services) = &auth.services
       && !matches!(&spec.how, TaskKind::Exec { service, .. } if services.contains(service))
     {

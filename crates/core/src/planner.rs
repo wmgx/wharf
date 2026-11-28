@@ -1137,6 +1137,44 @@ fn moved_from<'a>(
   running_on(snap, current, name).filter(|old| *old != server)
 }
 
+pub fn compact_plan(plan: &mut Plan) {
+  fn compact(value: &mut Value, field: &str) {
+    match value {
+      Value::String(text)
+        if text.len() > 512
+          || matches!(
+            field,
+            "config"
+              | "compose"
+              | "dockerfile_content"
+              | "error_page"
+              | "caddy"
+          ) =>
+      {
+        *text = format!("<omitted {} bytes>", text.len());
+      }
+      Value::Object(map) => {
+        map.iter_mut().for_each(|(key, value)| compact(value, key))
+      }
+      Value::Array(values) => {
+        values.iter_mut().for_each(|value| compact(value, field))
+      }
+      _ => {}
+    }
+  }
+  for item in &mut plan.items {
+    if item.changes.is_empty() {
+      for value in item.before.iter_mut().chain(item.after.iter_mut())
+      {
+        compact(value, "");
+      }
+    } else {
+      item.before = None;
+      item.after = None;
+    }
+  }
+}
+
 fn to_json<T: Serialize>(v: &T) -> Value {
   serde_json::to_value(v).unwrap_or_default()
 }
@@ -1256,6 +1294,19 @@ fn config_items(
         action,
       ),
       (_, Action::Create) => (vec![], "新增".to_string()),
+      (KIND_SERVICE, Action::Update)
+        if {
+          let old = current.services[name].spec.heartbeat.as_ref();
+          let new = desired.services[name].spec.heartbeat.as_ref();
+          matches!((old, new), (Some(old), Some(new)) if old.token != new.token)
+        } =>
+      {
+        (
+          vec![],
+          "轮换心跳口令并重新部署容器（heartbeat_rotated: true）"
+            .into(),
+        )
+      }
       // 配置没变，只是记下固定的镜像版本（存在 meta 里）。
       (KIND_SERVICE, Action::Update) if before == after => {
         let old = &current.services[name];
@@ -6877,4 +6928,24 @@ mod tests {
     assert_eq!(b.items[0].impacts, vec![Impact::Public]);
     assert_eq!(b.items[0].reason, "去掉门禁后这个域名对公网开放");
   }
+}
+
+#[test]
+fn status_and_plan_brief_mode() {
+  let now = chrono::Utc::now();
+  let mut plan: Plan = serde_json::from_value(json!({
+    "plan_id": "fixture", "status": "pending", "created_at": now, "expires_at": now,
+    "base_versions": {}, "items": [
+      {"id":1, "address":"route/a.test", "layer":"config", "action":"create", "reason":"fixture",
+       "after":{"config":"a.test {}", "sites":["a.test"]}},
+      {"id":2, "address":"service/app", "layer":"config", "action":"update", "reason":"fixture",
+       "before":{"port":80}, "after":{"port":81}, "changes":[{"path":"port","before":80,"after":81}]}
+    ]
+  })).unwrap();
+  compact_plan(&mut plan);
+  let created = plan.items[0].after.as_ref().unwrap();
+  assert_eq!(created["sites"], json!(["a.test"]));
+  assert_eq!(created["config"], "<omitted 9 bytes>");
+  assert!(plan.items[1].after.is_none());
+  assert_eq!(plan.items[1].changes.len(), 1);
 }

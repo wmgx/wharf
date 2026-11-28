@@ -5,11 +5,13 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use wharf_api_types::ApiError;
 
 struct Settings {
   page: Option<(usize, usize)>,
   /// 上次结果的缓存文件。
-  changed: Option<PathBuf>,
+  changed: Option<(String, PathBuf)>,
+  include_volatile: bool,
 }
 
 static SETTINGS: std::sync::OnceLock<Settings> =
@@ -18,16 +20,23 @@ static SETTINGS: std::sync::OnceLock<Settings> =
 /// `args` 是去掉 `--changed` 后的命令行，用来区分“同一条命令”。
 pub fn set(
   page: Option<(usize, usize)>,
-  changed_key: Option<&[String]>,
+  changed_key: Option<(&str, &[String])>,
+  include_volatile: bool,
 ) {
-  let changed = changed_key.map(|args| {
+  let changed = changed_key.map(|(cursor, args)| {
     let digest =
       hex::encode(Sha256::digest(args.join("\0").as_bytes()));
-    cache_dir()
+    let path = cache_dir()
       .join("changed")
-      .join(format!("{}.json", &digest[..16]))
+      .join(cursor)
+      .join(format!("{}.json", &digest[..16]));
+    (cursor.to_string(), path)
   });
-  let _ = SETTINGS.set(Settings { page, changed });
+  let _ = SETTINGS.set(Settings {
+    page,
+    changed,
+    include_volatile,
+  });
 }
 
 /// `~/.cache/wharf`（或 `$XDG_CACHE_HOME/wharf`）。
@@ -42,39 +51,134 @@ pub fn cache_dir() -> PathBuf {
     .join("wharf")
 }
 
-pub fn apply(value: Value) -> Value {
+pub fn apply(value: Value) -> Result<Value, ApiError> {
   let Some(s) = SETTINGS.get() else {
-    return value;
+    return Ok(value);
   };
   let value = match s.page {
-    Some((size, page)) => paginate(value, size, page),
+    Some((size, page)) => paginate(value, size, page)?,
     None => value,
   };
-  match &s.changed {
-    Some(path) => changed(value, path),
+  Ok(match &s.changed {
+    Some((cursor, path)) => {
+      changed(value, path, cursor, s.include_volatile)
+    }
     None => value,
-  }
+  })
 }
 
-fn paginate(value: Value, size: usize, page: usize) -> Value {
-  let Value::Array(items) = value else {
-    eprintln!("提示：输出不是列表，没有分页");
-    return value;
+fn paginate(
+  value: Value,
+  size: usize,
+  page: usize,
+) -> Result<Value, ApiError> {
+  if size == 0 || page == 0 {
+    return Err(ApiError::invalid("页码和每页项数必须大于 0"));
+  }
+  let (mut object, key, nested) = match value {
+    Value::Array(items) => (
+      serde_json::Map::from_iter([(
+        "items".into(),
+        Value::Array(items),
+      )]),
+      "items".to_string(),
+      false,
+    ),
+    Value::Object(object) => {
+      let keys: Vec<_> = object
+        .iter()
+        .filter(|(_, value)| value.is_array())
+        .map(|(key, _)| key)
+        .collect();
+      let known: Vec<_> = keys
+        .iter()
+        .copied()
+        .filter(|key| {
+          [
+            "items",
+            "entries",
+            "events",
+            "runs",
+            "snapshots",
+            "records",
+            "commands",
+            "logs",
+            "reports",
+          ]
+          .contains(&key.as_str())
+        })
+        .collect();
+      let key = match (known.as_slice(), keys.as_slice()) {
+        ([key], _) | ([], [key]) => (*key).clone(),
+        _ => return Err(pagination_error()),
+      };
+      (object, key, true)
+    }
+    _ => return Err(pagination_error()),
   };
-  let size = size.max(1);
+  let Some(Value::Array(items)) = object.remove(&key) else {
+    return Err(pagination_error());
+  };
   let total = items.len();
   let pages = total.div_ceil(size).max(1);
-  eprintln!("共 {total} 项，第 {page}/{pages} 页");
-  Value::Array(
-    items
-      .into_iter()
-      .skip(page.saturating_sub(1) * size)
-      .take(size)
-      .collect(),
-  )
+  let mut pagination = json!({ "total": total, "page": page, "page_size": size, "pages": pages, "has_more": page < pages });
+  if nested {
+    pagination["field"] = json!(key);
+  }
+  object.insert(
+    key,
+    Value::Array(
+      items
+        .into_iter()
+        .skip((page - 1).saturating_mul(size))
+        .take(size)
+        .collect(),
+    ),
+  );
+  object.insert("pagination".into(), pagination);
+  Ok(Value::Object(object))
 }
 
-fn changed(value: Value, path: &PathBuf) -> Value {
+fn pagination_error() -> ApiError {
+  ApiError::invalid("当前输出不是单个列表，无法直接分页")
+    .with_hint("用 --fields 选中一个列表，或改用具体的列表命令")
+}
+
+fn without_volatile(mut value: Value) -> Value {
+  match &mut value {
+    Value::Object(map) => {
+      for key in [
+        "rtt_ms",
+        "last_seen",
+        "clock_offset_ms",
+        "observed_at",
+        "checked_at",
+        "elapsed_ms",
+        "waited_secs",
+        "expires_in_secs",
+      ] {
+        map.remove(key);
+      }
+      for value in map.values_mut() {
+        *value = without_volatile(std::mem::take(value));
+      }
+    }
+    Value::Array(items) => {
+      for value in items {
+        *value = without_volatile(std::mem::take(value));
+      }
+    }
+    _ => {}
+  }
+  value
+}
+
+fn changed(
+  value: Value,
+  path: &PathBuf,
+  cursor: &str,
+  include_volatile: bool,
+) -> Value {
   let before = std::fs::read_to_string(path)
     .ok()
     .and_then(|t| serde_json::from_str::<Value>(&t).ok());
@@ -85,12 +189,22 @@ fn changed(value: Value, path: &PathBuf) -> Value {
   match before {
     None => json!({
       "first_run": true,
+      "cursor": cursor,
       "changes": [{"path": "", "before": null, "after": value}],
     }),
     Some(before) => {
       let mut out = Vec::new();
-      diff("", &before, &value, &mut out);
-      json!({ "first_run": false, "changes": out })
+      if include_volatile {
+        diff("", &before, &value, &mut out);
+      } else {
+        diff(
+          "",
+          &without_volatile(before),
+          &without_volatile(value),
+          &mut out,
+        );
+      }
+      json!({ "first_run": false, "cursor": cursor, "changes": out })
     }
   }
 }
@@ -189,8 +303,34 @@ mod tests {
   }
 
   #[test]
+  fn named_cursor_ignores_volatile_fields_by_default() {
+    let cache = tempfile::tempdir().unwrap();
+    let first = cache.path().join("first.json");
+    let second = cache.path().join("second.json");
+    let before = json!({"name": "s1", "rtt_ms": 1});
+    let after = json!({"name": "s1", "rtt_ms": 2});
+    assert_eq!(
+      super::changed(before, &first, "first", false)["first_run"],
+      true
+    );
+    let diff = super::changed(after.clone(), &first, "first", false);
+    assert_eq!(diff["changes"], json!([]));
+    assert_eq!(diff["cursor"], "first");
+    assert_eq!(
+      super::changed(after, &second, "second", false)["first_run"],
+      true
+    );
+  }
+
+  #[test]
   fn paginates_top_level_list() {
-    let v = super::paginate(json!([1, 2, 3, 4, 5]), 2, 3);
-    assert_eq!(v, json!([5]));
+    let v = super::paginate(
+      json!({"entries": [1, 2, 3, 4, 5], "matched": 5}),
+      2,
+      2,
+    )
+    .unwrap();
+    assert_eq!(v["entries"], json!([3, 4]));
+    assert_eq!(v["pagination"]["total"], 5);
   }
 }

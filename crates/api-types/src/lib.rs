@@ -31,6 +31,33 @@ pub mod web_schema;
 
 pub use error::{ApiError, ErrorCode};
 
+pub const SEALED_NOTE_PREFIX: &str = "wharf-enc:v1:";
+
+pub fn split_note(raw: &str) -> (String, Vec<&str>) {
+  let (sealed, plain): (Vec<_>, Vec<_>) = raw
+    .split('\n')
+    .partition(|line| line.starts_with(SEALED_NOTE_PREFIX));
+  (plain.join("\n").trim().to_string(), sealed)
+}
+
+pub fn normalize_host(raw: &str) -> String {
+  raw.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// 清理旧控制面返回的密文，或更新网页会话用的标记。
+pub fn filter_note(
+  note: &mut Option<String>,
+  has_sealed_note: &mut bool,
+  human: bool,
+) {
+  let Some(raw) = note else { return };
+  let (plain, sealed) = split_note(raw);
+  *has_sealed_note |= !sealed.is_empty();
+  if !human {
+    *note = (!plain.is_empty()).then_some(plain);
+  }
+}
+
 /// CLI 和控制面在请求头里互相报告的版本。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

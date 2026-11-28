@@ -147,6 +147,8 @@ pub struct HeartbeatSpec {
   /// 已按目标容器配置；旧心跳保留原来的全容器注入。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub targeted: bool,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub rotate: bool,
 }
 
 #[derive(
@@ -199,6 +201,13 @@ pub struct HeartbeatView {
   pub status: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct HeartbeatReportView {
+  pub at: i64,
+  pub ok: bool,
+  pub output: String,
+}
+
 #[test]
 fn reject_out_of_range_service_checks() {
   let log = LogAlertSpec {
@@ -211,6 +220,7 @@ fn reject_out_of_range_service_checks() {
   assert!(log.compile().is_err());
   assert!(
     HeartbeatSpec {
+      rotate: false,
       every_mins: 100000,
       grace_mins: 5,
       token: String::new(),

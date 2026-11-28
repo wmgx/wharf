@@ -82,9 +82,10 @@ async fn save(
       ApiError::invalid(format!("备注最多 {NOTE_LIMIT} 个字")).into(),
     );
   }
-  s.db.call(move |c| {
+  let value = s.db.call(move |c| {
+    let tx = c.transaction().map_err(sql_err)?;
     if kind == KIND_ROUTE && let Some(allowed) = &auth.services {
-      let spec: Option<String> = c.query_row(
+      let spec: Option<String> = tx.query_row(
         "SELECT spec FROM resources WHERE kind = ?1 AND name = ?2",
         params![kind, name], |r| r.get(0),
       ).optional().map_err(sql_err)?;
@@ -93,7 +94,7 @@ async fn save(
         return Err(crate::token_scope::forbidden(&auth.name, allowed, ""));
       }
     }
-    let exists: bool = c.query_row(
+    let exists: bool = tx.query_row(
       "SELECT EXISTS(SELECT 1 FROM resources WHERE kind = ?1 AND name = ?2)",
       params![kind, name], |r| r.get(0),
     ).map_err(sql_err)?;
@@ -104,19 +105,40 @@ async fn save(
         _ => ApiError::not_found(format!("域名 {name} 不存在")).with_hint("用 wharf route list 查看现有域名"),
       });
     }
+    let (note, value) = if auth.human {
+      (note, json!({"ok": true}))
+    } else {
+      let old: Option<String> = if kind == KIND_SERVICE {
+        tx.query_row("SELECT note FROM service_notes WHERE service = ?1", [&name], |row| row.get(0))
+      } else {
+        tx.query_row("SELECT note FROM resource_notes WHERE kind = ?1 AND name = ?2", params![kind, name], |row| row.get(0))
+      }.optional().map_err(sql_err)?;
+      let (plain, _) = wharf_api_types::split_note(&note);
+      let (_, sealed) = wharf_api_types::split_note(old.as_deref().unwrap_or_default());
+      let final_note = std::iter::once(plain.as_str()).filter(|line| !line.is_empty())
+        .chain(sealed.iter().copied()).collect::<Vec<_>>().join("\n");
+      if final_note.chars().count() > NOTE_LIMIT {
+        return Err(ApiError::invalid(format!("备注最多 {NOTE_LIMIT} 个字")));
+      }
+      let value = json!({"ok": true, "note": (!plain.is_empty()).then_some(plain), "has_sealed_note": !sealed.is_empty()});
+      (final_note, value)
+    };
     if kind == KIND_SERVICE {
-      return db::set_service_note(c, &name, &note);
+      db::set_service_note(&tx, &name, &note)?;
+      tx.commit().map_err(sql_err)?;
+      return Ok(value);
     }
     if note.is_empty() {
-      c.execute("DELETE FROM resource_notes WHERE kind = ?1 AND name = ?2", params![kind, name])
+      tx.execute("DELETE FROM resource_notes WHERE kind = ?1 AND name = ?2", params![kind, name])
     } else {
-      c.execute(
+      tx.execute(
         "INSERT INTO resource_notes (kind, name, note, updated_at) VALUES (?1, ?2, ?3, ?4)
         ON CONFLICT(kind, name) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at",
         params![kind, name, note, now_ms()],
       )
     }.map_err(sql_err)?;
-    Ok(())
+    tx.commit().map_err(sql_err)?;
+    Ok(value)
   }).await?;
-  Ok(Json(json!({ "ok": true })))
+  Ok(Json(value))
 }

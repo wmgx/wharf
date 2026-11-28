@@ -496,8 +496,34 @@ pub(crate) fn validate_route_hostname(
 pub(crate) fn validate_gateway(
   name: &str,
   spec: &GatewaySpec,
+  old: Option<&GatewaySpec>,
 ) -> Result<(), ApiError> {
   wharf_api_types::validate_name("网关", name)?;
+  if old.is_none_or(|old| old.image != spec.image)
+    && spec.image.as_deref().is_some_and(|s| {
+      s.is_empty() || s.contains(char::is_whitespace)
+    })
+  {
+    return Err(ApiError::invalid(format!(
+      "网关 {name} 的镜像名不能为空或含空白"
+    )));
+  }
+  if old.is_none_or(|old| old.account != spec.account)
+    && spec.account.as_deref().is_some_and(|s| s.trim().is_empty())
+  {
+    return Err(ApiError::invalid(format!(
+      "网关 {name} 的账号名不能为空"
+    )));
+  }
+  if spec.http_port == Some(0)
+    && old.is_none_or(|old| old.http_port != spec.http_port)
+    || spec.https_port == Some(0)
+      && old.is_none_or(|old| old.https_port != spec.https_port)
+  {
+    return Err(ApiError::invalid(format!(
+      "网关 {name} 的端口不能为 0"
+    )));
+  }
   if let Some(email) = &spec.email {
     validate_email(email).map_err(|msg| {
       ApiError::invalid(format!("网关 {name} 的邮箱{msg}"))
@@ -587,3 +613,18 @@ pub(crate) fn validate_acme_dns_fill(
 
 #[cfg(test)]
 mod tests;
+
+#[test]
+fn gateway_add_unset_and_validate() {
+  let old: GatewaySpec = serde_json::from_value(
+    serde_json::json!({"server": "s1", "kind": "caddy"}),
+  )
+  .unwrap();
+  let bad = GatewaySpec {
+    image: Some(String::new()),
+    http_port: Some(0),
+    ..old.clone()
+  };
+  assert!(validate_gateway("edge", &bad, Some(&old)).is_err());
+  assert!(validate_gateway("edge", &bad, Some(&bad)).is_ok());
+}
