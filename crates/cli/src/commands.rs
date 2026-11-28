@@ -1200,19 +1200,21 @@ pub(crate) async fn wait_run(
   j: bool,
   mask: &[String],
 ) -> CliResult<Run> {
-  wait_run_with_interrupt(c, run_id, j, false).await
+  wait_run_with_interrupt(c, run_id, j, mask, false).await
 }
 
 async fn wait_run_with_interrupt(
   c: &Client,
   run_id: &str,
   j: bool,
+  mask: &[String],
   cancel_on_interrupt: bool,
 ) -> CliResult<Run> {
   let path = format!("/api/runs/{}", seg(run_id));
   wait_run_until(
     run_id,
     j,
+    mask,
     cancel_on_interrupt,
     || c.get(&path),
     tokio::signal::ctrl_c(),
@@ -1223,6 +1225,7 @@ async fn wait_run_with_interrupt(
 async fn wait_run_until<F: Future<Output = CliResult<Run>>>(
   run_id: &str,
   j: bool,
+  mask: &[String],
   cancel_on_interrupt: bool,
   mut fetch: impl FnMut() -> F,
   interrupt: impl Future,
@@ -5992,30 +5995,35 @@ async fn backup(
         if no_wait {
           finish_task(c, &result.run_id, false, j).await?;
         } else {
-          let run =
-            match wait_run_with_interrupt(c, &result.run_id, j, true)
-              .await
-            {
-              Err(CliError::Exit(130)) => {
-                let path =
-                  format!("/api/runs/{}/cancel", seg(&result.run_id));
-                c.post_timeout::<_, Value>(
-                  &path,
-                  &json!({}),
-                  Duration::from_secs(15),
+          let run = match wait_run_with_interrupt(
+            c,
+            &result.run_id,
+            j,
+            &[],
+            true,
+          )
+          .await
+          {
+            Err(CliError::Exit(130)) => {
+              let path =
+                format!("/api/runs/{}/cancel", seg(&result.run_id));
+              c.post_timeout::<_, Value>(
+                &path,
+                &json!({}),
+                Duration::from_secs(15),
+              )
+              .await?;
+              return Err(
+                ApiError::new(
+                  ErrorCode::Cancelled,
+                  "已请求取消备份迁移",
                 )
-                .await?;
-                return Err(
-                  ApiError::new(
-                    ErrorCode::Cancelled,
-                    "已请求取消备份迁移",
-                  )
-                  .with_hint("取消结束后重跑原命令续传")
-                  .into(),
-                );
-              }
-              result => result?,
-            };
+                .with_hint("取消结束后重跑原命令续传")
+                .into(),
+              );
+            }
+            result => result?,
+          };
           out(j, &run, print::run_summary);
           if run.status != RunStatus::Succeeded {
             return Err(CliError::Exit(4));
@@ -6579,6 +6587,7 @@ mod tests {
       wait_run_until(
         "r1",
         true,
+        &[],
         true,
         || {
           polls.set(polls.get() + 1);
