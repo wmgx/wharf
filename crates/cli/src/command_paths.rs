@@ -97,6 +97,22 @@ pub fn matched_path(mut matches: &ArgMatches) -> Vec<&str> {
   path
 }
 
+fn legacy_diagnostic_tree() -> Command {
+  // 旧 schema 只接受一个类型名，Clap 会用其他子命令的参数生成纠错提示。
+  Cli::command().mut_subcommand("schema", |schema| {
+    Command::new("schema")
+      .args(
+        schema
+          .get_arguments()
+          .filter(|arg| arg.get_id() != "command_query")
+          .cloned(),
+      )
+      .mut_arg("resource", |arg| {
+        arg.num_args(1).action(clap::ArgAction::Set)
+      })
+  })
+}
+
 pub fn parse(
   app: &Command,
   argv: &[impl AsRef<OsStr>],
@@ -112,7 +128,7 @@ pub fn parse(
       ) {
         return Err(error);
       }
-      let legacy = Cli::command();
+      let legacy = legacy_diagnostic_tree();
       let probe = legacy.clone().ignore_errors(true);
       let is_old = |matches: ArgMatches| {
         matches.subcommand_name().and_then(group).is_some()
@@ -229,7 +245,7 @@ mod tests {
     for (argv, tree) in [
       (
         ["wharf", "--json", "--comman", "refs", "schema"],
-        Cli::command(),
+        legacy_diagnostic_tree(),
       ),
       (["wharf", "--json", "--comman", "schema", "refs"], app()),
     ] {
