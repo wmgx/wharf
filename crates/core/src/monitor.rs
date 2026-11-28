@@ -1,9 +1,9 @@
 //! 按服务的自定义监控（服务配置 `monitor`）：每分钟让服务所在机器的 agent 从本机请求
-//! `http://127.0.0.1:<宿主机端口><path>`。连续 [FAILS] 次不正常进"需要注意"并推送，恢复再推。
+//! `http://127.0.0.1:<宿主机端口><path>`。连续多次不正常进"需要注意"并推送，恢复再推。
 //! 结果只存在内存里。
 
 use std::{
-  collections::BTreeMap,
+  collections::{BTreeMap, BTreeSet},
   sync::{Arc, Mutex},
   time::Duration,
 };
@@ -17,7 +17,6 @@ use wharf_api_types::{
 use crate::{state::AppState, world::ServiceRow};
 
 const EVERY: Duration = Duration::from_secs(60);
-const FAILS: u32 = 3;
 const TIMEOUT_SECS: u64 = 10;
 
 static LAST: Mutex<BTreeMap<String, MonitorView>> =
@@ -27,27 +26,42 @@ pub fn last(service: &str) -> Option<MonitorView> {
   LAST.lock().ok()?.get(service).cloned()
 }
 
-pub fn issues() -> Vec<Issue> {
-  let Ok(m) = LAST.lock() else { return vec![] };
-  m.iter()
-    .filter(|(_, v)| v.fails >= FAILS)
-    .map(|(s, v)| {
+pub fn issues(world: &crate::world::World) -> Vec<Issue> {
+  crate::rules::firing_subjects("monitor_failed")
+    .into_iter()
+    .filter(|(s, _)| {
+      world.services.get(s).is_some_and(|row| {
+        !row.spec.stopped && row.spec.monitor.is_some()
+      })
+    })
+    .map(|(s, title)| {
       let (alert, ack) =
-        crate::rules::issue_alert("monitor_failed", s);
+        crate::rules::issue_alert("monitor_failed", &s);
       Issue {
         code: "monitor_down".into(),
         level: IssueLevel::Fault,
         subject: Some(IssueSubject {
           kind: "service".into(),
-          name: s.clone(),
+          name: s,
         }),
-        title: format!("服务 {s} 的监控不正常：{}", v.detail),
+        title,
         hint: None,
         ack,
         alert,
       }
     })
     .collect()
+}
+
+pub(crate) fn forget(
+  services: &BTreeSet<String>,
+  monitors: &BTreeSet<String>,
+) {
+  if let Ok(mut last) = LAST.lock() {
+    last.retain(|svc, _| {
+      !services.contains(svc) && !monitors.contains(svc)
+    });
+  }
 }
 
 /// 监控的地址；端口找不到时返回原因。
@@ -98,13 +112,15 @@ pub fn judge(m: &MonitorSpec, r: &HttpCheckResult) -> (bool, String) {
   )
 }
 
-pub(crate) fn record_manual(
+async fn record_manual(
+  state: &AppState,
   service: &str,
   at: i64,
   ok: bool,
-  detail: String,
+  detail: &str,
 ) {
-  if let Ok(mut results) = LAST.lock() {
+  {
+    let Ok(mut results) = LAST.lock() else { return };
     let fails = match results.get(service) {
       Some(old) if old.at > at => return,
       Some(old) if !ok => old.fails,
@@ -114,11 +130,15 @@ pub(crate) fn record_manual(
       service.into(),
       MonitorView {
         ok,
-        detail,
+        detail: detail.into(),
         at,
         fails,
       },
     );
+  }
+  if ok {
+    crate::rules::observe(state, "monitor.ok", service, 1.0, detail)
+      .await;
   }
 }
 
@@ -153,7 +173,7 @@ pub(crate) async fn doctor_monitor(
     },
     Err(e) => (false, e),
   };
-  record_manual(service, at, ok, detail.clone());
+  record_manual(state, service, at, ok, &detail).await;
   Some(check(
     if ok {
       CheckStatus::Ok
@@ -211,12 +231,16 @@ async fn round(state: &AppState) {
     .world
     .services
     .iter()
-    .filter(|(_, r)| !r.spec.stopped)
+    .filter(|(n, r)| !r.spec.stopped && snap.applied.contains_key(*n))
     .filter_map(|(n, r)| {
       let m = r.spec.monitor.clone()?;
       Some((n.clone(), r.spec.server.clone(), m.clone(), url(r, &m)))
     })
     .collect();
+  let active =
+    targets.iter().map(|(name, ..)| name.clone()).collect();
+  crate::rules::retain_subjects(state, "monitor_failed", &active)
+    .await;
   if let Ok(mut l) = LAST.lock() {
     l.retain(|n, _| targets.iter().any(|(t, ..)| t == n));
   }
@@ -224,10 +248,11 @@ async fn round(state: &AppState) {
     targets
       .into_iter()
       .map(|(name, server, m, url)| async move {
+        if !state.hub.is_online(&server) {
+          return (name, None);
+        }
         let outcome = match url {
           Err(e) => Some((false, e)),
-          // agent 离线或太旧：这一轮不算，离线有自己的告警。
-          Ok(_) if !state.hub.is_online(&server) => None,
           Ok(url) => match request(state, &server, url, &m).await {
             Ok(r) => Some(judge(&m, &r)),
             Err(e) => {
@@ -238,8 +263,16 @@ async fn round(state: &AppState) {
         };
         (name, outcome)
       });
-  for (name, outcome) in futures_util::future::join_all(checks).await
-  {
+  let outcomes = futures_util::future::join_all(checks).await;
+  let Ok(current) = crate::snapshot::load(&state.db).await else {
+    return;
+  };
+  for (name, outcome) in outcomes {
+    if current.world.services.get(&name)
+      != snap.world.services.get(&name)
+    {
+      continue;
+    }
     let Some((ok, detail)) = outcome else {
       continue;
     };
@@ -318,21 +351,40 @@ mod tests {
     );
   }
 
-  #[test]
-  fn manual_monitor_recovery_clears_failed_status() {
+  #[tokio::test]
+  async fn manual_monitor_recovery_clears_failed_status() {
+    let _guard = crate::rules::tests::TEST_LOCK.lock().await;
+    crate::rules::tests::reset_memory();
+    let state = crate::rules::tests::test_state();
     let service = "p203-monitor-worker";
+    for _ in 0..3 {
+      crate::rules::observe(
+        &state,
+        "monitor.ok",
+        service,
+        0.0,
+        "503",
+      )
+      .await;
+    }
+    assert!(
+      crate::rules::firing_since("monitor_failed", service).is_some()
+    );
     LAST.lock().unwrap().insert(
       service.into(),
       MonitorView {
         ok: false,
         detail: "503".into(),
         at: 1,
-        fails: FAILS,
+        fails: 3,
       },
     );
-    record_manual(service, 2, false, "503".into());
-    assert_eq!(last(service).unwrap().fails, FAILS);
-    record_manual(service, 3, true, "200".into());
+    record_manual(&state, service, 2, false, "503").await;
+    assert_eq!(last(service).unwrap().fails, 3);
+    record_manual(&state, service, 3, true, "200").await;
+    assert!(
+      crate::rules::firing_since("monitor_failed", service).is_none()
+    );
     let recovered = LAST.lock().unwrap().remove(service).unwrap();
     assert!(recovered.ok);
     assert_eq!(recovered.fails, 0);

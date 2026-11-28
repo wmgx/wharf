@@ -778,14 +778,14 @@ pub async fn status(
   issues.extend(crate::totp::issues(&state.db).await?);
   issues.extend(crate::core_backup::issues(&state.db).await?);
   issues.extend(crate::tasks::issues(state).await);
-  issues.extend(crate::probe::issues());
+  issues.extend(crate::probe::issues(&snap.world));
   issues.extend(crate::exposure::issues(state).await?);
   issues.extend(crate::sso_login::issues(&snap));
-  issues.extend(crate::alerts::issues());
+  issues.extend(crate::alerts::issues(&snap.world));
   issues.extend(crate::heal::issues());
   issues.extend(crate::rules::custom_issues(&snap.world));
-  issues.extend(crate::external_checks::issues(&servers));
-  issues.extend(crate::monitor::issues());
+  issues.extend(crate::external_checks::issues(&servers, &snap));
+  issues.extend(crate::monitor::issues(&snap.world));
   issues.extend(crate::service_monitor::issues(&snap.world));
   issues
     .extend(crate::service_monitor::unmanaged::issues(state).await?);
@@ -796,13 +796,14 @@ pub async fn status(
       crate::db::now_ms(),
     )
   }));
-  issues.extend(crate::rdap::issues());
-  issues.extend(crate::disk_forecast::issues());
-  issues.extend(crate::clock::issues());
-  issues.extend(crate::oom::issues());
-  issues.extend(crate::traffic::issues());
+  issues.extend(crate::rdap::issues(&snap.world));
+  issues.extend(crate::disk_forecast::issues(&snap.world));
+  issues.extend(crate::mem_forecast::issues(&snap.world));
+  issues.extend(crate::clock::issues(&snap.world));
+  issues.extend(crate::oom::issues(&snap.world));
+  issues.extend(crate::traffic::issues(&snap.world));
   issues.extend(crate::baseline::issues());
-  issues.extend(crate::host_units::issues());
+  issues.extend(crate::host_units::issues(&snap.world));
   issues.extend(crate::net_conflict::issues(&snap));
   let updates = crate::updates::current(&snap);
   if let Some(updates) = &updates {

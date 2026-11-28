@@ -13,6 +13,12 @@ pub fn offset_ms(agent_ms: i64, recv_ms: i64, rtt_ms: u32) -> i64 {
 static LAST: Mutex<BTreeMap<String, i64>> =
   Mutex::new(BTreeMap::new());
 
+pub(crate) fn forget_server(server: &str) {
+  if let Ok(mut last) = LAST.lock() {
+    last.remove(server);
+  }
+}
+
 pub async fn record(
   state: &AppState,
   server: &str,
@@ -45,9 +51,10 @@ pub fn offset_of(server: &str) -> Option<i64> {
   LAST.lock().ok()?.get(server).copied()
 }
 
-pub fn issues() -> Vec<Issue> {
+pub fn issues(world: &crate::world::World) -> Vec<Issue> {
   rules::firing_subjects("clock_skew")
     .into_iter()
+    .filter(|(server, _)| world.servers.contains_key(server))
     .map(|(name, title)| {
       let (alert, ack) = rules::issue_alert("clock_skew", &name);
       Issue {

@@ -17,8 +17,8 @@ use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{AgentOp, HttpCheckResult, ProbeTarget},
   spec::{
-    GatewayKind, GatewaySpec, GatewayTls, MonitorSpec, PathRoute,
-    Region, RouteSpec, SsoMode,
+    GatewayKind, GatewaySpec, GatewayTls, MonitorSpec, Region,
+    RouteSpec, SsoMode,
   },
   view::{
     CheckStatus, DoctorCheck, DoctorReport, Perm, RouteDiagnosis,
@@ -171,13 +171,6 @@ fn route_services(route: &RouteSpec) -> impl Iterator<Item = &str> {
   .then_some(route.service.as_str())
   .into_iter()
   .chain(route.paths.iter().filter_map(|p| p.service.as_deref()))
-}
-
-fn path_active(world: &World, path: &PathRoute) -> bool {
-  path.upstream.is_some()
-    || path.service.as_ref().is_some_and(|name| {
-      world.services.get(name).is_none_or(|row| !row.spec.stopped)
-    })
 }
 
 fn selection(
@@ -358,7 +351,15 @@ async fn run(
   auth: Option<&Auth>,
 ) -> Result<DoctorReport, ApiError> {
   let snap = snapshot::load(&s.db).await?;
-  let selected = selection(&snap, scope, auth)?;
+  let mut selected = selection(&snap, scope, auth)?;
+  if !manual {
+    selected.hosts.retain(|host| {
+      !crate::rules::lifecycle::stopped_route(
+        &snap.world,
+        &snap.world.routes[host].spec,
+      )
+    });
+  }
   let net = snap.net(&snap.world);
   let clients = Clients::new(&snap)?;
   let mut world = snap.world.clone();
@@ -611,11 +612,14 @@ impl RouteChecks<'_> {
     let main_stopped = spec.redirect.is_none()
       && service.is_some_and(|row| row.spec.stopped);
     let probe_path = if main_stopped {
-      spec.paths.iter().find(|p| path_active(world, p))
+      spec
+        .paths
+        .iter()
+        .find(|p| crate::rules::lifecycle::active_path(world, p))
     } else {
       None
     };
-    let stopped = main_stopped && probe_path.is_none();
+    let stopped = crate::rules::lifecycle::stopped_route(world, spec);
     let probe_url = probe_path.map(|p| {
       let path = p.path.trim_end_matches('*');
       format!("{}{path}", view.url.trim_end_matches('/'))
