@@ -952,6 +952,15 @@ export interface DbSnapshotInfo {
   trigger: string;
 }
 
+export interface Dependent {
+  address: string;
+  disposition: DependentDisposition;
+  field: string;
+  kind: string;
+}
+
+export type DependentDisposition = "retained" | "detached" | "removed" | "stopping";
+
 export interface DeploymentView {
   /**
    * git 来源时部署的 commit。
@@ -977,15 +986,6 @@ export interface DeploymentView {
    */
   started: boolean;
 }
-
-export interface Dependent {
-  address: string;
-  disposition: DependentDisposition;
-  field: string;
-  kind: string;
-}
-
-export type DependentDisposition = "retained" | "detached" | "removed" | "stopping";
 
 export interface Disk {
   free: number;
