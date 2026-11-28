@@ -98,6 +98,9 @@ fn walk(
       };
     }
     match command.as_str() {
+      "var set" => {
+        entry["returns_without_value"] = json!("var");
+      }
       "data push" => {
         entry["flag_variants"] = json!({
           "--delete": {"apply_perms": ["exec", "confirm"]},
@@ -119,6 +122,20 @@ fn walk(
         entry["returns_by_flag"] = json!({
           "--cron": "plan", "--skip-if-stopped": "plan", "--catch-up": "plan",
           "--unset-catch-up": "plan", "--off": "plan", "--apply": "run"
+        });
+      }
+      "service limits" => {
+        entry["returns_by_flag"] = json!({
+          "--memory": "plan", "--cpus": "plan", "--pids": "plan",
+          "--unset-memory": "plan", "--unset-cpus": "plan",
+          "--unset-pids": "plan", "--off": "plan", "--apply": "plan_run"
+        });
+        entry["flag_variants"] = json!({
+          "--apply": {
+            "returns": "plan_run",
+            "when": "带修改参数且计划有变更项，优先于修改参数的返回类型",
+            "otherwise": "plan"
+          }
         });
       }
       "service env sync" => {
@@ -192,6 +209,7 @@ fn read_when_no_args(command: &str) -> bool {
       | "data cleanup policy"
       | "backup set"
       | "task set"
+      | "var set"
   )
 }
 
@@ -199,6 +217,12 @@ fn effect(
   command: &str,
   cmd: &clap::Command,
 ) -> (&'static str, &'static [&'static str]) {
+  if matches!(command, "var set" | "var rm") {
+    return ("plan", &["plan", "admin"]);
+  }
+  if command == "var get" {
+    return ("read", &["read"]);
+  }
   if matches!(command, "schema" | "commands" | "validate" | "login") {
     return ("read", &[]);
   }
@@ -391,6 +415,9 @@ fn returns(command: &str) -> Option<&'static str> {
     "service exec" => "service_exec",
     "service render" => "service_render",
     "service restart-schedule" => "restart_schedule",
+    "var get" | "var list" => "var",
+    "var set" | "var rm" => "plan",
+    "service limits" => "service_limits",
     "backup list" => "backup",
     "backup ls" => "backup_ls",
     "backup extract" => "backup_extract",
@@ -435,6 +462,15 @@ pub fn usable(prefix: &[String], me: &Value) -> Value {
   let mut result = commands(prefix);
   if let Some(commands) = result["commands"].as_array_mut() {
     commands.retain_mut(|command| {
+      if command["command"]
+        .as_str()
+        .is_some_and(|name| name.starts_with("wharf var "))
+        && me["services"]
+          .as_array()
+          .is_some_and(|scope| !scope.is_empty())
+      {
+        return false;
+      }
       let has = |perm: &Value| {
         me["perms"]
           .as_array()
@@ -496,6 +532,35 @@ pub fn commands(prefix: &[String]) -> Value {
 #[cfg(test)]
 mod tests {
   #[test]
+  fn var_commands_report_returns_and_respect_global_scope() {
+    use super::{commands, json, usable};
+
+    let prefix = ["var".into()];
+    let described = commands(&prefix);
+    let entries = described["commands"].as_array().unwrap();
+    let entry = |name: &str| {
+      entries.iter().find(|v| v["command"] == name).unwrap()
+    };
+    assert_eq!(entry("wharf var set")["returns"], "plan");
+    assert_eq!(
+      entry("wharf var set")["returns_without_value"],
+      "var"
+    );
+    assert_eq!(entry("wharf var rm")["returns"], "plan");
+    let scope = json!({"perms":["read"],"services":["app"]});
+    assert_eq!(usable(&prefix, &scope)["commands"], json!([]));
+    let global = json!({"perms":["read"],"services":[]});
+    assert!(
+      usable(&prefix, &global)["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|cmd| cmd["command"] == "wharf var set"
+          && cmd["usable_mode"] == "read_only")
+    );
+  }
+
+  #[test]
   fn commands_describe_data_and_import_flag_variants() {
     use serde_json::json;
     let index = super::commands(&[]);
@@ -523,6 +588,16 @@ mod tests {
       import["flag_variants"]["--extract-secrets"]["returns"],
       "service-import-preview"
     );
+  }
+
+  #[test]
+  fn service_limits_declares_read_plan_and_apply_results() {
+    let v = super::commands(&["service".into(), "limits".into()]);
+    let command = &v["commands"][0];
+    assert_eq!(command["returns"], "service_limits");
+    assert_eq!(command["returns_by_flag"]["--pids"], "plan");
+    assert_eq!(command["returns_by_flag"]["--unset-pids"], "plan");
+    assert_eq!(command["returns_by_flag"]["--apply"], "plan_run");
   }
 
   #[test]

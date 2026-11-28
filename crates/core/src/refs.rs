@@ -89,7 +89,17 @@ pub(crate) fn resolve_with_host_style(
   net: &Net,
   legacy: bool,
 ) -> Result<String, ApiError> {
-  resolve_refs(text, me, world, net, legacy, true)
+  if !text.contains("[[@") {
+    return Ok(text.to_string());
+  }
+  resolve_from(
+    text,
+    &format!("服务 {me}"),
+    &world.services[me].spec.server,
+    world,
+    net,
+    legacy,
+  )
 }
 
 pub(crate) fn probe_address(
@@ -99,9 +109,10 @@ pub(crate) fn probe_address(
   service: &str,
   port: &str,
 ) -> Result<String, ApiError> {
-  resolve_refs(
+  resolve_from_with_reach(
     &format!("[[@{service}.{port}]]"),
-    me,
+    &format!("服务 {me}"),
+    &world.services[me].spec.server,
     world,
     net,
     false,
@@ -109,22 +120,53 @@ pub(crate) fn probe_address(
   )
 }
 
-fn resolve_refs(
+pub(crate) fn validate_task_ref(
+  task: &str,
+  world: &World,
+  reference: &Ref<'_>,
+) -> Result<(), ApiError> {
+  let server = world.services.get(reference.service);
+  if !server.is_some_and(|row| match reference.port {
+    Some(name) => row.spec.ports.iter().any(|p| p.name == name),
+    None => !row.spec.ports.is_empty(),
+  }) {
+    return Err(
+      ApiError::invalid(format!(
+        "任务 {task} 引用的服务 {} 或端口不可用",
+        reference.service
+      ))
+      .with_hint("用 wharf service show 查看可用的端口"),
+    );
+  }
+  Ok(())
+}
+
+pub(crate) fn resolve_from(
   text: &str,
-  me: &str,
+  caller: &str,
+  my_server: &str,
+  world: &World,
+  net: &Net,
+  legacy: bool,
+) -> Result<String, ApiError> {
+  resolve_from_with_reach(
+    text, caller, my_server, world, net, legacy, true,
+  )
+}
+
+fn resolve_from_with_reach(
+  text: &str,
+  caller: &str,
+  my_server: &str,
   world: &World,
   net: &Net,
   legacy: bool,
   check_reach: bool,
 ) -> Result<String, ApiError> {
-  if !text.contains("[[@") {
-    return Ok(text.to_string());
-  }
-  let my_server = &world.services[me].spec.server;
   scan(text, |r| {
     let row = world.services.get(r.service).ok_or_else(|| {
       ApiError::invalid(format!(
-        "服务 {me} 引用的服务 {} 不存在",
+        "{caller} 引用的服务 {} 不存在",
         r.service
       ))
       .with_hint("引用写作 [[@服务名]] 或 [[@服务名.端口名]]")
@@ -136,7 +178,7 @@ fn resolve_refs(
         row.spec.ports.first().map(|p| p.name.clone()).ok_or_else(
           || {
             ApiError::invalid(format!(
-              "服务 {me} 引用的服务 {} 没有端口",
+              "{caller} 引用的服务 {} 没有端口",
               r.service
             ))
           },
@@ -145,7 +187,7 @@ fn resolve_refs(
     };
     let port = row.host_ports.get(&port_name).ok_or_else(|| {
       ApiError::invalid(format!(
-        "服务 {me} 引用的服务 {} 没有端口 {port_name}",
+        "{caller} 引用的服务 {} 没有端口 {port_name}",
         r.service
       ))
       .with_hint(format!(
@@ -162,7 +204,7 @@ fn resolve_refs(
     let target = &row.spec.server;
     let addr = net.private.get(target).ok_or_else(|| {
       ApiError::invalid(format!(
-        "服务 {me} 引用了 {}，但 {target} 没有内网地址",
+        "{caller} 引用了 {}，但 {target} 没有内网地址",
         r.service
       ))
       .with_hint("服务之间经内网地址互相访问，先让这台接入组网")
@@ -170,12 +212,12 @@ fn resolve_refs(
     })?;
     if check_reach
       && target != my_server
-      && net.reach.get(&(my_server.clone(), target.clone()))
+      && net.reach.get(&(my_server.to_string(), target.clone()))
         == Some(&false)
     {
       return Err(
         ApiError::invalid(format!(
-          "服务 {me} 引用了 {}，但 {my_server} 连不到 {target} 的内网地址",
+          "{caller} 引用了 {}，但 {my_server} 连不到 {target} 的内网地址",
           r.service
         ))
         .with_hint("确认两台都接入了组网后重新探测")
@@ -250,6 +292,45 @@ mod tests {
   }
 
   use super::*;
+
+  #[test]
+  fn task_ref_uses_the_actual_runner() {
+    let mut world = World::default();
+    world.servers.insert(
+      "s1".into(),
+      crate::world::ServerRow {
+        settings: Default::default(),
+        version: 1,
+      },
+    );
+    world.apply_changes(&[serde_json::from_value(serde_json::json!({
+      "op": "upsert_service", "name": "db",
+      "spec": {"server": "s1", "source": {"image": "alpine"},
+        "ports": [{"name": "sql", "container": 5432, "host": 21000}]}
+    })).unwrap()]).unwrap();
+    world.allocate_ports().unwrap();
+    let mut net = Net::default();
+    net.private.insert(
+      "s1".into(),
+      wharf_api_types::spec::PrivateAddr {
+        ip: "100.64.0.1".into(),
+        network: wharf_api_types::spec::PrivateNetwork::Tailscale,
+      },
+    );
+    net.reach.insert(("s2".into(), "s1".into()), false);
+    let resolve = |server| {
+      resolve_from(
+        "[[@db.sql:port]]",
+        "任务 check",
+        server,
+        &world,
+        &net,
+        false,
+      )
+    };
+    assert_eq!(resolve("s1").unwrap(), "21000");
+    assert!(resolve("s2").is_err());
+  }
 
   #[test]
   fn parses_forms() {

@@ -158,6 +158,12 @@ pub enum AgentMsg {
     #[serde(default)]
     safe_delete: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    service_runtime_opts: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    live_limits_update: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    task_resource_limits: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     data_cleanup: bool,
     #[serde(default)]
     exec_v2: bool,
@@ -194,6 +200,16 @@ pub enum AgentMsg {
     /// 支持扩展文件操作和日志截止时间。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     files_v2: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    named_networks_v1: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    compose_env_v2: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    safe_host_bind_v2: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    project_files_v2: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    workload_egress_v1: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     extra_logs_v1: bool,
   },
@@ -390,7 +406,17 @@ pub struct HostTraffic {
 #[derive(
   Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
+pub struct ComponentMetrics {
+  pub cpu: f32,
+  pub mem: u64,
+}
+
+#[derive(
+  Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
 pub struct ProjectMetrics {
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub components: BTreeMap<String, ComponentMetrics>,
   /// 占整机 CPU 的百分比，0 到 100。
   pub cpu: f32,
   pub mem: u64,
@@ -424,6 +450,12 @@ pub enum AgentOp {
   Report,
   /// 结果是 `Vec<ResolvedImage>`。
   ResolveImages(ResolveImages),
+  ReadHostGroups {
+    groups: Vec<String>,
+  },
+  InspectLocalImages {
+    images: Vec<String>,
+  },
   /// 查 git 分支或标签现在指向的 commit（`git ls-remote`，不下载代码），结果是 40 位 commit。
   ResolveCommit(ResolveCommit),
   /// 读取若干 compose project 的现状，结果是 `Vec<ProjectState>`。
@@ -443,6 +475,20 @@ pub enum AgentOp {
   },
   /// 写入 compose、拉镜像、`up -d`。结果是 [ProjectUpResult]。
   ProjectUp(ProjectUp),
+  NamedNetworksCheck {
+    networks: BTreeMap<String, crate::spec::NetworkAttachment>,
+  },
+  WorkloadEgressStatus,
+  HostBindCheck {
+    binds: Vec<crate::spec::VolumeSpec>,
+  },
+  ComposeEnvCheck {
+    project: String,
+    compose: String,
+    project_env: BTreeMap<String, String>,
+  },
+  ProjectCheckLimits(ProjectLimitsJob),
+  ProjectUpdateLimits(ProjectLimitsJob),
   GatewayProbe(GatewayProbeJob),
   LinkApply(LinkApply),
   ProjectMounts {
@@ -1007,6 +1053,8 @@ pub struct HostExecJob {
   pub command: String,
   pub timeout_secs: u64,
   pub cwd: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub workload_no_proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -629,6 +629,8 @@ fn draft(mut p: Parsed) -> ServiceDraft {
           name,
           target,
           from_service: None,
+          owner: None,
+          host_path: None,
           read_only: false,
         })
         .collect(),

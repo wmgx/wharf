@@ -534,6 +534,7 @@ mod tests {
     snap.world.services.insert(
       "app".into(),
       crate::world::ServiceRow {
+        host_groups: Default::default(),
         spec,
         instance_id: "svc_fixture".into(),
         host_ports: Default::default(),

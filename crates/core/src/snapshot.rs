@@ -480,6 +480,83 @@ pub(crate) fn service_hash(
   Ok(hash)
 }
 
+pub(crate) fn runtime_spec(
+  row: &crate::world::ServiceRow,
+) -> Result<
+  std::borrow::Cow<'_, wharf_api_types::spec::ServiceSpec>,
+  ApiError,
+> {
+  if row.spec.host_groups().next().is_none() {
+    return Ok(std::borrow::Cow::Borrowed(&row.spec));
+  }
+  let mut spec = row.spec.clone();
+  for group in &mut spec.group_add {
+    if let Some(host) = group.strip_prefix("host:") {
+      let id = row.host_groups.get(host).ok_or_else(|| {
+        ApiError::new(
+          wharf_api_types::ErrorCode::PlanStale,
+          format!(
+            "服务器 {} 的宿主机组 {host} 尚未解析",
+            spec.server
+          ),
+        )
+        .suggest("wharf plan")
+      })?;
+      *group = id.to_string();
+    }
+  }
+  Ok(std::borrow::Cow::Owned(spec))
+}
+
+pub(crate) async fn resolve_host_groups(
+  state: &crate::state::AppState,
+  spec: &wharf_api_types::spec::ServiceSpec,
+  conn: u64,
+  cancel: &tokio_util::sync::CancellationToken,
+) -> Result<BTreeMap<String, u32>, ApiError> {
+  let groups = spec
+    .host_groups()
+    .collect::<std::collections::BTreeSet<_>>();
+  if groups.is_empty() {
+    return Ok(BTreeMap::new());
+  }
+  let actual: BTreeMap<String, u32> = state
+    .hub
+    .call_bound(
+      (&spec.server, conn),
+      wharf_api_types::agent::AgentOp::ReadHostGroups {
+        groups: groups.iter().map(|&group| group.into()).collect(),
+      },
+      std::time::Duration::from_secs(10),
+      None,
+      cancel,
+    )
+    .await
+    .map_err(|error| {
+      if error.code == ErrorCode::Conflict {
+        error.with_hint(format!(
+          "在服务器 {} 上用 getent group {} 查询第三列 GID，把 group_add 中的 host:<组名> 改为该数值（CLI 用 --rm-group 和 --add-group）",
+          spec.server,
+          groups.iter().copied().collect::<Vec<_>>().join(" "),
+        ))
+      } else {
+        error
+      }
+    })?;
+  if let Some(group) =
+    groups.iter().find(|&&group| !actual.contains_key(group))
+  {
+    return Err(
+      ApiError::invalid(format!(
+        "服务器 {} 上没有组 {group}",
+        spec.server
+      ))
+      .with_hint("确认设备组，或指定数值 GID"),
+    );
+  }
+  Ok(actual)
+}
+
 fn resolve_service(
   world: &World,
   net: &Net,
@@ -490,11 +567,20 @@ fn resolve_service(
   let row = world.services.get(name).ok_or_else(|| {
     ApiError::not_found(format!("服务 {name} 不存在"))
   })?;
+  let runtime = runtime_spec(row)?;
+  let component = crate::compose_env::component_settings(&runtime);
+  let (spec, substitutions) = crate::variables::prepare_spec(
+    world,
+    net,
+    name,
+    &component,
+    Some(secrets),
+  )?;
   let (resolved, mounts) = render::service_compose(
     name,
-    &row.spec,
+    &spec,
     &row.host_ports,
-    &net.bind_ips(&row.spec.server),
+    &net.bind_ips(&row.spec),
     Some(secrets),
   )?;
   let resolved = crate::service_monitor::heartbeat::compose(
@@ -506,6 +592,9 @@ fn resolve_service(
   let resolved = crate::refs::resolve_with_host_style(
     &resolved, name, world, net, legacy,
   )?;
+  let resolved = substitutions.finish_compose(resolved)?;
+  let resolved =
+    crate::workload_egress::render(name, &row.spec, net, resolved)?;
   let resolved = with_files(
     world,
     net,
@@ -526,6 +615,31 @@ fn resolve_service(
     }
     None => render::hash(&resolved),
   };
+  let hash = crate::project_files::fingerprint(
+    world, net, name, secrets, hash,
+  )?;
+  let owners: BTreeMap<_, _> = row
+    .spec
+    .volumes
+    .iter()
+    .filter_map(|v| v.owner.as_ref().map(|owner| (&v.name, owner)))
+    .collect();
+  let hash = if owners.is_empty() {
+    hash
+  } else {
+    let owners =
+      serde_json::to_string(&owners).map_err(crate::db::json_err)?;
+    render::hash(&format!("{hash}\n# wharf.volume_owners={owners}"))
+  };
+  let hash = if let Some(inputs) =
+    crate::compose_env::inputs(world, net, name, secrets)?
+  {
+    let inputs =
+      serde_json::to_string(&inputs).map_err(crate::db::json_err)?;
+    render::hash(&format!("{hash}\n# wharf.project_env={inputs}"))
+  } else {
+    hash
+  };
   Ok((resolved, hash))
 }
 
@@ -538,9 +652,19 @@ pub fn service_trial(
   let row = world.services.get(name).ok_or_else(|| {
     ApiError::not_found(format!("服务 {name} 不存在"))
   })?;
+  let runtime = runtime_spec(row)?;
+  let component = crate::compose_env::component_settings(&runtime);
+  let (spec, substitutions) = crate::variables::prepare_spec(
+    world,
+    net,
+    name,
+    &component,
+    Some(secrets),
+  )?;
   let (trial, mounts) =
-    render::trial_compose(name, &row.spec, Some(secrets))?;
+    render::trial_compose(name, &spec, Some(secrets))?;
   let trial = crate::refs::resolve(&trial, name, world, net)?;
+  let trial = substitutions.finish_compose(trial)?;
   with_files(world, net, name, &trial, mounts, Some(secrets), false)
 }
 
@@ -566,10 +690,18 @@ fn render_config_file_with_host_style(
   mounts: &mut BTreeSet<String>,
   legacy: bool,
 ) -> Result<String, ApiError> {
-  let content = render::file_content(&file.content, secrets, mounts)?;
-  crate::refs::resolve_with_host_style(
+  let (content, substitutions) = crate::variables::prepare_file(
+    world,
+    net,
+    name,
+    &file.content,
+    secrets,
+  )?;
+  let content = render::file_content(&content, secrets, mounts)?;
+  let content = crate::refs::resolve_with_host_style(
     &content, name, world, net, legacy,
-  )
+  )?;
+  Ok(substitutions.finish_text(&content, false))
 }
 
 /// 加上服务的配置文件，内容里的密钥和 `[[@服务]]` 先替换好。
@@ -582,7 +714,8 @@ pub(crate) fn with_files(
   secrets: Option<&BTreeMap<String, String>>,
   legacy: bool,
 ) -> Result<String, ApiError> {
-  let spec = &world.services[name].spec;
+  let row = &world.services[name];
+  let spec = &row.spec;
   let mut file_secrets = BTreeSet::new();
   let files = spec
     .files
@@ -600,7 +733,7 @@ pub(crate) fn with_files(
       Ok((f.path.clone(), content))
     })
     .collect::<Result<Vec<_>, ApiError>>()?;
-  render::add_files(
+  let compose = render::add_files(
     name,
     spec,
     compose,
@@ -608,7 +741,8 @@ pub(crate) fn with_files(
     file_secrets,
     mounts,
     secrets,
-  )
+  )?;
+  crate::project_files::compose(name, &row.instance_id, spec, compose)
 }
 
 pub fn service_template(
@@ -617,11 +751,16 @@ pub fn service_template(
   name: &str,
 ) -> Result<String, ApiError> {
   let row = &world.services[name];
+  let runtime = runtime_spec(row)?;
+  let component = crate::compose_env::component_settings(&runtime);
+  let (spec, substitutions) = crate::variables::prepare_spec(
+    world, net, name, &component, None,
+  )?;
   let (text, mounts) = render::service_compose(
     name,
-    &row.spec,
+    &spec,
     &row.host_ports,
-    &net.bind_ips(&row.spec.server),
+    &net.bind_ips(&row.spec),
     None,
   )?;
   let text = crate::service_monitor::heartbeat::compose(
@@ -631,6 +770,9 @@ pub fn service_template(
     false,
   )?;
   let text = crate::refs::resolve(&text, name, world, net)?;
+  let text = substitutions.finish_compose(text)?;
+  let text =
+    crate::workload_egress::render(name, &row.spec, net, text)?;
   with_files(world, net, name, &text, mounts, None, false)
 }
 
@@ -1119,6 +1261,8 @@ pub(crate) async fn read_legacy_acme_dns_hash(
     .call(
       server,
       AgentOp::TaskRun(TaskRunJob {
+        workload_no_proxy: None,
+        limits: None,
         name: "gateway-acme-hash".into(),
         how: TaskHow::Exec {
           cancellable: false,
@@ -1293,6 +1437,7 @@ mod tests {
     world.services.insert(
       "app".to_string(),
       ServiceRow {
+        host_groups: Default::default(),
         instance_id: "svc_fixture".into(),
         spec,
         host_ports: BTreeMap::from([("http".to_string(), host_port)]),
@@ -1551,6 +1696,8 @@ mod tests {
     w.services.get_mut("app").unwrap().spec.volumes.push(
       wharf_api_types::spec::VolumeSpec {
         from_service: None,
+        owner: None,
+        host_path: None,
         read_only: false,
         name: "data".into(),
         target: "/run/fixture/../wharf-secrets//PG_PASS".into(),
@@ -1576,6 +1723,10 @@ mod tests {
       path: "/etc/app/conf.toml".into(),
       content: "pass_file = \"[[FILE:DB_PASS]]\"\n".into(),
       raw: false,
+      init_only: false,
+      mode: None,
+      owner: None,
+      on_change: None,
     });
     let net = Net::default();
     let secrets =

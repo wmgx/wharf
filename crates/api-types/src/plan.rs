@@ -102,6 +102,7 @@ pub enum Impact {
   Overwrite,
   /// 对公网开放，且没开 auth。
   Public,
+  Privilege,
 }
 
 impl Impact {
@@ -113,6 +114,7 @@ impl Impact {
       Self::DataLoss => "丢数据",
       Self::Overwrite => "覆盖",
       Self::Public => "公开",
+      Self::Privilege => "提权",
     }
   }
 }
@@ -333,7 +335,10 @@ impl PlanItem {
     (self.stopping_service
       && (!self.dependents.is_empty() || self.hidden_dependents > 0))
       || self.impacts.iter().any(|i| match i {
-        Impact::DataLoss | Impact::Overwrite | Impact::Public => true,
+        Impact::DataLoss
+        | Impact::Overwrite
+        | Impact::Public
+        | Impact::Privilege => true,
         Impact::Remove => self.address.starts_with("service/"),
         _ => false,
       })

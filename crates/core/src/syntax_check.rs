@@ -219,6 +219,10 @@ mod tests {
       path: "/etc/app/config".into(),
       content: "[[S]]".into(),
       raw: false,
+      init_only: false,
+      mode: None,
+      owner: None,
+      on_change: None,
     };
     for (format, text, secret) in [
       ("JSON", "{\"key\":\"a\"b\"}", "a\"b"),

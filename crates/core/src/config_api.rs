@@ -275,6 +275,28 @@ fn parse_offset(value: &str) -> Result<FixedOffset, ApiError> {
   Ok(FixedOffset::east_opt(hours * 3600).unwrap())
 }
 
+pub(crate) fn container_timezone(
+  c: &Connection,
+) -> Result<String, ApiError> {
+  Ok(
+    db::setting(c, "core.timezone")?
+      .unwrap_or_else(|| "Asia/Shanghai".into()),
+  )
+}
+
+pub(crate) fn validate_container_timezone(
+  value: &str,
+) -> Result<(), ApiError> {
+  if matches!(value, "default" | "off") {
+    return Ok(());
+  }
+  parse_offset(value).map(|_| ()).map_err(|_| {
+    ApiError::invalid(format!("容器时区 {value} 不支持")).with_hint(
+      "填写 default、off 或受支持的时区，例如 Asia/Shanghai",
+    )
+  })
+}
+
 pub(crate) fn offset(
   c: &Connection,
 ) -> Result<FixedOffset, ApiError> {

@@ -41,6 +41,7 @@ mod host_shell;
 mod host_units;
 mod identity;
 mod images;
+mod live_limits;
 mod log_watches;
 mod metrics;
 mod mirror;
@@ -61,6 +62,7 @@ mod task;
 mod task_artifacts;
 mod terminal;
 mod upgrade;
+mod workload_egress;
 
 #[derive(Parser)]
 #[command(name = "wharf-agent", version, about = "Wharf agent")]

@@ -63,6 +63,9 @@ pub async fn refs(
 ) -> ApiResult<RefReport> {
   auth.require(Perm::Read)?;
   let (kind, name) = parse_target(&q.target)?;
+  if kind == "var" {
+    crate::variables::require_global(&auth)?;
+  }
   let snap = snapshot::load_inner(&s.db).await?;
   let tasks = s.db.call(|c| crate::tasks::load_rows(c)).await?;
   let mut report =
@@ -244,12 +247,7 @@ fn parse_target(
     "app_account" | "sso_account" => "app_account",
     "rt" | "route" => "route",
     "path" => "path",
-    "var" => {
-      return Err(
-        ApiError::invalid("公共变量（var）尚未实现")
-          .with_hint("使用 wharf refs secret/<名称> 查看密钥引用"),
-      );
-    }
+    "var" => "var",
     _ => return Err(ApiError::invalid("不支持的引用目标类型")),
   };
   Ok((kind, name))
@@ -422,6 +420,18 @@ fn collect_refs(
     }
     let spec = &row.spec;
     match kind {
+      "var" if scope.is_none() => {
+        for (field, text) in service_texts(spec) {
+          if placeholders(text).any(|p| {
+            wharf_api_types::references::parse_public_ref(p, false)
+              == Some(wharf_api_types::references::PublicRef::Var(
+                name,
+              ))
+          }) {
+            add("service", service, &field, "uses_var");
+          }
+        }
+      }
       "secret" | "app_account" => {
         for (field, text) in service_secret_texts(spec) {
           let used = placeholders(text)
@@ -434,6 +444,13 @@ fn collect_refs(
               if kind == "secret" {
                 p.name == name
                   && account_ref(p.name).is_none()
+                  && (field.starts_with("monitor.")
+                    || p.mode != SecretMode::Plain
+                    || wharf_api_types::references::parse_public_ref(
+                      p.name,
+                      spec.self_refs,
+                    )
+                    .is_none())
                   && (!field.starts_with("monitor.")
                     || p.mode != SecretMode::File)
               } else {
@@ -535,8 +552,20 @@ fn collect_refs(
       continue;
     }
     match kind {
-      "service" if matches!(&spec.how, TaskKind::Exec { service, .. } if service == name) => {
-        add("task", task, "exec.service", "runs_on")
+      "service" => {
+        if matches!(&spec.how, TaskKind::Exec { service, .. } if service == name)
+        {
+          add("task", task, "exec.service", "runs_on");
+        }
+        for (field, text) in task_texts(&spec.how) {
+          if placeholders(text)
+            .filter_map(parse_service_ref)
+            .any(|r| r.service == name)
+            && visible(scope, name)
+          {
+            add("task", task, &field, "service_ref");
+          }
+        }
       }
       "server" if scope.is_none() => match &spec.how {
         TaskKind::Exec { service, .. }
@@ -661,6 +690,7 @@ fn collect_refs(
   });
   let discoverable = scope.is_none() || !hits.is_empty();
   let exists = match kind {
+    "var" => scope.is_none() && world.vars.contains_key(name),
     "server" => discoverable && world.servers.contains_key(name),
     "service" => {
       (discoverable || visible(scope, name))

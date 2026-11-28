@@ -33,7 +33,7 @@ fn parse_rel(rel: &str) -> Result<Vec<CString>, ApiError> {
     .split('/')
     .filter(|seg| !seg.is_empty())
     .map(|seg| {
-      if matches!(seg, "." | "..") {
+      if matches!(seg, "." | ".." | ".wharf-init") {
         return Err(ApiError::invalid(format!(
           "路径不对：{trimmed}"
         )));
@@ -115,10 +115,10 @@ fn handle_in(
   let root = DirFd::open_service_root(base, service)?;
   let segs = parse_rel(path)?;
   if matches!(op, FilesOp::List { .. }) {
-    return to_value(
-      walk(root, &segs, path, false)?
-        .read_entries(Path::new(path))?,
-    );
+    let mut files = walk(root, &segs, path, false)?
+      .read_entries(Path::new(path))?;
+    files.retain(|entry| entry.name != ".wharf-init");
+    return to_value(files);
   }
   let (name, dirs) = segs
     .split_last()

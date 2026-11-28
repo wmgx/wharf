@@ -25,8 +25,12 @@ use crate::{
 
 mod gateway;
 mod gateway_probe;
+mod host_binds;
 mod link;
+mod named_networks;
+mod project_files;
 mod validation;
+mod volume_owner;
 use validation::{
   check_own_container, check_project, data_dir_relative,
 };
@@ -77,12 +81,15 @@ impl Ops {
     service: &str,
   ) -> Result<tokio::sync::OwnedMutexGuard<()>, ApiError> {
     check_project(service)?;
-    self.lock_for(service).try_lock_owned().map_err(|_| {
-      ApiError::new(
-        ErrorCode::Busy,
-        format!("服务 {service} 正在执行其他操作"),
-      )
-    })
+    let guard =
+      self.lock_for(service).try_lock_owned().map_err(|_| {
+        ApiError::new(
+          ErrorCode::Busy,
+          format!("服务 {service} 正在执行其他操作"),
+        )
+      })?;
+    crate::live_limits::require_clear(&self.docker, service)?;
+    Ok(guard)
   }
 
   pub(crate) async fn lock_data(
@@ -134,6 +141,15 @@ impl Ops {
       AgentOp::ResolveCommit(job) => to_value(
         crate::build::resolve_commit(&self.docker, &job, ctx).await?,
       ),
+      AgentOp::ReadHostGroups { groups } => {
+        to_value(read_host_groups(&groups).await?)
+      }
+      AgentOp::InspectLocalImages { images } => {
+        if images.iter().any(|image| image.starts_with('-')) {
+          return Err(ApiError::invalid("镜像引用不合法"));
+        }
+        to_value(self.docker.image_info(&images, ctx).await)
+      }
       AgentOp::ResolveImages(job) => {
         to_value(crate::registry::resolve(&job, ctx).await?)
       }
@@ -182,6 +198,43 @@ impl Ops {
         };
         to_value(self.link_apply(&apply, ctx).await?)
       }
+      AgentOp::ComposeEnvCheck {
+        project,
+        compose,
+        project_env,
+      } => {
+        check_project(&project)?;
+        self
+          .docker
+          .check_project_env(&project, &compose, &project_env, ctx)
+          .await?;
+        Ok(Value::Null)
+      }
+      AgentOp::WorkloadEgressStatus => {
+        Ok(Value::Bool(crate::egress::workload_ready()))
+      }
+      AgentOp::HostBindCheck { binds } => {
+        host_binds::validate_sources(&self.docker, &binds, ctx)
+          .await?;
+        Ok(Value::Null)
+      }
+      AgentOp::NamedNetworksCheck { networks } => {
+        named_networks::ensure(&self.docker, &networks, false, ctx)
+          .await?;
+        Ok(Value::Null)
+      }
+      AgentOp::ProjectCheckLimits(job) => {
+        check_project(&job.project)?;
+        let _guard = self.lock_data(&job.project, ctx).await?;
+        crate::live_limits::check(&self.docker, &job, ctx).await?;
+        Ok(Value::Null)
+      }
+      AgentOp::ProjectUpdateLimits(job) => {
+        check_project(&job.project)?;
+        let _guard = self.lock_data(&job.project, ctx).await?;
+        crate::live_limits::update(&self.docker, &job, ctx).await?;
+        Ok(Value::Null)
+      }
       AgentOp::ProjectUp(up) => {
         check_project(&up.project)?;
         let lock = self.lock_for(&up.project);
@@ -192,6 +245,7 @@ impl Ops {
         check_project(&project)?;
         let lock = self.lock_for(&project);
         let _guard = lock.lock().await;
+        crate::live_limits::require_clear(&self.docker, &project)?;
         if !purge {
           crate::prev_logs::capture(
             &self.docker,
@@ -287,6 +341,7 @@ impl Ops {
         check_project(&project)?;
         let lock = self.lock_for(&project);
         let _guard = lock.lock().await;
+        crate::live_limits::require_clear(&self.docker, &project)?;
         to_value(
           self
             .docker
@@ -834,6 +889,7 @@ impl Ops {
     check_project(project)?;
     let lock = self.lock_for(project);
     let _guard = lock.lock().await;
+    crate::live_limits::require_clear(&self.docker, project)?;
     to_value(self.docker.stop_start(project, start, ctx).await?)
   }
 
@@ -845,7 +901,16 @@ impl Ops {
   ) -> Result<Vec<String>, ApiError> {
     let images = self
       .docker
-      .images_for_compose(&up.project, &up.compose, ctx)
+      .images_for_compose(
+        &up.project,
+        &up.compose,
+        up.project_env
+          .as_ref()
+          .map(crate::docker::dotenv)
+          .transpose()?
+          .as_deref(),
+        ctx,
+      )
       .await?;
     for image in &images {
       if up.expected_images.contains_key(image) {
@@ -882,6 +947,73 @@ impl Ops {
     Ok(images)
   }
 
+  async fn verify_local_images(
+    &self,
+    up: &ProjectUp,
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    if up.local_images.keys().any(|image| image.starts_with('-')) {
+      return Err(ApiError::invalid("镜像引用不合法"));
+    }
+    let refs = up.local_images.keys().cloned().collect::<Vec<_>>();
+    for info in self.docker.image_info(&refs, ctx).await {
+      if up.local_images.get(&info.image) != Some(&info.id) {
+        return Err(
+          ApiError::new(
+            ErrorCode::PlanStale,
+            format!("镜像 {} 自 plan 后已变化", info.image),
+          )
+          .suggest("wharf plan"),
+        );
+      }
+    }
+    Ok(())
+  }
+
+  async fn pull_explicit(
+    &self,
+    up: &ProjectUp,
+    mode: wharf_api_types::spec::ImagePullMode,
+    ctx: &Ctx,
+    warnings: &mut Vec<String>,
+  ) -> Result<Vec<String>, ApiError> {
+    use wharf_api_types::spec::ImagePullMode;
+    let doc = wharf_api_types::compose::parse_compose(&up.compose)?;
+    let images =
+      wharf_api_types::compose::static_project_images(&doc)?;
+    self.verify_local_images(up, ctx).await?;
+    for image in &images {
+      if up.local_images.contains_key(image) {
+        continue;
+      }
+      let digest = up
+        .pins
+        .get(image)
+        .filter(|_| mode != ImagePullMode::Never)
+        .ok_or_else(|| {
+          ApiError::new(
+            ErrorCode::PlanStale,
+            format!("镜像 {image} 缺少计划版本"),
+          )
+          .suggest("wharf plan")
+        })?;
+      if mode == ImagePullMode::IfMissing
+        && self.docker.has_digest(image, digest, ctx).await
+      {
+        continue;
+      }
+      if image.contains('@') {
+        self.docker.pull(image, &up.pull, ctx, warnings).await?;
+      } else {
+        self
+          .docker
+          .pull_pinned(image, digest, &up.pull, ctx)
+          .await?;
+      }
+    }
+    Ok(images)
+  }
+
   async fn up_with_crash_logs(
     &self,
     project: &str,
@@ -912,7 +1044,6 @@ impl Ops {
     up: &ProjectUp,
     images: &[String],
     warnings: Vec<String>,
-    previous: Option<Previous>,
     previous_grace: u64,
     ctx: &Ctx,
   ) -> Result<ProjectUpResult, ApiError> {
@@ -923,16 +1054,52 @@ impl Ops {
       ctx,
     )
     .await;
-    let result = async {
+    let state = async {
       self.docker.write_compose(&up.project, &up.compose)?;
+      self.docker.write_project_env(
+        &up.project,
+        up.project_env
+          .as_ref()
+          .map(crate::docker::dotenv)
+          .transpose()?
+          .as_deref(),
+      )?;
+      let verify_files =
+        up.project_files.iter().any(|f| f.directory.is_none());
       self
         .up_with_crash_logs(
           &up.project,
-          up.no_start,
+          up.no_start
+            || verify_files
+            || up.workload_egress
+            || !up.host_binds.is_empty(),
           previous_grace,
           ctx,
         )
         .await?;
+      if !up.host_binds.is_empty() {
+        host_binds::verify_mounted(
+          &self.docker,
+          &up.project,
+          &up.host_binds,
+          ctx,
+        )
+        .await?;
+      }
+      if verify_files {
+        project_files::verify_metadata(&self.docker, up, ctx).await?;
+      }
+      if up.workload_egress {
+        crate::workload_egress::verify_service(&self.docker, up, ctx)
+          .await?;
+      }
+      if !up.no_start
+        && (verify_files
+          || up.workload_egress
+          || !up.host_binds.is_empty())
+      {
+        self.docker.stop_start(&up.project, true, ctx).await?;
+      }
       let state = if up.no_start {
         let mut state =
           self.docker.one_status(&up.project, ctx).await?;
@@ -969,36 +1136,7 @@ impl Ops {
       self.docker.write_hash(&up.project, &up.hash)?;
       Ok::<_, ApiError>(state)
     }
-    .await;
-    let state = match (result, previous) {
-      (Ok(state), _) => state,
-      (Err(error), None) => return Err(error),
-      (Err(error), Some(prev)) => {
-        let recover = ctx.detached_with_progress();
-        crate::prev_logs::capture(
-          &self.docker,
-          &up.project,
-          "rollback",
-          &recover,
-        )
-        .await;
-        ctx.say(format!("{}，换回上一版", error.message));
-        return Err(
-          self
-            .restore_project(
-              &up.project,
-              &prev,
-              &recover,
-              error,
-              "上一版",
-              wharf_api_types::compose::parse_compose_max_grace_secs(
-                &up.compose,
-              ),
-            )
-            .await,
-        );
-      }
-    };
+    .await?;
     Ok(ProjectUpResult {
       containers: state.containers,
       images: self.docker.image_info(images, ctx).await,
@@ -1043,6 +1181,22 @@ impl Ops {
     up: &ProjectUp,
     ctx: &Ctx,
   ) -> Result<ProjectUpResult, ApiError> {
+    crate::live_limits::require_clear(&self.docker, &up.project)?;
+    let mut warnings = Vec::new();
+    if up.image_pull_mode.is_some() {
+      self.verify_local_images(up, ctx).await?;
+    }
+    if up.workload_egress {
+      crate::workload_egress::require_running()?;
+    }
+    if let Some(from) = &up.refresh_files_from {
+      return project_files::refresh(&self.docker, up, from, ctx)
+        .await;
+    }
+    host_binds::validate_sources(&self.docker, &up.host_binds, ctx)
+      .await?;
+    named_networks::ensure(&self.docker, &up.networks, true, ctx)
+      .await?;
     if up.trial.is_some()
       && let Err(e) = self
         .docker
@@ -1054,7 +1208,6 @@ impl Ops {
     {
       ctx.say(format!("清理上次试跑失败：{}", e.message));
     }
-    let mut warnings = Vec::new();
     let mut previous = if up.rollback {
       self
         .previous_for_rollback(&up.project, ctx, &mut warnings)
@@ -1090,7 +1243,13 @@ impl Ops {
       BTreeMap::new()
     };
     let prepared = async {
-      let images = self.pull_all(up, ctx, &mut warnings).await?;
+      let images = match up.image_pull_mode {
+        Some(mode) => {
+          self.pull_explicit(up, mode, ctx, &mut warnings).await?
+        }
+        None => self.pull_all(up, ctx, &mut warnings).await?,
+      };
+      volume_owner::prepare(&self.docker, up, ctx).await?;
       if up.trial.is_some() {
         self.trial_run(up, &mut warnings, ctx).await?;
       }
@@ -1143,8 +1302,17 @@ impl Ops {
         self.restore_before_up(previous.as_ref(), ctx, error).await,
       );
     }
+    let mut files =
+      project_files::prepare(&self.docker, up, ctx).await?;
     if let Some(init) = &up.init {
+      let old_env = self.docker.read_project_env(&up.project)?;
       self.docker.write_compose(&up.project, &up.compose)?;
+      let env = up
+        .project_env
+        .as_ref()
+        .map(crate::docker::dotenv)
+        .transpose()?;
+      self.docker.write_project_env(&up.project, env.as_deref())?;
       if let Err(error) =
         self.docker.run_init(&up.project, init, ctx).await
       {
@@ -1165,6 +1333,12 @@ impl Ops {
           ctx.say(format!("恢复原 compose 失败：{}", back.message));
         }
         if let Err(back) = self
+          .docker
+          .write_project_env(&up.project, old_env.as_deref())
+        {
+          ctx.say(format!("恢复原项目变量失败：{}", back.message));
+        }
+        if let Err(back) = self
           .restore_images(
             &saved_images,
             &ctx.detached_with_progress(),
@@ -1183,29 +1357,84 @@ impl Ops {
       _ => vec![],
     };
     match self
-      .finish_up(up, &images, warnings, previous, previous_grace, ctx)
+      .finish_up(up, &images, warnings, previous_grace, ctx)
       .await
     {
-      Ok(result) => Ok(ProjectUpResult { retired, ..result }),
-      Err(e) if !retired.is_empty() => {
-        ctx.say("启动失败，恢复原来的容器");
-        let recover = ctx.detached_with_progress();
-        if let Err(down) =
-          self.docker.down(&up.project, false, &recover).await
-        {
-          recover.say(format!("清理新容器失败：{}", down.message));
-        }
-        if let Err(back) =
-          crate::adopt::unretire(&self.docker, &retired, &recover)
-            .await
-        {
-          ctx
-            .say(format!("恢复失败，需要手动处理：{}", back.message));
-        }
-        Err(e)
+      Ok(result) => {
+        files.commit();
+        Ok(ProjectUpResult { retired, ..result })
       }
-      Err(e) => Err(e),
+      Err(mut error) => {
+        let recover = ctx.detached_with_progress();
+        error = self
+          .restore_deployment(
+            up,
+            previous.as_ref(),
+            &mut files,
+            &recover,
+            error,
+          )
+          .await;
+        if !retired.is_empty() {
+          ctx.say("启动失败，恢复原来的容器");
+          if let Err(down) =
+            self.docker.down(&up.project, false, &recover).await
+          {
+            recover.say(format!("清理新容器失败：{}", down.message));
+          }
+          if let Err(back) =
+            crate::adopt::unretire(&self.docker, &retired, &recover)
+              .await
+          {
+            ctx.say(format!(
+              "恢复失败，需要手动处理：{}",
+              back.message
+            ));
+          }
+        }
+        Err(error)
+      }
     }
+  }
+
+  async fn restore_deployment(
+    &self,
+    up: &ProjectUp,
+    previous: Option<&Previous>,
+    files: &mut project_files::Writes,
+    ctx: &Ctx,
+    error: ApiError,
+  ) -> ApiError {
+    if !files.rollback() {
+      return recovery_error(
+        error,
+        ApiError::internal("恢复热重载配置文件失败"),
+        "上一版",
+      );
+    }
+    let Some(previous) = previous else {
+      return error;
+    };
+    crate::prev_logs::capture(
+      &self.docker,
+      &up.project,
+      "rollback",
+      ctx,
+    )
+    .await;
+    ctx.say(format!("{}，换回上一版", error.message));
+    self
+      .restore_project(
+        &up.project,
+        previous,
+        ctx,
+        error,
+        "上一版",
+        wharf_api_types::compose::parse_compose_max_grace_secs(
+          &up.compose,
+        ),
+      )
+      .await
   }
 
   async fn restore_images(
@@ -1270,6 +1499,10 @@ impl Ops {
     let restored = async {
       self.restore_images(&previous.images, ctx).await?;
       self.docker.write_compose(project, &previous.compose)?;
+      self.docker.write_project_env(
+        project,
+        previous.project_env.as_deref(),
+      )?;
       self.docker.write_hash(project, &previous.hash)?;
       self.docker.up(project, false, previous_grace, ctx).await?;
       let status = self.docker.one_status(project, ctx).await?;
@@ -1367,6 +1600,46 @@ fn recovery_error(
     format!("{}；恢复{target}失败：{}", error.message, back.message),
   )
   .with_hint("请检查容器和镜像，手动恢复上一版")
+}
+
+async fn read_host_groups(
+  groups: &[String],
+) -> Result<BTreeMap<String, u32>, ApiError> {
+  if groups.iter().any(|group| {
+    !wharf_api_types::spec::HOST_GROUPS.contains(&group.as_str())
+  }) {
+    return Err(ApiError::invalid("请求了不支持的宿主机组"));
+  }
+  if Path::new("/.dockerenv").exists()
+    || Path::new("/run/.containerenv").exists()
+  {
+    return Err(
+      ApiError::new(
+        ErrorCode::Conflict,
+        "容器化 agent 没有宿主机组的只读通道",
+      )
+      .with_hint("指定数值 GID，或使用直接运行在宿主机上的 agent"),
+    );
+  }
+  let contents =
+    tokio::fs::read_to_string("/etc/group").await.map_err(|_| {
+      ApiError::new(ErrorCode::Conflict, "agent 无法读取宿主机组")
+        .with_hint("升级 agent 或确认已挂载宿主机组数据库")
+    })?;
+  Ok(
+    contents
+      .lines()
+      .filter_map(|line| {
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        if !groups.iter().any(|group| group == name) {
+          return None;
+        }
+        let gid = fields.nth(1)?.parse::<u32>().ok()?;
+        Some((name.into(), gid))
+      })
+      .collect(),
+  )
 }
 
 fn to_value<T: serde::Serialize>(v: T) -> Result<Value, ApiError> {
@@ -1471,7 +1744,7 @@ esac
     })).unwrap();
     docker.write_compose("app", &up.compose).unwrap();
     let result = ops
-      .finish_up(&up, &[], vec![], None, 10, &Ctx::detached())
+      .finish_up(&up, &[], vec![], 10, &Ctx::detached())
       .await
       .unwrap();
     assert_eq!(
@@ -1525,10 +1798,8 @@ esac
       })),
       ..Ctx::detached()
     };
-    let error = ops
-      .finish_up(&up, &[], vec![], None, 10, &ctx)
-      .await
-      .unwrap_err();
+    let error =
+      ops.finish_up(&up, &[], vec![], 10, &ctx).await.unwrap_err();
     assert!(error.message.contains("unhealthy-dependency"));
     assert!(
       lines
@@ -1622,6 +1893,50 @@ esac
       let current = docker.previous("app").unwrap();
       assert_eq!((&*current.compose, &*current.hash), ("NEW", "new"));
     }
+  }
+
+  #[tokio::test]
+  async fn never_uses_only_the_planned_local_image() {
+    let (dir, docker) = crate::docker::fake_docker(
+      r#"
+case "$1:$2" in
+  image:inspect) echo 'fixture-id|[]';;
+  *) exit 2;;
+esac
+"#,
+    );
+    let ops = Ops::new(
+      docker.clone(),
+      Reporter::new(docker.clone(), None),
+      String::new(),
+      HostShell::prepare(docker.clone(), "s1".into()).await,
+      dir.path().into(),
+    );
+    let mut up: ProjectUp = serde_json::from_value(serde_json::json!({
+      "project":"app", "compose":"services: {app: {image: fixture:1}}", "hash":"new",
+      "image_pull_mode":"never", "local_images":{"fixture:1":"fixture-id"},
+      "pull":{"mirrors":{},"mirrors_only":false,"attempt_timeout_secs":1}
+    })).unwrap();
+    let ctx = Ctx::detached();
+    let mode = wharf_api_types::spec::ImagePullMode::Never;
+    assert_eq!(
+      ops
+        .pull_explicit(&up, mode, &ctx, &mut Vec::new())
+        .await
+        .unwrap(),
+      ["fixture:1"]
+    );
+    up.local_images
+      .insert("fixture:1".into(), "previous-id".into());
+    assert_eq!(
+      ops
+        .pull_explicit(&up, mode, &ctx, &mut Vec::new())
+        .await
+        .unwrap_err()
+        .code,
+      ErrorCode::PlanStale
+    );
+    assert!(!docker.project_dir("app").exists());
   }
 
   #[tokio::test]

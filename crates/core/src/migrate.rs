@@ -787,9 +787,11 @@ pub(crate) mod tests {
     assert_eq!(error.code, ErrorCode::AgentOffline);
     assert!(error.message.contains("s1"));
     let step = crate::planner::Step::ServiceUp {
+      images: Default::default(),
       service: "notes".into(),
       instance_id: None,
       expect: None,
+      refresh_files_from: None,
     };
     let error =
       crate::apply::run_step(&state, "r1", &step, progress, &cancel)

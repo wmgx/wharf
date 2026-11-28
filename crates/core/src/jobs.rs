@@ -427,6 +427,7 @@ pub(crate) async fn cleanup_data(
 fn backups_skips_busy_core_offline_and_undeployed() {
   let mut snap = snapshot::Snapshot::default();
   snap.world.services.insert("app".into(), crate::world::ServiceRow {
+    host_groups: Default::default(),
     instance_id: "svc_fixture".into(),
     spec: serde_json::from_value(serde_json::json!({
       "server":"s1", "source":{"image":"fixture:1"}, "backup":{"to":"s2"}, "stopped":true

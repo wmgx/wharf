@@ -38,7 +38,7 @@ pub fn has_relative_bind(spec: &ServiceSpec) -> bool {
 }
 
 pub fn mounts(name: &str, spec: &ServiceSpec) -> Vec<DataMount> {
-  match &spec.source {
+  let mut mounts: Vec<DataMount> = match &spec.source {
     Source::Image(_) | Source::Build(_) => spec
       .volumes
       .iter()
@@ -47,7 +47,9 @@ pub fn mounts(name: &str, spec: &ServiceSpec) -> Vec<DataMount> {
           from_service: v.from_service.clone(),
           read_only: v.read_only,
           resolved: None,
-          kind: if v.from_service.is_some() {
+          kind: if v.host_path.is_some() {
+            DataKind::ExternalDir
+          } else if v.from_service.is_some() {
             DataKind::Shared
           } else {
             DataKind::Managed
@@ -61,7 +63,26 @@ pub fn mounts(name: &str, spec: &ServiceSpec) -> Vec<DataMount> {
     Source::Compose { content, .. } => {
       compose_mounts(name, content.as_deref().unwrap_or_default())
     }
+  };
+  let mut directories = std::collections::BTreeSet::new();
+  for file in spec.files.iter().filter(|file| file.init_only) {
+    let target = std::path::Path::new(&file.path)
+      .parent()
+      .map(|p| p.display().to_string())
+      .unwrap_or_default();
+    if directories.insert(target.clone()) {
+      mounts.push(DataMount {
+        from_service: None,
+        read_only: false,
+        kind: DataKind::Managed,
+        source: format!("/srv/{name}/.wharf-init"),
+        target,
+        container: spec.container.clone(),
+        resolved: None,
+      });
+    }
   }
+  mounts
 }
 
 pub(crate) fn validate_extra_logs(

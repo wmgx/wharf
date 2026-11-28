@@ -200,6 +200,19 @@ fn merge_settings(
   spec.backup.clone_from(&current.backup);
   spec.stopped = current.stopped;
   spec.start_timeout_secs = current.start_timeout_secs;
+  spec.lan = current.lan;
+  spec.extra_hosts.clone_from(&current.extra_hosts);
+  spec.networks.clone_from(&current.networks);
+  spec.user.clone_from(&current.user);
+  spec.use_egress = current.use_egress;
+  spec.volumes.retain(|v| v.host_path.is_none());
+  spec.volumes.extend(
+    current
+      .volumes
+      .iter()
+      .filter(|v| v.host_path.is_some())
+      .cloned(),
+  );
   spec.extra_logs.clone_from(&current.extra_logs);
   spec.wait_for.clone_from(&current.wait_for);
   spec.wait_for_timeout_secs = current.wait_for_timeout_secs;
@@ -209,6 +222,34 @@ fn merge_settings(
   spec.init_cmd.clone_from(&current.init_cmd);
   spec.init_timeout_secs = current.init_timeout_secs;
   spec.limits.clone_from(&current.limits);
+  let target_is_compose =
+    matches!(spec.source, Source::Compose { .. });
+  let current_is_compose =
+    matches!(current.source, Source::Compose { .. });
+  if target_is_compose && current_is_compose {
+    let components =
+      crate::render::service_expected_components("app", &spec);
+    spec.container_limits = current
+      .container_limits
+      .iter()
+      .filter(|(name, _)| components.contains(*name))
+      .map(|(name, limits)| (name.clone(), limits.clone()))
+      .collect();
+  } else {
+    spec.container_limits.clear();
+  }
+  if !target_is_compose && !current_is_compose {
+    spec.timezone.clone_from(&current.timezone);
+    spec.log_max = current.log_max;
+  } else if !target_is_compose {
+    spec.timezone = None;
+    warnings.push("已跳过当前 Compose 的时区设置".into());
+  }
+  if matches!(spec.source, Source::Build(_)) {
+    spec.pull_policy = None;
+  } else {
+    spec.pull_policy = current.pull_policy;
+  }
   spec.log_alerts.clone_from(&current.log_alerts);
   spec.update_ignore.clone_from(&current.update_ignore);
   if matches!(spec.source, Source::Build(_)) {

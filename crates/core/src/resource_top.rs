@@ -10,7 +10,8 @@ use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{AgentOp, AgentReport, LocalImage, ProjectMetrics},
   resources::{
-    AgentUsage, ImageRow, ImagesView, UsageKind, UsageRow, percent,
+    AgentUsage, ComponentUsage, ImageRow, ImagesView, UsageKind,
+    UsageRow, percent,
   },
   spec::ServerSettings,
   view::Perm,
@@ -26,6 +27,9 @@ const IMAGE_TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Deserialize)]
 pub struct Filter {
   server: Option<String>,
+  service: Option<String>,
+  #[serde(default)]
+  containers: bool,
 }
 
 pub fn agent_usage(
@@ -57,6 +61,19 @@ pub async fn usage(
   let snap = snapshot::load(&state.db).await?;
   let servers = servers(&snap, &filter)?;
   let mut rows = Vec::new();
+  if filter.containers && filter.service.is_none() {
+    return Err(
+      ApiError::invalid("--containers 需要 --service").into(),
+    );
+  }
+  if let Some(service) = &filter.service {
+    crate::token_scope::require_service(&auth, service)?;
+    if !snap.world.services.contains_key(service) {
+      return Err(
+        ApiError::not_found(format!("服务 {service} 不存在")).into(),
+      );
+    }
+  }
   for server in servers {
     let report = snap.agent(server).and_then(|a| a.report.as_ref());
     let sample = report.and_then(|r| r.metrics.as_deref());
@@ -65,15 +82,27 @@ pub async fn usage(
     for (name, row) in
       snap.world.services.iter().filter(|(name, _)| {
         snapshot::service_runtime_server(&snap, name) == Some(server)
+          && filter
+            .service
+            .as_ref()
+            .is_none_or(|selected| selected == *name)
       })
     {
-      rows.push(project_row(
+      let mut usage = project_row(
         name,
         UsageKind::Service,
         server,
         project(name),
         service_limit(&row.spec),
-      ));
+      );
+      if filter.containers {
+        usage.components =
+          component_usage(&state, row, server).await?;
+      }
+      rows.push(usage);
+    }
+    if filter.service.is_some() {
+      continue;
     }
     for (name, _) in snap
       .world
@@ -93,6 +122,7 @@ pub async fn usage(
       let agent =
         agent_usage(&snap.world.servers[server].settings, report);
       rows.push(UsageRow {
+        components: Vec::new(),
         name: "wharf-agent".into(),
         kind: UsageKind::Agent,
         server: server.into(),
@@ -113,6 +143,92 @@ pub async fn usage(
   Ok(Json(rows))
 }
 
+async fn component_usage(
+  state: &AppState,
+  row: &crate::world::ServiceRow,
+  server: &str,
+) -> Result<Vec<ComponentUsage>, ApiError> {
+  let wharf_api_types::spec::Source::Compose {
+    content: Some(content),
+    ..
+  } = &row.spec.source
+  else {
+    return Ok(Vec::new());
+  };
+  let doc = crate::render::parse_compose(content)?;
+  let Some(services) = doc["services"].as_mapping() else {
+    return Ok(Vec::new());
+  };
+  let mut entries = Vec::new();
+  for (key, body) in services {
+    let Some(name) = key.as_str() else { continue };
+    let legacy = row
+      .spec
+      .container
+      .as_deref()
+      .map_or(services.len() == 1, |target| target == name);
+    let limits = row.spec.container_limits.get(name).or_else(|| {
+      legacy.then_some(row.spec.limits.as_ref()).flatten()
+    });
+    let deploy = &body["deploy"]["resources"]["limits"];
+    let cpu = deploy
+      .get("cpus")
+      .or_else(|| body.get("cpus"))
+      .and_then(|value| {
+        value.as_f64().or_else(|| value.as_str()?.parse().ok())
+      })
+      .filter(|value| value.is_finite() && *value > 0.0)
+      .map(|value| (value * 1000.0).round() as u32);
+    let pids = deploy
+      .get("pids")
+      .or_else(|| body.get("pids_limit"))
+      .and_then(|value| {
+        value
+          .as_u64()
+          .and_then(|n| u32::try_from(n).ok())
+          .or_else(|| value.as_str()?.parse().ok())
+      })
+      .filter(|&n| n > 0);
+    entries.push((
+      crate::metrics::component_subject(
+        &row.instance_id,
+        server,
+        name,
+      ),
+      ComponentUsage {
+        name: name.into(),
+        cpu_limit_milli: limits
+          .and_then(|limit| limit.cpu_milli)
+          .or(cpu),
+        memory_limit: crate::lint::effective_component_memory(
+          &row.spec,
+          key,
+          body,
+          services.len() == 1,
+        )
+        .filter(|&mb| mb > 0.0)
+        .map(|mb| (mb * (1 << 20) as f64) as u64),
+        pids_limit: limits.and_then(|limit| limit.pids).or(pids),
+        cpu_peak: None,
+        memory_peak: None,
+      },
+    ));
+  }
+  state
+    .db
+    .call(move |c| {
+      entries
+        .into_iter()
+        .map(|(subject, mut row)| {
+          (row.cpu_peak, row.memory_peak) =
+            crate::metrics::component_peaks(c, &subject)?;
+          Ok(row)
+        })
+        .collect()
+    })
+    .await
+}
+
 fn project_row(
   name: &str,
   kind: UsageKind,
@@ -121,6 +237,7 @@ fn project_row(
   limit: Option<u64>,
 ) -> UsageRow {
   UsageRow {
+    components: Vec::new(),
     name: name.into(),
     kind,
     server: server.into(),

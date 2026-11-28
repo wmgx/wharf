@@ -592,6 +592,10 @@ pub struct InitRun {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectUp {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub image_pull_mode: Option<crate::spec::ImagePullMode>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub local_images: BTreeMap<String, String>,
   pub project: String,
   /// 已经替换过密钥的 compose 内容，agent 以 0600 写入磁盘。
   pub compose: String,
@@ -625,6 +629,45 @@ pub struct ProjectUp {
   pub no_start: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub init: Option<InitRun>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub networks: BTreeMap<String, crate::spec::NetworkAttachment>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub project_env: Option<BTreeMap<String, String>>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub host_binds: Vec<crate::spec::VolumeSpec>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub volume_owners: BTreeMap<String, String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub project_files: Vec<ProjectFile>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub refresh_files_from: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub workload_egress: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectFile {
+  pub spec: crate::spec::FileSpec,
+  pub component: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub directory: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContainerLimitsDelta {
+  pub before: crate::spec::Limits,
+  pub after: crate::spec::Limits,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectLimitsJob {
+  pub project: String,
+  pub before_hash: String,
+  pub hash: String,
+  #[serde(default, skip_serializing_if = "String::is_empty")]
+  pub compose: String,
+  pub changes: BTreeMap<String, ContainerLimitsDelta>,
+  pub images: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -925,6 +968,8 @@ pub const TASK_DATA_PREFIX: &str = "wharf-task-";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRunJob {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub limits: Option<crate::spec::Limits>,
   /// 任务名，一次性容器叫 `wharf-task-<任务名>`。
   pub name: String,
   pub how: TaskHow,
@@ -945,6 +990,8 @@ pub struct TaskRunJob {
   pub artifacts_keep: Option<u32>,
   pub timeout_secs: u64,
   pub pull: PullPolicy,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub workload_no_proxy: Option<String>,
 }
 
 pub fn sso_runner_name(

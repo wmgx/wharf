@@ -34,6 +34,11 @@ fn old_hello_has_no_host_shell_capability() {
     gateway_extra_files,
     backup_isolation,
     safe_delete,
+    named_networks_v1,
+    compose_env_v2,
+    safe_host_bind_v2,
+    project_files_v2,
+    workload_egress_v1,
     data_cleanup,
     exec_v2,
     shared_volumes,
@@ -65,6 +70,11 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!gateway_extra_files);
   assert!(!backup_isolation);
   assert!(!safe_delete);
+  assert!(!named_networks_v1);
+  assert!(!compose_env_v2);
+  assert!(!safe_host_bind_v2);
+  assert!(!project_files_v2);
+  assert!(!workload_egress_v1);
   assert!(!data_cleanup);
   assert!(!exec_v2);
   assert!(!shared_volumes);
@@ -122,6 +132,14 @@ fn old_core_ignores_new_hello_capability() {
     core_probe: true,
     backup_isolation: true,
     safe_delete: true,
+    named_networks_v1: true,
+    compose_env_v2: true,
+    safe_host_bind_v2: true,
+    project_files_v2: true,
+    workload_egress_v1: true,
+    service_runtime_opts: true,
+    live_limits_update: true,
+    task_resource_limits: true,
     data_cleanup: false,
     exec_v2: true,
     shared_volumes: true,
@@ -163,6 +181,14 @@ impl Hub {
       false,
       handle,
     );
+  }
+
+  pub(crate) fn disable_mock_runtime_options(&self, server: &str) {
+    let mut conns = lock(&self.conns);
+    let conn = conns.get_mut(server).unwrap();
+    conn.service_runtime_opts = false;
+    conn.live_limits_update = false;
+    conn.task_resource_limits = false;
   }
 
   pub(crate) fn enable_mock_container_diagnosis(&self, server: &str) {
@@ -387,6 +413,14 @@ impl Hub {
         gateway_extra_files,
         backup_isolation,
         safe_delete: false,
+        named_networks_v1: false,
+        compose_env_v2: false,
+        safe_host_bind_v2: false,
+        project_files_v2: false,
+        workload_egress_v1: false,
+        service_runtime_opts: true,
+        live_limits_update: true,
+        task_resource_limits: true,
         data_cleanup: false,
         exec_v2: false,
         shared_volumes: false,
@@ -541,6 +575,14 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     gateway_extra_files: false,
     backup_isolation: false,
     safe_delete: false,
+    named_networks_v1: false,
+    compose_env_v2: false,
+    safe_host_bind_v2: false,
+    project_files_v2: false,
+    workload_egress_v1: false,
+    service_runtime_opts: true,
+    live_limits_update: true,
+    task_resource_limits: true,
     data_cleanup: false,
     exec_v2: false,
     shared_volumes: false,
@@ -621,6 +663,14 @@ fn probe_connection(
     gateway_extra_files: false,
     backup_isolation: false,
     safe_delete: false,
+    named_networks_v1: false,
+    compose_env_v2: false,
+    safe_host_bind_v2: false,
+    project_files_v2: false,
+    workload_egress_v1: false,
+    service_runtime_opts: true,
+    live_limits_update: true,
+    task_resource_limits: true,
     data_cleanup: false,
     exec_v2: false,
     shared_volumes: false,

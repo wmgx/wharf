@@ -28,6 +28,9 @@ pub(super) fn encode(
 
 pub(super) fn step_services(step: &Step) -> Vec<String> {
   match step {
+    Step::ServiceLimitsUpdate { job, .. } => {
+      vec![job.project.clone()]
+    }
     Step::Backup { service, .. }
     | Step::BackupMove {
       service,
@@ -37,6 +40,7 @@ pub(super) fn step_services(step: &Step) -> Vec<String> {
     | Step::Restore { service, .. }
     | Step::Rebuild { service }
     | Step::ServiceRestart { service, .. }
+    | Step::ServiceStart { service, .. }
     | Step::ServiceStop { service }
     | Step::ServiceUp { service, .. }
     | Step::ServiceDown { service, .. }

@@ -110,6 +110,9 @@ fn scan(
         .push(format!("{prefix}[非 UTF-8 文件名]"));
       continue;
     };
+    if segment == ".wharf-init" {
+      continue;
+    }
     let path = format!("{prefix}{segment}");
     if excluded(&path, &req.excludes) {
       out.excluded.push(path);

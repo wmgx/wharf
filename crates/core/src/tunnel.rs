@@ -188,6 +188,8 @@ pub async fn sync(
     .call(
       server,
       AgentOp::ProjectUp(ProjectUp {
+        image_pull_mode: None,
+        local_images: Default::default(),
         project: gateway_project(gateway),
         compose,
         hash: r.compose_hash.clone(),
@@ -202,6 +204,13 @@ pub async fn sync(
         start_timeout_secs: None,
         readiness: None,
         init: None,
+        networks: Default::default(),
+        project_env: None,
+        host_binds: Vec::new(),
+        volume_owners: Default::default(),
+        project_files: Vec::new(),
+        workload_egress: false,
+        refresh_files_from: None,
       }),
       CONNECTOR_TIMEOUT,
       Some(progress.clone()),

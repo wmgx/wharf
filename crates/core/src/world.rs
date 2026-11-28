@@ -29,6 +29,7 @@ pub const KIND_GATEWAY: &str = "gateway";
 pub const KIND_ROUTE: &str = "route";
 pub const KIND_EDGE: &str = "edge";
 pub const KIND_BOOKMARK: &str = "bookmark";
+pub const KIND_VAR: &str = "var";
 
 /// 网关的 compose project 名前缀，服务名不能用。
 pub const GATEWAY_PROJECT_PREFIX: &str = "wharf-gw-";
@@ -44,6 +45,7 @@ pub struct ServerRow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServiceRow {
   pub instance_id: String,
+  pub host_groups: BTreeMap<String, u32>,
   pub spec: ServiceSpec,
   /// 端口名 → 宿主机端口。
   pub host_ports: BTreeMap<String, u16>,
@@ -65,6 +67,12 @@ pub struct GatewayRow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EdgeRow {
   pub spec: EdgeAppSpec,
+  pub version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VarRow {
+  pub value: String,
   pub version: u64,
 }
 
@@ -102,6 +110,7 @@ pub struct World {
   pub gateways: BTreeMap<String, GatewayRow>,
   pub edge_apps: BTreeMap<String, EdgeRow>,
   pub bookmarks: BTreeMap<String, BookmarkRow>,
+  pub vars: BTreeMap<String, VarRow>,
   /// key 是 hostname。
   pub routes: BTreeMap<String, RouteRow>,
 }
@@ -162,6 +171,10 @@ impl World {
                 .to_string(),
               spec: serde_json::from_value(row.spec)
                 .map_err(json_err)?,
+              host_groups: serde_json::from_value(
+                row.meta["host_groups"].clone(),
+              )
+              .unwrap_or_default(),
               host_ports: serde_json::from_value(
                 row.meta["host_ports"].clone(),
               )
@@ -207,6 +220,18 @@ impl World {
             EdgeRow {
               spec: serde_json::from_value(row.spec)
                 .map_err(json_err)?,
+              version,
+            },
+          );
+        }
+        KIND_VAR => {
+          world.vars.insert(
+            row.name,
+            VarRow {
+              value: serde_json::from_value(
+                row.spec["value"].clone(),
+              )
+              .map_err(json_err)?,
               version,
             },
           );
@@ -258,6 +283,9 @@ impl World {
     for (id, r) in &self.bookmarks {
       out.insert(format!("{KIND_BOOKMARK}/{id}"), r.version);
     }
+    for (name, row) in &self.vars {
+      out.insert(format!("{KIND_VAR}/{name}"), row.version);
+    }
     out
   }
 
@@ -289,6 +317,22 @@ impl World {
     }
     for change in changes {
       match change {
+        Change::UpsertVar { name, value } => {
+          crate::variables::validate(name, value)?;
+          let version = self.vars.get(name).map_or(0, |r| r.version);
+          self.vars.insert(
+            name.clone(),
+            VarRow {
+              value: value.clone(),
+              version,
+            },
+          );
+        }
+        Change::RemoveVar { name } => {
+          if self.vars.remove(name).is_none() {
+            return Err(crate::variables::not_found(name));
+          }
+        }
         Change::UpsertBookmark { id, spec } => {
           let version = match id {
             Some(id) => {
@@ -362,7 +406,14 @@ impl World {
               "请清除 bg_bwlimit 以关闭限速",
             ));
           }
-          server.settings = settings.clone();
+          let mut settings = settings.clone();
+          if let Some(limits) = &mut settings.task_limits {
+            validate_limits(limits)?;
+            if limits.is_empty() {
+              settings.task_limits = None;
+            }
+          }
+          server.settings = settings;
         }
         Change::AdoptData { .. } => {}
         Change::UpsertService {
@@ -466,6 +517,20 @@ impl World {
           }
           // compose 来源没填端口时按 compose 里映射的端口补上，否则服务没有内网地址。
           let mut spec = spec.clone();
+          let mut hosts = BTreeMap::new();
+          for (host, ip) in std::mem::take(&mut spec.extra_hosts) {
+            let normalized = normalize_hostname(&host)
+              .map_err(|_| crate::render::extra_host_error(&host))?;
+            if hosts.insert(normalized, ip).is_some() {
+              return Err(crate::render::extra_host_error(&host));
+            }
+          }
+          spec.extra_hosts = hosts;
+          if import.is_some() && spec.pull_policy.is_some() {
+            return Err(ApiError::invalid(
+              "请先完成接管，再设置显式拉取策略",
+            ));
+          }
           validate_deploy_options(name, &spec)?;
           if let Some(signal) = &mut spec.stop_signal {
             *signal =
@@ -474,11 +539,12 @@ impl World {
               )?;
           }
           crate::shared_volumes::normalize(&mut spec)?;
-          if spec.limits.as_ref().is_some_and(|l| {
-            l.memory_mb.is_none() && l.cpu_milli.is_none()
-          }) {
-            spec.limits = None;
+          for file in &mut spec.files {
+            if file.on_change.as_deref() == Some("recreate") {
+              file.on_change = None;
+            }
           }
+          normalize_runtime_options(&mut spec)?;
           if let Source::Compose {
             content: Some(content),
             ..
@@ -487,20 +553,15 @@ impl World {
               old.spec.source != spec.source
                 || old.spec.container != spec.container
                 || old.spec.limits != spec.limits
+                || old.spec.container_limits != spec.container_limits
+                || old.spec.pull_policy != spec.pull_policy
                 || old.spec.env != spec.env
+                || old.spec.compose_env != spec.compose_env
             })
           {
             crate::render::compose_with_settings(
               name, content, &spec,
             )?;
-          }
-          if let Some(limits) = &spec.limits {
-            if limits.memory_mb.is_some_and(|n| n < 32) {
-              return Err(ApiError::invalid("内存上限至少 32 MB"));
-            }
-            if limits.cpu_milli.is_some_and(|n| n < 10) {
-              return Err(ApiError::invalid("CPU 上限至少 0.01 核"));
-            }
           }
           if spec.auto_update {
             match &spec.source {
@@ -573,10 +634,18 @@ impl World {
               )));
             }
           }
+          let host_groups = old
+            .filter(|old| {
+              old.spec.server == spec.server
+                && old.spec.group_add == spec.group_add
+            })
+            .map(|old| old.host_groups.clone())
+            .unwrap_or_default();
           self.services.insert(
             name.clone(),
             ServiceRow {
               instance_id,
+              host_groups,
               spec,
               host_ports,
               import,
@@ -591,6 +660,18 @@ impl World {
             ApiError::not_found(format!("服务 {name} 不存在"))
               .suggest("wharf service list")
           })?;
+          if row.spec.pull_policy
+            == Some(wharf_api_types::spec::ImagePullMode::Never)
+          {
+            return Err(
+              ApiError::invalid(format!(
+                "服务 {name} 的拉取策略是 never"
+              ))
+              .with_hint(
+                "先导入新镜像并重新 plan，或改为 if_missing",
+              ),
+            );
+          }
           match image {
             Some(image) => {
               if !crate::pins::images(&row.spec.source)
@@ -752,6 +833,12 @@ impl World {
   ) -> Result<(), ApiError> {
     route_hosts(fleet)?;
     let mut changes = Vec::new();
+    for (name, value) in &fleet.vars {
+      changes.push(Change::UpsertVar {
+        name: name.clone(),
+        value: value.clone(),
+      });
+    }
     for (name, settings) in &fleet.servers {
       changes.push(Change::UpdateServer {
         name: name.clone(),
@@ -1101,6 +1188,7 @@ impl World {
       )?;
     }
     crate::shared_volumes::validate_world(self)?;
+    crate::named_networks::validate_world(self)?;
     for (name, app) in &self.edge_apps {
       crate::edge::validate_app(self, name, &app.spec)?;
     }
@@ -1661,6 +1749,9 @@ impl World {
         if let Some(import) = &r.import {
           meta["import"] = to_json(import);
         }
+        if !r.host_groups.is_empty() {
+          meta["host_groups"] = to_json(&r.host_groups);
+        }
         if !r.pins.is_empty() {
           meta["pins"] = to_json(&r.pins);
         }
@@ -1690,6 +1781,13 @@ impl World {
       &self.edge_apps,
       KIND_EDGE,
       |r| (to_json(&r.spec), json!({})),
+      &mut out,
+    );
+    diff_map(
+      &current.vars,
+      &self.vars,
+      KIND_VAR,
+      |r| (json!({"value": r.value}), json!({})),
       &mut out,
     );
     diff_map(
@@ -1939,10 +2037,270 @@ pub(crate) fn is_reserved_host_port(port: u16) -> bool {
     || (30000..=39999).contains(&port)
 }
 
+pub(crate) fn validate_limits(
+  limits: &mut wharf_api_types::spec::Limits,
+) -> Result<(), ApiError> {
+  limits.normalize();
+  if limits.memory_mb.is_some_and(|n| n < 32) {
+    return Err(ApiError::invalid("内存上限至少 32 MB"));
+  }
+  if limits.cpu_milli.is_some_and(|n| n < 10) {
+    return Err(ApiError::invalid("CPU 上限至少 0.01 核"));
+  }
+  Ok(())
+}
+
+fn normalize_runtime_options(
+  spec: &mut ServiceSpec,
+) -> Result<(), ApiError> {
+  if let Some(limits) = &mut spec.limits {
+    validate_limits(limits)?;
+    if limits.is_empty() {
+      spec.limits = None;
+    }
+  }
+  for limits in spec.container_limits.values_mut() {
+    validate_limits(limits)?;
+  }
+  spec.container_limits.retain(|_, limits| !limits.is_empty());
+  for cap in &mut spec.cap_add {
+    *cap = cap.to_ascii_uppercase();
+    if let Some(value) = cap.strip_prefix("CAP_") {
+      *cap = value.to_owned();
+    }
+    if !CAPABILITIES.contains(&cap.as_str()) {
+      return Err(
+        ApiError::invalid(format!("内核能力 {cap} 不支持"))
+          .with_hint("填写具体能力名，例如 NET_BIND_SERVICE"),
+      );
+    }
+  }
+  spec.cap_add.sort_unstable();
+  spec.cap_add.dedup();
+  Ok(())
+}
+
+const CAPABILITIES: &[&str] = &[
+  "AUDIT_CONTROL",
+  "AUDIT_READ",
+  "AUDIT_WRITE",
+  "BLOCK_SUSPEND",
+  "BPF",
+  "CHECKPOINT_RESTORE",
+  "CHOWN",
+  "DAC_OVERRIDE",
+  "DAC_READ_SEARCH",
+  "FOWNER",
+  "FSETID",
+  "IPC_LOCK",
+  "IPC_OWNER",
+  "KILL",
+  "LEASE",
+  "LINUX_IMMUTABLE",
+  "MAC_ADMIN",
+  "MAC_OVERRIDE",
+  "MKNOD",
+  "NET_ADMIN",
+  "NET_BIND_SERVICE",
+  "NET_BROADCAST",
+  "NET_RAW",
+  "PERFMON",
+  "SETFCAP",
+  "SETGID",
+  "SETPCAP",
+  "SETUID",
+  "SYS_ADMIN",
+  "SYS_BOOT",
+  "SYS_CHROOT",
+  "SYS_MODULE",
+  "SYS_NICE",
+  "SYS_PACCT",
+  "SYS_PTRACE",
+  "SYS_RAWIO",
+  "SYS_RESOURCE",
+  "SYS_TIME",
+  "SYS_TTY_CONFIG",
+  "SYSLOG",
+  "WAKE_ALARM",
+];
+
+fn validate_runtime_options(
+  spec: &ServiceSpec,
+) -> Result<(), ApiError> {
+  if matches!(spec.source, Source::Compose { .. })
+    && let Some(field) = spec.image_runtime_fields().next()
+  {
+    return Err(
+      ApiError::invalid(format!("{field} 只用于镜像和构建来源"))
+        .with_hint(format!(
+          "在 Compose 的 services.<组件>.{field} 设置"
+        )),
+    );
+  }
+  if !matches!(spec.source, Source::Compose { .. })
+    && !spec.container_limits.is_empty()
+  {
+    return Err(ApiError::invalid(
+      "container_limits 只用于 Compose 来源",
+    ));
+  }
+  if spec.pull_policy.is_some()
+    && matches!(spec.source, Source::Build(_))
+  {
+    return Err(ApiError::invalid(
+      "pull_policy 只用于镜像和 Compose 来源",
+    ));
+  }
+  if spec.pull_policy
+    == Some(wharf_api_types::spec::ImagePullMode::Never)
+    && spec.auto_update
+  {
+    return Err(ApiError::invalid(
+      "pull_policy=never 不能开启自动更新",
+    ));
+  }
+  if spec
+    .command
+    .as_ref()
+    .is_some_and(|argv| argv.iter().any(|arg| arg.contains('\0')))
+  {
+    return Err(ApiError::invalid("启动参数不合法")
+      .with_hint("逐个传入参数；需要 shell 时显式提供相应 argv，镜像 ENTRYPOINT 仍会保留"));
+  }
+  if spec.shm_size == Some(0) {
+    return Err(
+      ApiError::invalid("共享内存大小不合法")
+        .with_hint("例如 --shm-size 128m"),
+    );
+  }
+  if spec
+    .log_max
+    .is_some_and(|log| log.max_bytes == 0 || log.max_files == 0)
+  {
+    return Err(
+      ApiError::invalid("日志轮转需要正数大小和保留文件数")
+        .with_hint("例如 --log-max 5m:1"),
+    );
+  }
+  if spec.hostname.as_ref().is_some_and(|hostname| {
+    hostname.len() > 253
+      || hostname.split('.').any(|label| {
+        label.is_empty()
+          || label.len() > 63
+          || label.starts_with('-')
+          || label.ends_with('-')
+          || !label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+      })
+  }) {
+    return Err(
+      ApiError::invalid("容器主机名不合法")
+        .with_hint("例如 --hostname worker-a"),
+    );
+  }
+  for group in &spec.group_add {
+    if let Some(host) = group.strip_prefix("host:") {
+      if !wharf_api_types::spec::HOST_GROUPS.contains(&host) {
+        return Err(
+          ApiError::invalid(format!("宿主机组 {host} 不支持"))
+            .with_hint("可选 host:video、host:render、host:dialout"),
+        );
+      }
+      continue;
+    }
+    if group.is_empty()
+      || !group
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+    {
+      return Err(ApiError::invalid(format!(
+        "容器组 {group} 不支持"
+      )));
+    }
+  }
+  for (name, limit) in &spec.ulimits {
+    const NAMES: &[&str] = &[
+      "as",
+      "core",
+      "cpu",
+      "data",
+      "fsize",
+      "locks",
+      "memlock",
+      "msgqueue",
+      "nice",
+      "nofile",
+      "nproc",
+      "rss",
+      "rtprio",
+      "rttime",
+      "sigpending",
+      "stack",
+    ];
+    let bound = |value| if value == -1 { i64::MAX } else { value };
+    if !NAMES.contains(&name.as_str())
+      || limit.soft < -1
+      || limit.hard < -1
+      || (limit.soft == -1 && limit.hard != -1)
+      || bound(limit.soft) > bound(limit.hard)
+    {
+      return Err(
+        ApiError::invalid(format!(
+          "{name} 的软上限必须小于等于硬上限"
+        ))
+        .with_hint("例如 --add-ulimit nofile=1024:2048"),
+      );
+    }
+  }
+  for (target, size) in &spec.tmpfs {
+    if *size == 0
+      || !target.starts_with('/')
+      || target.contains(['\0', '$'])
+      || target[1..]
+        .split('/')
+        .any(|part| matches!(part, "" | "." | ".."))
+    {
+      return Err(
+        ApiError::invalid(format!(
+          "tmpfs {target} 需要绝对规范路径和正数大小"
+        ))
+        .with_hint("例如 --add-tmpfs /tmp:64m"),
+      );
+    }
+    let path = std::path::Path::new(target);
+    for other in spec
+      .volumes
+      .iter()
+      .map(|volume| &volume.target)
+      .chain(spec.files.iter().map(|file| &file.path))
+      .chain(spec.tmpfs.keys().filter(|other| *other != target))
+      .map(String::as_str)
+      .chain(std::iter::once(crate::render::SECRET_FILE_DIR))
+    {
+      let other_path = std::path::Path::new(other);
+      if path.starts_with(other_path) || other_path.starts_with(path)
+      {
+        return Err(
+          ApiError::invalid(format!(
+            "tmpfs {target} 与挂载 {other} 冲突"
+          ))
+          .with_hint("换一个临时目录"),
+        );
+      }
+    }
+  }
+  if let Some(value) = spec.timezone.as_deref() {
+    crate::config_api::validate_container_timezone(value)?;
+  }
+  Ok(())
+}
+
 fn validate_deploy_options(
   name: &str,
   spec: &ServiceSpec,
 ) -> Result<(), ApiError> {
+  validate_runtime_options(spec)?;
   if matches!(spec.source, Source::Compose { .. })
     && (spec.stop_grace_secs.is_some() || spec.stop_signal.is_some())
   {
@@ -2029,6 +2387,24 @@ fn validate_service(
     ));
   }
   crate::updates::validate_ignore(spec)?;
+  crate::compose_env::validate(spec)?;
+  if let Some(user) = &spec.user {
+    let valid = |part: &str| {
+      !part.is_empty()
+        && part.len() <= 128
+        && part.bytes().all(|c| {
+          c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-')
+        })
+    };
+    let valid = user
+      .split_once(':')
+      .map_or_else(|| valid(user), |(u, g)| valid(u) && valid(g));
+    if !valid || matches!(spec.source, Source::Compose { .. }) {
+      return Err(ApiError::invalid(
+        "运行用户仅用于镜像和构建来源，格式为用户或用户:组",
+      ));
+    }
+  }
   validate_deploy_options(name, spec)?;
   if name.starts_with(GATEWAY_PROJECT_PREFIX) {
     return Err(ApiError::invalid(format!(
@@ -2051,7 +2427,47 @@ fn validate_service(
   if !world.servers.contains_key(&spec.server) {
     return Err(server_not_found(&spec.server));
   }
+  if spec.lan.is_some()
+    && matches!(spec.source, Source::Compose { .. })
+  {
+    return Err(
+      ApiError::invalid(format!(
+        "服务 {name} 的局域网开关仅支持镜像和构建来源"
+      ))
+      .with_hint("在 Compose 的 ports 中显式设置绑定地址"),
+    );
+  }
+  if spec.lan == Some(true)
+    && world.servers[&spec.server].settings.lan_addrs.is_empty()
+  {
+    return Err(
+      ApiError::invalid(format!(
+        "服务器 {} 没有局域网地址",
+        spec.server
+      ))
+      .with_hint("先配置服务器的 LAN 地址，或恢复继承"),
+    );
+  }
+  for host in spec.extra_hosts.keys() {
+    if host == "host.docker.internal"
+      || !normalize_hostname(host)
+        .is_ok_and(|normalized| normalized == *host)
+    {
+      return Err(crate::render::extra_host_error(host));
+    }
+  }
   if let Some(backup) = &spec.backup {
+    if spec.volumes.iter().any(|v| v.host_path.is_some())
+      && !spec.files.iter().any(|file| file.init_only)
+      && !spec
+        .volumes
+        .iter()
+        .any(|v| v.host_path.is_none() && v.from_service.is_none())
+    {
+      return Err(ApiError::invalid(format!(
+        "服务 {name} 没有自有托管卷，外部卷和共享卷需要单独备份"
+      )));
+    }
     wharf_api_types::backup::validate_backup_excludes(
       &backup.exclude,
     )?;
@@ -2068,6 +2484,7 @@ fn validate_service(
       )));
     }
     if spec.volumes.is_empty()
+      && !spec.files.iter().any(|file| file.init_only)
       && !matches!(spec.source, Source::Compose { .. })
     {
       return Err(ApiError::invalid(format!(
@@ -2155,6 +2572,49 @@ fn validate_service(
   }
   let mut volume_names = BTreeSet::new();
   for volume in &spec.volumes {
+    if let Some(owner) = &volume.owner
+      && (volume.from_service.is_some()
+        || volume.host_path.is_some()
+        || (owner != "auto"
+          && wharf_api_types::spec::parse_uid_gid(owner).is_none()))
+    {
+      return Err(
+        ApiError::invalid(format!(
+          "卷 {} 的属主只用于自有托管目录",
+          volume.name
+        ))
+        .with_hint(
+          "填写 UID:GID 或 auto，或用 --unset-volume-owner 清除",
+        ),
+      );
+    }
+    if let Some(host_path) = &volume.host_path {
+      if !volume.name.is_empty() || volume.from_service.is_some() {
+        return Err(ApiError::invalid(
+          "外部挂载不能同时声明卷名或共享卷",
+        ));
+      }
+      wharf_api_types::adopt_data::validate_host_bind(
+        host_path,
+        &volume.target,
+      )?;
+      let target = std::path::Path::new(&volume.target);
+      if spec.volumes.iter().any(|v| {
+        !std::ptr::eq(v, volume)
+          && (target.starts_with(&v.target)
+            || std::path::Path::new(&v.target).starts_with(target))
+      }) || spec
+        .files
+        .iter()
+        .any(|f| std::path::Path::new(&f.path).starts_with(target))
+      {
+        return Err(ApiError::invalid(format!(
+          "外部挂载 {} 与其他挂载或文件重叠",
+          volume.target
+        )));
+      }
+      continue;
+    }
     validate_name("数据卷", &volume.name)?;
     if !volume_names.insert(&volume.name) {
       return Err(ApiError::invalid(format!(
@@ -2178,6 +2638,7 @@ fn validate_service(
     }
   }
   check_files(name, &spec.files)?;
+  crate::project_files::validate(name, spec)?;
   for key in spec.env.keys() {
     let ok = !key.is_empty()
       && key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
@@ -2326,6 +2787,30 @@ fn validate_lan_addrs(addrs: &[String]) -> Result<(), ApiError> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn init_only_data_can_be_backed_up_with_external_binds() {
+    let mut world = sample();
+    world
+      .servers
+      .insert("node2".into(), world.servers["node1"].clone());
+    let spec = serde_json::from_value(json!({
+      "server":"node1", "source":{"image":"nginx"}, "backup":{"to":"node2"},
+      "volumes":[{"target":"/data", "host_path":"/mnt/shared"}],
+      "files":[{"path":"/app/seed/settings.json","init_only":true,"content":"{}"}],
+    })).unwrap();
+    world
+      .apply_changes(&[Change::UpsertService {
+        name: "app".into(),
+        spec,
+        pins: None,
+        commit: None,
+        migrate: None,
+        adopt: None,
+      }])
+      .unwrap();
+    world.validate().unwrap();
+  }
 
   #[test]
   fn compose_env_and_shared_tcp_udp_binding() {
@@ -2827,6 +3312,25 @@ mod tests {
       stop_signal: None,
       init_cmd: None,
       init_timeout_secs: None,
+      lan: None,
+      extra_hosts: Default::default(),
+      self_refs: false,
+      compose_env: false,
+      user: None,
+      use_egress: false,
+      networks: Default::default(),
+      command: Default::default(),
+      shm_size: Default::default(),
+      cap_add: Default::default(),
+      ulimits: Default::default(),
+      init: Default::default(),
+      group_add: Default::default(),
+      hostname: Default::default(),
+      tmpfs: Default::default(),
+      timezone: Default::default(),
+      pull_policy: Default::default(),
+      log_max: Default::default(),
+      container_limits: Default::default(),
       extra_logs: Vec::new(),
       wait_for: Default::default(),
       wait_for_timeout_secs: None,
@@ -3139,6 +3643,8 @@ services:
     .unwrap();
     spec.volumes.push(wharf_api_types::spec::VolumeSpec {
       from_service: None,
+      owner: None,
+      host_path: None,
       read_only: false,
       name: "data".into(),
       target: "/data".into(),
@@ -3215,6 +3721,7 @@ services:
     spec.limits = Some(wharf_api_types::spec::Limits {
       memory_mb: Some(512),
       cpu_milli: None,
+      pids: None,
     });
     let err = w
       .apply_changes(&[Change::UpsertService {

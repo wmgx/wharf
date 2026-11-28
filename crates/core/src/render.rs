@@ -141,19 +141,27 @@ impl Net {
 
   /// 只取影响渲染的地址，给 plan 的 inputs 指纹用。
   /// 服务端口除 127.0.0.1 外要绑定的地址：内网地址，加上设置的局域网地址。
-  pub fn bind_ips(&self, server: &str) -> Vec<String> {
+  pub fn bind_ips(&self, spec: &ServiceSpec) -> Vec<String> {
+    let server = &spec.server;
     let mut ips: Vec<String> = self
       .private
       .get(server)
       .map(|a| a.ip.clone())
       .into_iter()
       .collect();
-    for ip in self.lan_addrs.get(server).into_iter().flatten() {
+    for ip in self.lan_bind_ips(spec) {
       if !ips.contains(ip) {
         ips.push(ip.clone());
       }
     }
     ips
+  }
+
+  pub(crate) fn lan_bind_ips(&self, spec: &ServiceSpec) -> &[String] {
+    if spec.lan == Some(false) {
+      return &[];
+    }
+    self.lan_addrs.get(&spec.server).map_or(&[], Vec::as_slice)
   }
 
   pub fn addresses(&self) -> Addresses {
@@ -241,6 +249,9 @@ pub fn volume_host_dir(
   service: &str,
   v: &wharf_api_types::spec::VolumeSpec,
 ) -> Result<String, ApiError> {
+  if let Some(path) = &v.host_path {
+    return Ok(path.clone());
+  }
   match &v.from_service {
     Some(raw) => {
       let (owner, volume) = crate::shared_volumes::parse_ref(raw)?;
@@ -255,6 +266,7 @@ pub fn service_dirs(name: &str, spec: &ServiceSpec) -> Vec<String> {
   spec
     .volumes
     .iter()
+    .filter(|v| v.host_path.is_none())
     .filter_map(|v| volume_host_dir(name, v).ok())
     .filter(|dir| seen.insert(dir.clone()))
     .collect()
@@ -302,10 +314,14 @@ struct ComposeService {
   #[serde(skip_serializing_if = "Vec::is_empty")]
   ports: Vec<String>,
   #[serde(skip_serializing_if = "Vec::is_empty")]
-  volumes: Vec<String>,
+  volumes: Vec<Value>,
   #[serde(skip_serializing_if = "Vec::is_empty")]
   configs: Vec<ComposeConfigRef>,
   labels: BTreeMap<String, String>,
+  #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+  extra_hosts: BTreeMap<String, std::net::IpAddr>,
+  #[serde(flatten)]
+  runtime: BTreeMap<&'static str, Value>,
 }
 
 fn to_yaml(file: &ComposeFile) -> String {
@@ -384,6 +400,25 @@ pub fn substitute(
     SecretContext::Text,
     &mut BTreeSet::new(),
   )
+}
+
+pub(crate) fn project_env_value(
+  text: &str,
+  secrets: &BTreeMap<String, String>,
+) -> Result<String, ApiError> {
+  let mut files = BTreeSet::new();
+  let value = substitute_values(
+    text,
+    Some(secrets),
+    SecretContext::Env,
+    &mut files,
+  )?;
+  if !files.is_empty() {
+    return Err(ApiError::invalid(
+      "Compose 项目变量不能引用密钥文件",
+    ));
+  }
+  Ok(value)
 }
 
 fn substitute_values(
@@ -593,6 +628,8 @@ pub(crate) fn mark_compose_refs<'a>(
     marked.push_str(&rest[..start]);
     let raw = &rest[start..end];
     if parse_placeholder(inner, true).is_ok_and(|p| p.is_some())
+      || wharf_api_types::references::parse_public_ref(inner, true)
+        .is_some()
       || !crate::refs::used(raw).is_empty()
     {
       marked.push_str(&marker(raw));
@@ -808,7 +845,8 @@ pub fn compose_with_settings(
   content: &str,
   spec: &ServiceSpec,
 ) -> Result<String, ApiError> {
-  apply_compose_settings(name, content, spec, true)
+  let spec = crate::compose_env::component_settings(spec);
+  apply_compose_settings(name, content, &spec, true)
 }
 
 fn apply_compose_settings(
@@ -817,29 +855,173 @@ fn apply_compose_settings(
   spec: &ServiceSpec,
   check_inherited: bool,
 ) -> Result<String, ApiError> {
+  let mut out = content.to_string();
   let limits = spec.limits.clone().unwrap_or_default();
-  if limits.memory_mb.is_none()
-    && limits.cpu_milli.is_none()
-    && spec.env.is_empty()
-  {
-    return Ok(content.to_string());
+  if !limits.is_empty() || !spec.env.is_empty() {
+    let target =
+      compose_target(name, content, spec.container.as_deref())?;
+    if !limits.is_empty()
+      && spec.container_limits.contains_key(&target)
+    {
+      return Err(
+        ApiError::invalid(format!(
+          "组件 {target} 同时使用两种资源上限"
+        ))
+        .with_hint(format!(
+          "同一组件只保留 container_limits.{target}"
+        )),
+      );
+    }
+    out = insert_compose_settings(
+      name,
+      &out,
+      &target,
+      &limits,
+      &spec.env,
+      ComposeOverlay::Legacy { check_inherited },
+    )?;
   }
-  let target =
-    compose_target(name, content, spec.container.as_deref())?;
+  if let Some(mode) = spec.pull_policy {
+    let document = parse_compose_template(&out)?;
+    wharf_api_types::compose::static_project_images(&document)?;
+    let components =
+      document["services"].as_mapping().expect("已校验组件");
+    let policy = match mode {
+      wharf_api_types::spec::ImagePullMode::IfMissing => "missing",
+      wharf_api_types::spec::ImagePullMode::Never => "never",
+      wharf_api_types::spec::ImagePullMode::Always => "always",
+    };
+    for (name, component) in components {
+      let Some(name) = name.as_str() else {
+        return Err(ApiError::invalid("Compose 组件名称不合法"));
+      };
+      if let Some(value) = component.get("pull_policy") {
+        if value.as_str() != Some(policy) {
+          return Err(
+            ApiError::invalid(format!(
+              "组件 {name} 的 pull_policy 与项目拉取策略冲突"
+            ))
+            .with_hint("使原文策略与项目策略一致，或去掉原文策略"),
+          );
+        }
+      } else {
+        out = insert_compose_settings(
+          name,
+          &out,
+          name,
+          &Default::default(),
+          &BTreeMap::new(),
+          ComposeOverlay::PullPolicy(policy),
+        )?;
+      }
+    }
+  }
+  for (target, limits) in &spec.container_limits {
+    if limits.is_empty() {
+      continue;
+    }
+    let document = parse_compose_template(&out)?;
+    let services = document["services"].as_mapping();
+    if !services
+      .is_some_and(|services| services.contains_key(target.as_str()))
+    {
+      let names = services
+        .into_iter()
+        .flat_map(|s| s.keys())
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("、");
+      return Err(
+        ApiError::invalid(format!("Compose 中没有组件 {target}"))
+          .with_hint(format!("可选组件：{names}")),
+      );
+    }
+    out = insert_compose_settings(
+      name,
+      &out,
+      target,
+      limits,
+      &BTreeMap::new(),
+      ComposeOverlay::Component,
+    )?;
+  }
+  Ok(out)
+}
+
+enum ComposeOverlay<'a> {
+  Legacy { check_inherited: bool },
+  Component,
+  PullPolicy(&'a str),
+}
+
+fn insert_compose_settings(
+  name: &str,
+  content: &str,
+  target: &str,
+  limits: &wharf_api_types::spec::Limits,
+  env: &BTreeMap<String, String>,
+  overlay: ComposeOverlay<'_>,
+) -> Result<String, ApiError> {
+  let legacy = matches!(overlay, ComposeOverlay::Legacy { .. });
+  let dimensions = [
+    ("mem_limit", "memory", limits.memory_mb.is_some()),
+    ("cpus", "cpus", limits.cpu_milli.is_some()),
+    ("pids_limit", "pids", limits.pids.is_some()),
+  ];
   let unsupported = || {
+    if !legacy {
+      let fields = if let ComposeOverlay::PullPolicy(_) = overlay {
+        "pull_policy".into()
+      } else {
+        dimensions
+          .iter()
+          .filter(|(_, _, enabled)| *enabled)
+          .map(|(key, _, _)| *key)
+          .collect::<Vec<_>>()
+          .join("、")
+      };
+      return ApiError::invalid(format!(
+        "无法在 Compose 组件 {target} 添加 {fields}"
+      ))
+      .with_hint("在原文中设置该项，或把该服务改成块状写法");
+    }
     ApiError::invalid(format!(
       "服务 {name} 的 compose 写法没法自动加上环境变量或资源上限"
     ))
     .with_hint("直接写在 compose 文件里（environment、mem_limit、cpus），然后去掉设置里的")
   };
   // 新改动检查继承字段，已存配置渲染仍允许原来生效的覆盖。
-  let value = if check_inherited {
+  let value = if !matches!(
+    overlay,
+    ComposeOverlay::Legacy {
+      check_inherited: false
+    }
+  ) {
     parse_compose_template(content)?
   } else {
     serde_yaml_ng::from_str(content).map_err(|_| unsupported())?
   };
-  let body = &value["services"][target.as_str()];
-  if (limits.memory_mb.is_some() || limits.cpu_milli.is_some())
+  let body = &value["services"][target];
+  for (key, deploy, enabled) in dimensions {
+    if enabled
+      && (!legacy || key == "pids_limit")
+      && (body.get(key).is_some()
+        || body["deploy"]["resources"]["limits"]
+          .get(deploy)
+          .is_some())
+    {
+      return Err(
+        ApiError::invalid(format!(
+          "组件 {target} 的 {key} 已在 Compose 原文设置"
+        ))
+        .with_hint(
+          "在原文修改，或删掉原文中的同一项再用 wharf service limits",
+        ),
+      );
+    }
+  }
+  if legacy
+    && (limits.memory_mb.is_some() || limits.cpu_milli.is_some())
     && ["mem_limit", "cpus", "deploy"]
       .iter()
       .any(|key| body.get(*key).is_some())
@@ -860,7 +1042,7 @@ fn apply_compose_settings(
       .collect(),
     _ => vec![],
   };
-  if let Some(dup) = spec.env.keys().find(|k| existing.contains(k)) {
+  if let Some(dup) = env.keys().find(|k| existing.contains(k)) {
     return Err(
       ApiError::invalid(format!(
         "环境变量 {dup} 在 compose 里已经写了"
@@ -913,9 +1095,7 @@ fn apply_compose_settings(
     .take_while(|i| !code(lines[*i].1) || indent(lines[*i].1) >= n)
     .find(|i| {
       let l = lines[*i].1;
-      code(l)
-        && indent(l) == n
-        && key(l).as_deref() == Some(target.as_str())
+      code(l) && indent(l) == n && key(l).as_deref() == Some(target)
     })
     .ok_or_else(unsupported)?;
   let body_end = (header + 1..lines.len())
@@ -940,13 +1120,19 @@ fn apply_compose_settings(
   let memory = limits.memory_mb.map(|mb| format!("{mb}m"));
   let cpus = limits.cpu_milli.map(cpus_text);
   let mut added = String::new();
+  if let ComposeOverlay::PullPolicy(policy) = overlay {
+    added.push_str(&format!("{pad}pull_policy: {policy}{eol}"));
+  }
   if let Some(memory) = &memory {
     added.push_str(&format!("{pad}mem_limit: {memory}{eol}"));
   }
   if let Some(cpus) = &cpus {
     added.push_str(&format!("{pad}cpus: \"{cpus}\"{eol}"));
   }
-  if !spec.env.is_empty() {
+  if let Some(pids) = limits.pids {
+    added.push_str(&format!("{pad}pids_limit: {pids}{eol}"));
+  }
+  if !env.is_empty() {
     let env_line = (header + 1..body_end).find(|i| {
       let l = lines[*i].1;
       code(l)
@@ -959,7 +1145,7 @@ fn apply_compose_settings(
           return Err(unsupported());
         }
         added.push_str(&format!("{pad}environment:{eol}"));
-        for (k, v) in &spec.env {
+        for (k, v) in env {
           added.push_str(&format!("{pad}  {k}: {}{eol}", quote(v)));
         }
       }
@@ -1002,7 +1188,7 @@ fn apply_compose_settings(
           (start..end, format!("{pad}  "), false)
         };
         let mut text = header;
-        for (k, v) in &spec.env {
+        for (k, v) in env {
           if list {
             text.push_str(&format!(
               "{k_pad}- {}{eol}",
@@ -1028,7 +1214,12 @@ fn apply_compose_settings(
   // 插完再解析一遍，确认加到了对的容器上。
   let parsed: serde_yaml_ng::Value =
     serde_yaml_ng::from_str(&out).map_err(|_| unsupported())?;
-  let actual = &parsed["services"][target.as_str()];
+  let actual = &parsed["services"][target];
+  if let ComposeOverlay::PullPolicy(policy) = overlay
+    && actual["pull_policy"].as_str() != Some(policy)
+  {
+    return Err(unsupported());
+  }
   for (key, expected) in [("mem_limit", memory), ("cpus", cpus)] {
     if let Some(expected) = expected
       && actual.get(key).and_then(|v| v.as_str())
@@ -1037,7 +1228,12 @@ fn apply_compose_settings(
       return Err(unsupported());
     }
   }
-  for k in spec.env.keys() {
+  if let Some(pids) = limits.pids
+    && actual["pids_limit"].as_u64() != Some(u64::from(pids))
+  {
+    return Err(unsupported());
+  }
+  for k in env.keys() {
     let found = match actual.get("environment") {
       Some(serde_yaml_ng::Value::Mapping(map)) => {
         map.get(k.as_str()).is_some()
@@ -1097,9 +1293,30 @@ pub fn service_compose(
   bind_ips: &[String],
   secrets: Option<&BTreeMap<String, String>>,
 ) -> Result<(String, SecretMounts), ApiError> {
+  let (compose, mounts) =
+    service_compose_base(name, spec, host_ports, bind_ips, secrets)?;
+  Ok((crate::named_networks::render(name, spec, compose)?, mounts))
+}
+
+fn service_compose_base(
+  name: &str,
+  spec: &ServiceSpec,
+  host_ports: &BTreeMap<String, u16>,
+  bind_ips: &[String],
+  secrets: Option<&BTreeMap<String, String>>,
+) -> Result<(String, SecretMounts), ApiError> {
   match &spec.source {
     Source::Compose { content, .. } => {
       let content = content.as_deref().unwrap_or_default();
+      let updated;
+      let content = if spec.extra_hosts.is_empty() {
+        content
+      } else {
+        updated = compose_extra_hosts(name, content, spec)?;
+        &updated
+      };
+      let component = crate::compose_env::component_settings(spec);
+      let spec = component.as_ref();
       let template =
         apply_compose_settings(name, content, spec, false)?;
       let legacy = substitute_compose(name, &template, secrets);
@@ -1135,23 +1352,190 @@ pub fn service_compose(
           service.ports.push(format!("{bind}:{container}{protocol}"));
         }
       }
-      service.volumes = spec
-        .volumes
-        .iter()
-        .map(|v| {
-          let host = volume_host_dir(name, v)?;
-          let ro = if v.read_only { ":ro" } else { "" };
-          Ok(format!("{host}:{}{ro}", v.target))
-        })
-        .collect::<Result<_, ApiError>>()?;
+      service.volumes.extend(
+        spec
+          .volumes
+          .iter()
+          .filter(|v| v.host_path.is_none())
+          .map(|v| {
+            let host = volume_host_dir(name, v)?;
+            let ro = if v.read_only { ":ro" } else { "" };
+            Ok(Value::String(format!("{host}:{}{ro}", v.target)))
+          })
+          .collect::<Result<Vec<_>, ApiError>>()?,
+      );
       let file = ComposeFile {
         configs: BTreeMap::new(),
         name: name.to_string(),
         services: BTreeMap::from([(name.to_string(), service)]),
       };
-      Ok((to_yaml(&file), image_mounts(name, files)))
+      let text = to_yaml(&file);
+      Ok((
+        render_image_options(name, spec, text)?,
+        image_mounts(name, files),
+      ))
     }
   }
+}
+
+fn render_image_options(
+  name: &str,
+  spec: &ServiceSpec,
+  text: String,
+) -> Result<String, ApiError> {
+  let binds: Vec<_> = spec.volumes.iter().filter_map(|v| {
+    v.host_path.as_ref().map(|path| serde_json::json!({
+      "type": "bind", "source": path, "target": v.target, "read_only": v.read_only,
+      "bind": {"create_host_path": false, "propagation": "rprivate"}
+    }))
+  }).collect();
+  if binds.is_empty() && spec.user.is_none() {
+    return Ok(text);
+  }
+  let mut doc = parse_compose(&text)?;
+  if let Some(user) = &spec.user {
+    doc["services"][name]["user"] = Value::String(user.clone());
+  }
+  if binds.is_empty() {
+    return serde_yaml_ng::to_string(&doc)
+      .map_err(|_| ApiError::internal("无法渲染运行用户"));
+  }
+  let volumes = &mut doc["services"][name]["volumes"];
+  let mut all = volumes.as_sequence().cloned().unwrap_or_default();
+  for bind in binds {
+    all.push(
+      serde_yaml_ng::to_value(bind)
+        .map_err(|_| ApiError::internal("无法渲染外部挂载"))?,
+    );
+  }
+  *volumes = Value::Sequence(all);
+  serde_yaml_ng::to_string(&doc)
+    .map_err(|_| ApiError::internal("无法渲染外部挂载"))
+}
+
+pub(crate) fn extra_host_error(host: &str) -> ApiError {
+  ApiError::invalid(format!(
+    "主机映射 {host} 格式不对或与现有映射冲突"
+  ))
+  .with_hint("用 NAME=IP，每个名称只留一条映射")
+}
+
+fn compose_extra_hosts(
+  name: &str,
+  content: &str,
+  spec: &ServiceSpec,
+) -> Result<String, ApiError> {
+  let target =
+    compose_target(name, content, spec.container.as_deref())?;
+  let mut doc = parse_compose_template(content)?;
+  let body = &mut doc["services"][target.as_str()];
+  let mut hosts = Vec::new();
+  match &body["extra_hosts"] {
+    Value::Null => {}
+    Value::Mapping(map) => {
+      for (host, ip) in map {
+        let host = host
+          .as_str()
+          .ok_or_else(|| extra_host_error("extra_hosts"))?;
+        let ip = ip.as_str().ok_or_else(|| extra_host_error(host))?;
+        hosts.push((host.to_string(), ip.to_string()));
+      }
+    }
+    Value::Sequence(entries) => {
+      for entry in entries {
+        let (host, ip) = entry
+          .as_str()
+          .and_then(|s| {
+            s.split_once('=').or_else(|| s.split_once(':'))
+          })
+          .ok_or_else(|| extra_host_error("extra_hosts"))?;
+        hosts.push((host.to_string(), ip.to_string()));
+      }
+    }
+    _ => return Err(extra_host_error("extra_hosts")),
+  }
+  let mut changed = false;
+  for (host, ip) in &spec.extra_hosts {
+    let mut existing = hosts
+      .iter()
+      .filter(|(key, _)| key.eq_ignore_ascii_case(host))
+      .peekable();
+    if existing.peek().is_none() {
+      hosts.push((host.clone(), ip.to_string()));
+      changed = true;
+    } else if existing.any(|(_, value)| {
+      value
+        .trim_matches(['[', ']'])
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .as_ref()
+        != Some(ip)
+    }) {
+      return Err(extra_host_error(host));
+    }
+  }
+  if !changed {
+    return Ok(content.to_string());
+  }
+  body["extra_hosts"] = Value::Sequence(
+    hosts
+      .into_iter()
+      .map(|(host, ip)| Value::String(format!("{host}={ip}")))
+      .collect(),
+  );
+  serde_yaml_ng::to_string(&doc)
+    .map_err(|_| ApiError::internal("无法生成 Compose 主机映射"))
+}
+
+fn yaml_runtime(value: impl Serialize) -> Result<Value, ApiError> {
+  serde_yaml_ng::to_value(value)
+    .map_err(|_| ApiError::internal("无法渲染运行参数"))
+}
+
+fn container_timezone(value: &str) -> String {
+  if let Some(offset) = value.strip_prefix('+') {
+    format!("UTC-{offset}")
+  } else if let Some(offset) = value.strip_prefix('-') {
+    format!("UTC+{offset}")
+  } else {
+    value.to_owned()
+  }
+}
+
+fn image_runtime(
+  spec: &ServiceSpec,
+) -> Result<BTreeMap<&'static str, Value>, ApiError> {
+  let mut fields = BTreeMap::new();
+  for (key, value) in [
+    ("shm_size", yaml_runtime(spec.shm_size)?),
+    ("init", yaml_runtime(spec.init)?),
+    ("hostname", yaml_runtime(&spec.hostname)?),
+    ("cap_add", yaml_runtime(&spec.cap_add)?),
+    ("ulimits", yaml_runtime(&spec.ulimits)?),
+    ("group_add", yaml_runtime(&spec.group_add)?),
+    (
+      "pids_limit",
+      yaml_runtime(
+        spec.limits.as_ref().and_then(|limits| limits.pids),
+      )?,
+    ),
+  ] {
+    if !value.is_null()
+      && !value.as_sequence().is_some_and(Vec::is_empty)
+      && !value
+        .as_mapping()
+        .is_some_and(serde_yaml_ng::Mapping::is_empty)
+    {
+      fields.insert(key, value);
+    }
+  }
+  if let Some(limit) = spec.log_max {
+    fields.insert("logging", yaml_runtime(serde_json::json!({
+      "driver": "json-file",
+      "options": {"max-size": limit.max_bytes.to_string(), "max-file": limit.max_files.to_string()},
+    }))?);
+  }
+  Ok(fields)
 }
 
 fn image_service(
@@ -1176,6 +1560,18 @@ fn image_service(
     )?;
     environment.insert(key.clone(), value.replace('$', "$$"));
   }
+  if let Some(tz) = spec
+    .timezone
+    .as_deref()
+    .filter(|tz| *tz != "off" && *tz != "default")
+  {
+    environment
+      .entry("TZ".into())
+      .or_insert_with(|| container_timezone(tz));
+  }
+  let volumes = spec.tmpfs.iter().map(|(target, size)| {
+    yaml_runtime(serde_json::json!({"type": "tmpfs", "target": target, "tmpfs": {"size": size}}))
+  }).collect::<Result<_, _>>()?;
   Ok((
     ComposeService {
       stop_grace_period: spec
@@ -1201,10 +1597,14 @@ fn image_service(
         .map(cpus_text),
       network_mode: None,
       entrypoint: None,
-      command: None,
+      command: spec.command.as_ref().map(|argv| {
+        argv.iter().map(|arg| arg.replace('$', "$$")).collect()
+      }),
+      runtime: image_runtime(spec)?,
       environment,
       ports: Vec::new(),
-      volumes: Vec::new(),
+      volumes,
+      extra_hosts: spec.extra_hosts.clone(),
       labels: BTreeMap::from([(
         "wharf.service".to_string(),
         name.to_string(),
@@ -1233,12 +1633,13 @@ pub fn trial_compose(
   service.stop_grace_period = None;
   service.labels =
     BTreeMap::from([("wharf.trial".into(), name.into())]);
+  let text = to_yaml(&ComposeFile {
+    configs: BTreeMap::new(),
+    name: format!("{TRIAL_PROJECT_PREFIX}{name}"),
+    services: BTreeMap::from([(name.to_string(), service)]),
+  });
   Ok((
-    to_yaml(&ComposeFile {
-      configs: BTreeMap::new(),
-      name: format!("{TRIAL_PROJECT_PREFIX}{name}"),
-      services: BTreeMap::from([(name.to_string(), service)]),
-    }),
+    render_image_options(name, spec, text)?,
     image_mounts(name, files),
   ))
 }
@@ -1373,6 +1774,13 @@ pub fn add_files(
       _ => name.to_string(),
     };
     for (i, (path, content)) in files.iter().enumerate() {
+      if spec
+        .files
+        .iter()
+        .any(|spec| spec.path == *path && spec.managed_dir())
+      {
+        continue;
+      }
       let content = content.replace('$', "$$");
       let id = format!("wharf-file-{i}-{}", &hash(&content)[..12]);
       add(&target, id, path.clone(), content)?;
@@ -1459,7 +1867,24 @@ pub fn add_files(
           )));
         }
       }
-      list.push(serde_yaml_ng::to_value(entry).map_err(|_| bad())?);
+      let file =
+        spec.files.iter().find(|file| file.path == entry.target);
+      let mut value =
+        serde_yaml_ng::to_value(entry).map_err(|_| bad())?;
+      if let Some(file) = file {
+        if let Some((uid, gid)) = file
+          .owner
+          .as_deref()
+          .and_then(wharf_api_types::spec::parse_uid_gid)
+        {
+          value["uid"] = Value::String(uid.to_string());
+          value["gid"] = Value::String(gid.to_string());
+        }
+        if let Some(mode) = &file.mode {
+          value["mode"] = Value::String(mode.clone());
+        }
+      }
+      list.push(value);
     }
   }
   let head = if compose.starts_with('#') {
@@ -1522,6 +1947,11 @@ pub fn check_compose(
 ) -> Result<(), ApiError> {
   let doc = parse_compose_template(content)?;
   crate::syntax_check::validate_compose_structure(name, &doc)?;
+  if let Some(field) = crate::live_limits::conflicting_limits(&doc) {
+    return Err(ApiError::invalid(format!(
+      "服务 {name} 的 Compose 中 {field} 与 deploy.resources.limits 对应值不一致"
+    )));
+  }
   check_compose_secret_volumes(name, &doc)
 }
 
@@ -1561,6 +1991,7 @@ pub fn tunnel_compose(
         cpus: None,
         network_mode: Some("host"),
         entrypoint: None,
+        runtime: BTreeMap::new(),
         command: Some(
           ["tunnel", "--no-autoupdate", "run"]
             .map(String::from)
@@ -1575,6 +2006,7 @@ pub fn tunnel_compose(
         )]),
         ports: vec![],
         volumes: vec![],
+        extra_hosts: BTreeMap::new(),
         labels: BTreeMap::from([(
           "wharf.gateway".to_string(),
           name.to_string(),
@@ -1603,6 +2035,7 @@ pub fn gateway_compose(name: &str, spec: &GatewaySpec) -> String {
         cpus: None,
         network_mode: Some("host"),
         entrypoint: None,
+        runtime: BTreeMap::new(),
         command: Some(
           [
             "caddy",
@@ -1618,10 +2051,11 @@ pub fn gateway_compose(name: &str, spec: &GatewaySpec) -> String {
         environment: BTreeMap::new(),
         ports: vec![],
         volumes: vec![
-          "./conf:/etc/caddy:ro".to_string(),
-          format!("/srv/{project}/data:/data"),
-          format!("/srv/{project}/config:/config"),
+          Value::String("./conf:/etc/caddy:ro".into()),
+          Value::String(format!("/srv/{project}/data:/data")),
+          Value::String(format!("/srv/{project}/config:/config")),
         ],
+        extra_hosts: BTreeMap::new(),
         labels: BTreeMap::from([(
           "wharf.gateway".to_string(),
           name.to_string(),
@@ -1712,9 +2146,11 @@ fn backup_compose(
         network_mode: Some("host"),
         entrypoint: Some(vec!["rest-server".into()]),
         command: Some(command),
+        runtime: BTreeMap::new(),
         environment: BTreeMap::new(),
         ports: vec![],
-        volumes: vec![format!("{root}:/data")],
+        volumes: vec![Value::String(format!("{root}:/data"))],
+        extra_hosts: BTreeMap::new(),
         labels: BTreeMap::from([(
           "wharf.backup".to_string(),
           label.into(),
@@ -2226,6 +2662,66 @@ mod tests {
   }
 
   #[test]
+  fn network_options_preserve_loopback_and_isolate_component() {
+    let mut spec: ServiceSpec =
+      serde_json::from_value(serde_json::json!({
+        "server": "s1", "source": {"image": "alpine"},
+        "ports": [{"name": "http", "container": 80}],
+      }))
+      .unwrap();
+    let mut net = Net::default();
+    net.private.insert(
+      "s1".into(),
+      PrivateAddr {
+        ip: "100.64.0.1".into(),
+        network: wharf_api_types::spec::PrivateNetwork::Tailscale,
+      },
+    );
+    net.lan_addrs.insert(
+      "s1".into(),
+      vec!["203.0.113.1".into(), "100.64.0.1".into()],
+    );
+    let render = |spec: &ServiceSpec| {
+      service_compose(
+        "a",
+        spec,
+        &BTreeMap::from([("http".into(), 8080)]),
+        &net.bind_ips(spec),
+        None,
+      )
+      .unwrap()
+      .0
+    };
+    let inherited = render(&spec);
+    assert!(inherited.contains("203.0.113.1:8080:80"));
+    spec.lan = Some(false);
+    let disabled = render(&spec);
+    assert!(!disabled.contains("203.0.113.1:8080:80"));
+    for binding in ["127.0.0.1:8080:80", "100.64.0.1:8080:80"] {
+      assert!(disabled.contains(binding));
+    }
+    spec.lan = None;
+    assert_eq!(render(&spec), inherited);
+    spec.source = Source::Compose { file: None, content: Some(
+      "services:\n  web: {image: alpine}\n  other: {image: alpine, extra_hosts: {peer.lab.test: 203.0.113.8}}\n".into()
+    ) };
+    spec.container = Some("web".into());
+    spec
+      .extra_hosts
+      .insert("peer.lab.test".into(), "2001:db8::8".parse().unwrap());
+    let doc = parse_compose(&render(&spec)).unwrap();
+    assert_eq!(
+      doc["services"]["web"]["extra_hosts"][0].as_str(),
+      Some("peer.lab.test=2001:db8::8")
+    );
+    assert_eq!(
+      doc["services"]["other"]["extra_hosts"]["peer.lab.test"]
+        .as_str(),
+      Some("203.0.113.8")
+    );
+  }
+
+  #[test]
   fn compose_target_finds_inherited_services() {
     let text =
       "x-base: &b {services: {app: {image: nginx}}}\n<<: *b\n";
@@ -2280,6 +2776,19 @@ mod tests {
       parse_compose(&out).unwrap()["services"]["app"]["environment"]
         ["PASS"],
       "p$$\"\\\nline"
+    );
+  }
+
+  #[test]
+  fn compose_rejects_conflicting_direct_and_deploy_memory() {
+    let yaml = "services: {app: {image: alpine, mem_limit: 128m, deploy: {resources: {limits: {memory: 134217728}}}}}";
+    check_compose("app", yaml).unwrap();
+    let invalid = yaml.replace("134217728", "256m");
+    assert!(
+      check_compose("app", &invalid)
+        .unwrap_err()
+        .message
+        .contains("mem_limit")
     );
   }
 
@@ -2430,6 +2939,25 @@ mod tests {
       stop_signal: None,
       init_cmd: None,
       init_timeout_secs: None,
+      lan: None,
+      extra_hosts: Default::default(),
+      self_refs: false,
+      compose_env: false,
+      user: None,
+      use_egress: false,
+      networks: Default::default(),
+      command: Default::default(),
+      shm_size: Default::default(),
+      cap_add: Default::default(),
+      ulimits: Default::default(),
+      init: Default::default(),
+      group_add: Default::default(),
+      hostname: Default::default(),
+      tmpfs: Default::default(),
+      timezone: Default::default(),
+      pull_policy: Default::default(),
+      log_max: Default::default(),
+      container_limits: Default::default(),
       extra_logs: Vec::new(),
       wait_for: Default::default(),
       wait_for_timeout_secs: None,
@@ -2448,11 +2976,130 @@ mod tests {
       ]),
       volumes: vec![VolumeSpec {
         from_service: None,
+        owner: None,
+        host_path: None,
         read_only: false,
         name: "data".into(),
         target: "/data".into(),
       }],
     }
+  }
+
+  #[test]
+  fn runtime_defaults_preserve_image_render_and_all_options_can_be_removed()
+   {
+    let mut spec: ServiceSpec =
+      serde_json::from_value(serde_json::json!({
+        "server":"s1", "source":{"image":"alpine"}
+      }))
+      .unwrap();
+    let baseline = "# 由 Wharf 生成，不要手改。\nname: app\nservices:\n  app:\n    image: alpine\n    restart: unless-stopped\n    labels:\n      wharf.service: app\n";
+    let (rendered, _) =
+      service_compose("app", &spec, &BTreeMap::new(), &[], None)
+        .unwrap();
+    assert_eq!(rendered, baseline);
+    assert_eq!(
+      serde_json::to_value(&spec).unwrap(),
+      serde_json::json!({"server":"s1", "source":{"image":"alpine"}})
+    );
+    spec.command = Some(vec!["echo".into(), "$HOME".into()]);
+    spec.shm_size = Some(128 << 20);
+    spec.cap_add = vec!["NET_BIND_SERVICE".into()];
+    spec.ulimits.insert(
+      "nofile".into(),
+      wharf_api_types::spec::Ulimit {
+        soft: 1024,
+        hard: 2048,
+      },
+    );
+    spec.init = Some(true);
+    spec.init_cmd = Some("prepare".into());
+    spec.group_add = vec!["44".into(), "render".into()];
+    spec.hostname = Some("worker-a".into());
+    spec.tmpfs.insert("/tmp".into(), 64 << 20);
+    spec.timezone = Some("+08:00".into());
+    spec.log_max = Some(wharf_api_types::spec::LogMax {
+      max_bytes: 5 << 20,
+      max_files: 1,
+    });
+    spec.limits = Some(wharf_api_types::spec::Limits {
+      pids: Some(128),
+      ..Default::default()
+    });
+    for yaml in [
+      service_compose("app", &spec, &BTreeMap::new(), &[], None)
+        .unwrap()
+        .0,
+      trial_compose("app", &spec, None).unwrap().0,
+    ] {
+      let doc = parse_compose(&yaml).unwrap();
+      let app = &doc["services"]["app"];
+      assert_eq!(app["command"][1].as_str(), Some("$$HOME"));
+      assert!(app.get("entrypoint").is_none());
+      assert_eq!(app["shm_size"].as_u64(), Some(128 << 20));
+      assert_eq!(
+        app["cap_add"][0].as_str(),
+        Some("NET_BIND_SERVICE")
+      );
+      assert_eq!(
+        app["ulimits"]["nofile"]["hard"].as_i64(),
+        Some(2048)
+      );
+      assert_eq!(app["init"].as_bool(), Some(true));
+      assert_eq!(app["group_add"][0].as_str(), Some("44"));
+      assert_eq!(app["hostname"].as_str(), Some("worker-a"));
+      assert_eq!(
+        app["volumes"][0]["tmpfs"]["size"].as_u64(),
+        Some(64 << 20)
+      );
+      assert_eq!(
+        app["environment"]["TZ"].as_str(),
+        Some("UTC-08:00")
+      );
+      assert_eq!(
+        app["logging"]["options"]["max-file"].as_str(),
+        Some("1")
+      );
+      assert_eq!(app["pids_limit"].as_u64(), Some(128));
+    }
+  }
+
+  #[test]
+  fn component_limits_preserve_other_services_and_reject_conflicts() {
+    let raw = "# 保留注释\nservices:\n  web:\n    image: alpine\n    mem_limit: 256m\n  db:\n    image: alpine\n    deploy:\n      replicas: 2\n";
+    let mut spec: ServiceSpec = serde_json::from_value(serde_json::json!({
+      "server":"s1", "source":{"compose":{"content":raw}}, "container":"web",
+      "container_limits":{"db":{"memory_mb":512,"pids":128}}
+    })).unwrap();
+    let yaml = compose_with_settings("app", raw, &spec).unwrap();
+    assert!(yaml.starts_with("# 保留注释\nservices:\n  web:\n    image: alpine\n    mem_limit: 256m\n"));
+    assert_eq!(
+      parse_compose(&yaml).unwrap()["services"]["db"]["pids_limit"]
+        .as_u64(),
+      Some(128)
+    );
+    assert_eq!(
+      crate::lint::compose_memory_limits(&spec),
+      Some((768 << 20, true))
+    );
+    spec.container_limits.get_mut("db").unwrap().memory_mb = None;
+    assert_eq!(
+      crate::lint::compose_memory_limits(&spec),
+      Some((256 << 20, false))
+    );
+    spec.container_limits.insert(
+      "web".into(),
+      wharf_api_types::spec::Limits {
+        memory_mb: Some(256),
+        ..Default::default()
+      },
+    );
+    assert!(
+      compose_with_settings("app", raw, &spec)
+        .unwrap_err()
+        .message
+        .contains("已在 Compose 原文设置")
+    );
   }
 
   #[test]
@@ -2831,6 +3478,7 @@ mod tests {
     spec.limits = Some(wharf_api_types::spec::Limits {
       memory_mb: Some(512),
       cpu_milli: Some(500),
+      pids: None,
     });
     let out =
       service_compose("s1", &spec, &BTreeMap::new(), &[], None)
@@ -2862,6 +3510,7 @@ mod tests {
       spec.limits = Some(Limits {
         memory_mb: memory,
         cpu_milli: cpu,
+        pids: None,
       });
     }
     spec.env = env

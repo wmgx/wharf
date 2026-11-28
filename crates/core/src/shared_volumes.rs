@@ -392,9 +392,11 @@ mod tests {
       .env
       .insert("READER".into(), "[[@reader.http]]".into());
     let up = |name: &str| Step::ServiceUp {
+      images: Default::default(),
       service: name.into(),
       instance_id: None,
       expect: None,
+      refresh_files_from: None,
     };
     let down = |name: &str| Step::ServiceDown {
       service: name.into(),

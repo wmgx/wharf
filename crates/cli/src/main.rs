@@ -41,6 +41,7 @@ mod preview;
 mod print;
 mod probe;
 mod report;
+mod runtime_options;
 mod schema;
 mod secret_import;
 mod selfcmd;
@@ -51,6 +52,7 @@ mod task_artifacts;
 mod token;
 mod top;
 mod tunnel;
+mod variables;
 mod view;
 mod wait;
 
@@ -407,6 +409,9 @@ pub enum Command {
   /// 首页书签。
   #[command(subcommand)]
   Bookmark(bookmark::BookmarkCmd),
+  /// 查看或修改全局变量。
+  #[command(subcommand)]
+  Var(variables::VarCmd),
   /// 密钥。服务的环境变量里用 `[[NAME]]` 引用。
   #[command(subcommand)]
   Secret(SecretCmd),
@@ -538,6 +543,8 @@ pub enum CoreSnapshotCmd {
 
 #[derive(Args)]
 pub struct DeployOps {
+  #[command(flatten)]
+  pub runtime: Box<runtime_options::RuntimeOptions>,
   /// 启动前等待，写作 KEY=service:NAME、KEY=tcp:NAME.PORT 或 KEY=dns:HOST。
   #[arg(long, conflicts_with = "clear_wait_for")]
   pub add_wait_for: Vec<String>,
@@ -574,6 +581,44 @@ pub struct DeployOps {
   pub unset_stop_signal: bool,
   #[arg(long, conflicts_with = "init_cmd")]
   pub unset_init_cmd: bool,
+  #[arg(long, conflicts_with_all = ["no_lan", "inherit_lan"])]
+  pub lan: bool,
+  #[arg(long, conflicts_with = "inherit_lan")]
+  pub no_lan: bool,
+  #[arg(long)]
+  pub inherit_lan: bool,
+  #[arg(long, value_name = "NAME=IP")]
+  pub add_extra_host: Vec<String>,
+  #[arg(long, value_name = "NAME")]
+  pub rm_extra_host: Vec<String>,
+  #[arg(long, conflicts_with = "no_self_refs")]
+  pub self_refs: bool,
+  #[arg(long)]
+  pub no_self_refs: bool,
+  #[arg(long, value_name = "NAME[=internal]")]
+  pub add_network: Vec<String>,
+  #[arg(long, value_name = "NAME")]
+  pub rm_network: Vec<String>,
+  #[arg(long, conflicts_with = "no_compose_env")]
+  pub compose_env: bool,
+  #[arg(long)]
+  pub no_compose_env: bool,
+  #[arg(long, value_name = "HOST_PATH:/TARGET[:ro|:rw]")]
+  pub add_host_volume: Vec<String>,
+  #[arg(long, value_name = "TARGET")]
+  pub rm_host_volume: Vec<String>,
+  #[arg(long, conflicts_with = "unset_user")]
+  pub user: Option<String>,
+  #[arg(long)]
+  pub unset_user: bool,
+  #[arg(long, value_name = "NAME=UID:GID|auto")]
+  pub volume_owner: Vec<String>,
+  #[arg(long, value_name = "NAME")]
+  pub unset_volume_owner: Vec<String>,
+  #[arg(long, conflicts_with = "no_use_egress")]
+  pub use_egress: bool,
+  #[arg(long)]
+  pub no_use_egress: bool,
 }
 
 /// 看日志的公共参数。
@@ -864,6 +909,8 @@ pub enum ServerCmd {
   },
   /// 修改服务器设置。
   Set {
+    #[command(flatten)]
+    task_limits: runtime_options::ServerTaskLimitEdits,
     name: String,
     #[arg(long, value_parser = ["cn", "overseas"])]
     region: Option<String>,
@@ -1529,19 +1576,11 @@ pub enum ServiceCmd {
     /// 目标 Compose 容器。
     #[arg(long)]
     container: Option<String>,
-    /// 内存上限，单位 MB；给 0 去掉这一项。
-    #[arg(long)]
-    memory: Option<u32>,
-    /// CPU 上限，单位核，可以是小数；给 0 去掉这一项。
-    #[arg(long)]
-    cpus: Option<f64>,
-    /// 去掉全部上限。
-    #[arg(long)]
+    #[command(flatten)]
+    limits: runtime_options::LimitEdits,
+    /// 去掉选中容器的全部上限。
+    #[arg(long, conflicts_with_all = ["memory", "cpus", "pids", "unset_memory", "unset_cpus", "unset_pids"])]
     off: bool,
-    #[arg(long, conflicts_with_all = ["memory", "off"])]
-    unset_memory: bool,
-    #[arg(long, conflicts_with_all = ["cpus", "off"])]
-    unset_cpus: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -1565,8 +1604,43 @@ pub enum ServiceCmd {
     #[arg(long, requires = "path")]
     rm: bool,
     #[command(flatten)]
+    metadata: FileOptions,
+    #[command(flatten)]
     apply: ApplyFlags,
   },
+}
+
+#[derive(Args)]
+pub struct FileOptions {
+  #[arg(long, requires = "path", conflicts_with_all = ["no_init_only", "rm"])]
+  pub init_only: bool,
+  #[arg(long, requires = "path", conflicts_with = "rm")]
+  pub no_init_only: bool,
+  #[arg(long, requires = "path", conflicts_with_all = ["unset_mode", "rm"])]
+  pub mode: Option<String>,
+  #[arg(long, requires = "path", conflicts_with = "rm")]
+  pub unset_mode: bool,
+  #[arg(long, requires = "path", conflicts_with_all = ["unset_owner", "rm"])]
+  pub owner: Option<String>,
+  #[arg(long, requires = "path", conflicts_with = "rm")]
+  pub unset_owner: bool,
+  #[arg(long, requires = "path", conflicts_with_all = ["unset_on_change", "rm"])]
+  pub on_change: Option<String>,
+  #[arg(long, requires = "path", conflicts_with = "rm")]
+  pub unset_on_change: bool,
+}
+
+impl FileOptions {
+  pub fn has_edits(&self) -> bool {
+    self.init_only
+      || self.no_init_only
+      || self.mode.is_some()
+      || self.unset_mode
+      || self.owner.is_some()
+      || self.unset_owner
+      || self.on_change.is_some()
+      || self.unset_on_change
+  }
 }
 
 #[derive(Subcommand)]

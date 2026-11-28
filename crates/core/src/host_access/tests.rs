@@ -198,9 +198,11 @@ fn privileged_service_env_update_still_requires_host() {
     items: vec![1],
     title: String::new(),
     step: Step::ServiceUp {
+      images: Default::default(),
       instance_id: None,
       service: "app".into(),
       expect: None,
+      refresh_files_from: None,
     },
   }];
   let marked = plan(
@@ -505,9 +507,11 @@ fn plans_check_current_switch_and_control_plane() {
   let mut desired = current.clone();
   desired.apply_changes(&[service(PRIVILEGED, None)]).unwrap();
   let compose = Step::ServiceUp {
+    images: Default::default(),
     instance_id: None,
     service: "app".into(),
     expect: None,
+    refresh_files_from: None,
   };
   let baseline = Step::Baseline {
     server: "s1".into(),

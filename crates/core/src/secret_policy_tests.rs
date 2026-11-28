@@ -24,6 +24,7 @@ fn add_service(world: &mut World, name: &str, value: Value) {
   world.services.insert(
     name.into(),
     ServiceRow {
+      host_groups: Default::default(),
       instance_id: "svc_fixture".into(),
       spec: serde_json::from_value(value).unwrap(),
       host_ports: Default::default(),

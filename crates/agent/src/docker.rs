@@ -38,6 +38,7 @@ const FOLLOW_MAX: Duration = Duration::from_secs(30 * 60);
 pub struct Previous {
   pub compose: String,
   pub hash: String,
+  pub project_env: Option<String>,
   /// 旧容器用的镜像：compose 里写的镜像名和当时的镜像 ID。
   pub images: BTreeMap<String, String>,
 }
@@ -130,11 +131,36 @@ impl Docker {
   /// `docker compose -p <project> -f <dir>/compose.yaml ...`
   pub fn compose(&self, project: &str) -> Cmd {
     let dir = self.project_dir(project);
-    self
-      .cmd()
-      .args(["compose", "-p", project, "-f"])
-      .arg(dir.join("compose.yaml").display().to_string())
-      .cwd(&dir)
+    let env = self.project_env_path(project);
+    self.compose_file(
+      project,
+      &dir,
+      &dir.join("compose.yaml"),
+      env.is_file().then_some(&env),
+    )
+  }
+
+  fn compose_file(
+    &self,
+    project: &str,
+    dir: &Path,
+    file: &Path,
+    env: Option<&Path>,
+  ) -> Cmd {
+    let mut cmd = self.cmd().args(["compose", "-p", project]);
+    if let Some(env) = env {
+      cmd = cmd
+        .arg("--env-file")
+        .arg(env.display().to_string())
+        .clear_env();
+      for key in ["PATH", "HOME", "DOCKER_CONFIG", "XDG_CONFIG_HOME"]
+      {
+        if let Ok(value) = std::env::var(key) {
+          cmd = cmd.env(key, &value);
+        }
+      }
+    }
+    cmd.arg("-f").arg(file.display().to_string()).cwd(dir)
   }
 
   pub async fn versions(&self) -> (Option<String>, Option<String>) {
@@ -296,6 +322,52 @@ impl Docker {
     write_private(&dir.join("compose.yaml"), compose)
   }
 
+  fn project_env_path(&self, project: &str) -> PathBuf {
+    self
+      .data_dir
+      .join("project-env")
+      .join(format!("{project}.env"))
+  }
+
+  pub(crate) fn read_project_env(
+    &self,
+    project: &str,
+  ) -> Result<Option<String>, ApiError> {
+    let env = self.project_env_path(project);
+    match std::fs::read_to_string(&env) {
+      Ok(value) => Ok(Some(value)),
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Ok(None)
+      }
+      Err(error) => Err(io_err(&env)(error)),
+    }
+  }
+
+  pub(crate) fn write_project_env(
+    &self,
+    project: &str,
+    content: Option<&str>,
+  ) -> Result<(), ApiError> {
+    let env = self.project_env_path(project);
+    if let Some(content) = content {
+      let dir = env.parent().expect("项目变量目录");
+      use std::os::unix::fs::DirBuilderExt;
+      std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(io_err(dir))?;
+      return write_private(&env, content);
+    }
+    match std::fs::remove_file(&env) {
+      Ok(()) => Ok(()),
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Ok(())
+      }
+      Err(error) => Err(io_err(&env)(error)),
+    }
+  }
+
   pub fn write_hash(
     &self,
     project: &str,
@@ -318,18 +390,92 @@ impl Docker {
     &self,
     project: &str,
     compose: &str,
+    env: Option<&str>,
     ctx: &Ctx,
   ) -> Result<Vec<String>, ApiError> {
     let dir = self.project_dir(project);
     std::fs::create_dir_all(&dir).map_err(io_err(&dir))?;
     let pending = TempCompose(dir.join("compose.yaml.next"));
     write_private(&pending.0, compose)?;
-    let cmd = self
-      .cmd()
-      .args(["compose", "-p", project, "-f"])
-      .arg(pending.0.display().to_string())
-      .cwd(&dir);
-    self.compose_images(cmd, ctx).await
+    let pending_env = env
+      .map(|content| {
+        let dir = tempfile::tempdir().map_err(|_| {
+          ApiError::internal("无法建立私有 Compose 校验目录")
+        })?;
+        write_private(&dir.path().join("project.env"), content)?;
+        Ok::<_, ApiError>(dir)
+      })
+      .transpose()?;
+    let env = pending_env
+      .as_ref()
+      .map(|dir| dir.path().join("project.env"));
+    let cmd =
+      self.compose_file(project, &dir, &pending.0, env.as_deref());
+    match self.compose_images(cmd, ctx).await {
+      Err(error)
+        if env.is_some() && error.code == ErrorCode::AgentFailed =>
+      {
+        Err(
+          ApiError::invalid("Compose 项目变量校验失败")
+            .with_hint("检查已声明的环境变量及表达式"),
+        )
+      }
+      result => result,
+    }
+  }
+
+  pub(crate) async fn check_project_env(
+    &self,
+    project: &str,
+    compose: &str,
+    inputs: &BTreeMap<String, String>,
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    use wharf_api_types::compose::{parse_compose, project_env_keys};
+    let keys = project_env_keys(&parse_compose(compose)?)?;
+    let temp = tempfile::Builder::new()
+      .prefix("wharf-compose-check-")
+      .tempdir()
+      .map_err(|_| {
+        ApiError::internal("无法建立私有 Compose 校验目录")
+      })?;
+    let file = temp.path().join("compose.yaml");
+    let env = temp.path().join("project.env");
+    write_private(&file, compose)?;
+    write_private(&env, &dotenv(inputs)?)?;
+    let quiet = Ctx {
+      progress: None,
+      cancel: ctx.cancel.clone(),
+    };
+    let result = self
+      .compose_file(project, temp.path(), &file, Some(&env))
+      .args(["config", "--quiet"])
+      .timeout(Duration::from_secs(25))
+      .run(&quiet)
+      .await?;
+    if !result.success {
+      if let Some(key) = keys
+        .iter()
+        .filter(|key| !inputs.contains_key(*key))
+        .find(|key| {
+          result.stderr.contains(&format!("required variable {key} "))
+        })
+      {
+        return Err(
+          ApiError::invalid(format!(
+            "服务 {project} 的 Compose 插值缺少 {key}"
+          ))
+          .with_hint(format!("补上 --add-env {key}=...")),
+        );
+      }
+      return Err(
+        ApiError::invalid(format!(
+          "服务 {project} 的 Compose 项目变量校验失败"
+        ))
+        .with_hint("检查 environment 中的变量表达式及必填项"),
+      );
+    }
+    Ok(())
   }
 
   async fn compose_images(
@@ -881,6 +1027,7 @@ impl Docker {
       .run(ctx)
       .await?
       .check("docker compose down")?;
+    self.write_project_env(project, None)?;
     if remove_srv_data {
       let path = Path::new("/srv").join(project);
       let users = self.bind_mount_users(&path, ctx).await?;
@@ -1011,6 +1158,7 @@ impl Docker {
         .trim()
         .to_string(),
       images: BTreeMap::new(),
+      project_env: self.read_project_env(project).ok()?,
     })
   }
 
@@ -1498,6 +1646,12 @@ pub(crate) fn clean_project_dir(
     Err(e) if e.kind() == ErrorKind::NotFound => return Ok(true),
     Err(e) => return Err(io_err(dir)(e)),
   }
+  if dir.join(crate::live_limits::JOURNAL).exists() {
+    return Err(ApiError::new(
+      ErrorCode::Busy,
+      "项目仍有待恢复的限额更新",
+    ));
+  }
   remove_files(
     dir,
     &[
@@ -1725,6 +1879,36 @@ pub fn io_err(
       format!("读写 {} 失败：{e}", path.display()),
     )
   }
+}
+
+pub(crate) fn dotenv(
+  values: &BTreeMap<String, String>,
+) -> Result<String, ApiError> {
+  let mut out = String::new();
+  for (key, value) in values {
+    if !wharf_api_types::compose::valid_project_env_key(key)
+      || value.contains('\0')
+    {
+      return Err(ApiError::invalid(
+        "Compose 项目变量键不合法或值含 NUL",
+      ));
+    }
+    out.push_str(key);
+    out.push_str("=\"");
+    for ch in value.chars() {
+      match ch {
+        '$' => out.push_str("$$"),
+        '\\' => out.push_str("\\\\"),
+        '"' => out.push_str("\\\""),
+        '\n' => out.push_str("\\n"),
+        '\r' => out.push_str("\\r"),
+        '\t' => out.push_str("\\t"),
+        _ => out.push(ch),
+      }
+    }
+    out.push_str("\"\n");
+  }
+  Ok(out)
 }
 
 pub fn write_private(
@@ -2471,5 +2655,95 @@ fn parse_running_images_maps_multiple_containers() {
       ("worker:2".into(), "id2".into()),
       ("db:latest".into(), "id3".into())
     ])
+  );
+}
+
+#[tokio::test]
+async fn native_compose_project_env_round_trips_without_expanding_the_input()
+ {
+  if std::env::var_os("WHARF_TEST_COMPOSE").is_none() {
+    return;
+  }
+  let dir = tempfile::tempdir().unwrap();
+  let docker = Docker {
+    bin: "docker".into(),
+    data_dir: dir.path().into(),
+  };
+  let ctx = Ctx::detached();
+  let yaml = r#"
+services:
+  first:
+    image: alpine
+    environment:
+      VALUE: '${VALUE:?required}'
+  second:
+    image: alpine
+    environment: ['VALUE=${VALUE:?required}', 'DEFAULT=${UNSET:-default}']
+"#;
+  let value = "line 1: $literal, \"quotes\", \\backslash\nline 2";
+  let inputs =
+    BTreeMap::from([("VALUE".to_string(), value.to_string())]);
+  docker
+    .check_project_env("p23-fixture", yaml, &inputs, &ctx)
+    .await
+    .unwrap();
+  assert!(
+    docker
+      .check_project_env("p23-fixture", yaml, &BTreeMap::new(), &ctx)
+      .await
+      .is_err()
+  );
+  docker.write_compose("p23-fixture", yaml).unwrap();
+  let user_dotenv = docker.project_dir("p23-fixture").join(".env");
+  std::fs::write(&user_dotenv, "VALUE=from-user-file\n").unwrap();
+  let old_name =
+    docker.project_dir("p23-fixture").join(".wharf-project.env");
+  std::fs::write(&old_name, "VALUE=user-managed\n").unwrap();
+  assert_eq!(docker.read_project_env("p23-fixture").unwrap(), None);
+  docker
+    .write_project_env("p23-fixture", Some(&dotenv(&inputs).unwrap()))
+    .unwrap();
+  let env = docker
+    .compose("p23-fixture")
+    .args(["config", "--environment"])
+    .timeout(Duration::from_secs(20))
+    .run(&ctx)
+    .await
+    .unwrap()
+    .check("Compose dotenv")
+    .unwrap();
+  assert!(env.stdout.contains(&format!("VALUE={value}\n")));
+  let doc = docker
+    .compose("p23-fixture")
+    .args(["config", "--format", "json"])
+    .timeout(Duration::from_secs(20))
+    .run(&ctx)
+    .await
+    .unwrap()
+    .check("Compose dotenv")
+    .unwrap();
+  let doc: serde_json::Value =
+    serde_json::from_str(&doc.stdout).unwrap();
+  let escaped = value.replace('$', "$$");
+  for service in ["first", "second"] {
+    let actual = doc["services"][service]["environment"]["VALUE"]
+      .as_str()
+      .unwrap();
+    // Compose 2.x 的 config 输出会把字面量 $ 转义为 $$。
+    assert!(actual == value || actual == escaped);
+  }
+  assert_eq!(
+    doc["services"]["second"]["environment"]["DEFAULT"].as_str(),
+    Some("default")
+  );
+  docker.write_project_env("p23-fixture", None).unwrap();
+  assert_eq!(docker.read_project_env("p23-fixture").unwrap(), None);
+  assert_eq!(
+    std::fs::read_to_string(old_name).unwrap(),
+    "VALUE=user-managed\n"
+  );
+  assert_eq!(
+    std::fs::read_to_string(user_dotenv).unwrap(),
+    "VALUE=from-user-file\n"
   );
 }

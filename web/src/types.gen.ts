@@ -592,6 +592,13 @@ export interface CertStatus {
  * 对期望状态的局部修改。CLI 的 `service deploy`、`route add` 等命令都生成它。
  */
 export type Change = {
+  name: string;
+  op: "upsert_var";
+  value: string;
+} | {
+  name: string;
+  op: "remove_var";
+} | {
   id: string | null;
   op: "upsert_bookmark";
   spec: BookmarkSpec;
@@ -673,6 +680,20 @@ export interface CleanupSkippedServer {
   hint?: string | null;
   reason: string;
   server: string;
+}
+
+export interface ComponentMetrics {
+  cpu: number;
+  mem: number;
+}
+
+export interface ComponentUsage {
+  cpu_limit_milli: number | null;
+  cpu_peak: number | null;
+  memory_limit: number | null;
+  memory_peak: number | null;
+  name: string;
+  pids_limit: number | null;
 }
 
 export interface ContainerInfo {
@@ -1365,6 +1386,10 @@ export interface FileSpec {
    * 意图文件中的外置配置路径。
    */
   file?: string | null;
+  init_only?: boolean;
+  mode?: string | null;
+  on_change?: string | null;
+  owner?: string | null;
   /**
    * 容器内的绝对路径，例如 `/etc/app/config.yaml`。
    */
@@ -1618,6 +1643,8 @@ export interface ImageInfo {
   image: string;
 }
 
+export type ImagePullMode = "if_missing" | "never" | "always";
+
 export interface ImageRow {
   id: string;
   image: string;
@@ -1641,7 +1668,7 @@ export interface ImagesView {
 /**
  * 计划项会造成的影响，一项可以有多个。
  */
-export type Impact = "restart" | "downtime" | "remove" | "data_loss" | "overwrite" | "public";
+export type Impact = "privilege" | "restart" | "downtime" | "remove" | "data_loss" | "overwrite" | "public";
 
 /**
  * 导入预览：用 `upsert_service` 提交即可。
@@ -1768,6 +1795,7 @@ export interface Limits {
    * 内存上限，单位 MB。
    */
   memory_mb?: number | null;
+  pids?: number | null;
 }
 
 /**
@@ -1824,6 +1852,11 @@ export interface LogHit {
   count: number;
   id: string;
   lines: string[];
+}
+
+export interface LogMax {
+  max_bytes: number;
+  max_files: number;
 }
 
 export interface LoginScript {
@@ -2061,6 +2094,10 @@ export interface NetProbeTcp {
 export interface NetProbeTls {
   verified: boolean;
   verify_error: string | null;
+}
+
+export interface NetworkAttachment {
+  internal?: boolean;
 }
 
 /**
@@ -2393,6 +2430,7 @@ export interface ProbeView {
 }
 
 export interface ProjectMetrics {
+  components?: Record<string, ComponentMetrics>;
   /**
    * 占整机 CPU 的百分比，0 到 100。
    */
@@ -2900,6 +2938,7 @@ export interface ServerSettings {
    * 服务器续费日（`YYYY-MM-DD`，北京时间）。只用来提醒，不影响任何部署。
    */
   renew_at?: string | null;
+  task_limits?: Limits | null;
   /**
    * 每月流量额度（GB），用于显示本期用了多少，用到 80% 时提醒（阈值在告警规则里改）。
    */
@@ -3037,6 +3076,7 @@ export interface ServiceExecResponse {
 export interface ServiceRenderView {
   compose: string;
   init_cmd?: string | null;
+  project_env_keys?: string[];
   secrets_masked?: string[];
   server: string;
   service: string;
@@ -3093,10 +3133,14 @@ export interface ServiceSpec {
    * 每天自动备份 `/srv/<服务>/` 到另一台服务器（restic）。
    */
   backup?: BackupSpec | null;
+  cap_add?: string[];
+  command?: string[] | null;
+  compose_env?: boolean;
   /**
    * compose 来源：环境变量、资源上限和配置文件加在哪个容器上。只有一个容器时不用填。
    */
   container?: string | null;
+  container_limits?: Record<string, Limits>;
   /**
    * 环境变量。值里可以用 `[[SECRET_NAME]]` 引用密钥；compose 来源加到 `container` 指定的容器上，
    * compose 文件内容也会做同样的替换。
@@ -3104,13 +3148,17 @@ export interface ServiceSpec {
    * `[[@服务.端口名]]` 指定端口，末尾加 `:host` / `:port` 只取地址或端口。
    */
   env?: Record<string, string>;
+  extra_hosts?: Record<string, string>;
   extra_logs?: string[];
   /**
    * 配置文件：内容存在 Wharf 里，部署时放进容器（只读，属主 root），跟着部署历史和回滚走。
    * 应用自己改写的内容下次部署会被覆盖。
    */
   files?: FileSpec[];
+  group_add?: string[];
   heartbeat?: HeartbeatSpec | null;
+  hostname?: string | null;
+  init?: boolean | null;
   /**
    * 部署前在临时容器内执行的初始化命令。
    */
@@ -3119,22 +3167,28 @@ export interface ServiceSpec {
    * 初始化超时秒数（10 到 1800），缺省 300 秒。
    */
   init_timeout_secs?: number | null;
+  lan?: boolean | null;
   /**
    * 资源上限，不填不限。
    */
   limits?: Limits | null;
   log_alerts?: LogAlertSpec[];
+  log_max?: LogMax | null;
   /**
    * 自定义监控：服务所在机器的 agent 每分钟从本机请求一次，连续 3 次不正常推送。
    */
   monitor?: MonitorSpec | null;
+  networks?: Record<string, NetworkAttachment>;
   port_checks?: Record<string, PortCheckSpec>;
   ports?: PortSpec[];
+  pull_policy?: ImagePullMode | null;
   restart_schedule?: RestartSchedule | null;
+  self_refs?: boolean;
   /**
    * 运行在哪台服务器上。
    */
   server: string;
+  shm_size?: number | null;
   source: Source;
   /**
    * 启动等待上限（秒），缺省 120。
@@ -3152,10 +3206,15 @@ export interface ServiceSpec {
    * 停止：容器保留但不运行，部署后也保持停止。不影响 compose，也就不会重建容器。
    */
   stopped?: boolean;
+  timezone?: string | null;
+  tmpfs?: Record<string, number>;
+  ulimits?: Record<string, Ulimit>;
   /**
    * 镜像和构建版本的更新忽略规则。
    */
   update_ignore?: UpdateIgnoreSpec[];
+  use_egress?: boolean;
+  user?: string | null;
   volumes?: VolumeSpec[];
   wait_for?: Record<string, WaitCondition>;
   wait_for_timeout_secs?: number | null;
@@ -3524,6 +3583,8 @@ export type TaskSpec = ({
    */
   catch_up_mins?: number | null;
   enabled: boolean;
+  inherit_server_limits?: boolean;
+  limits?: Limits | null;
   /**
    * 失败和恢复时发通知。
    */
@@ -3541,6 +3602,7 @@ export type TaskSpec = ({
    * 超时秒数，默认 600；宿主机命令最长 600，其他最长 6 小时。
    */
   timeout_secs: number;
+  use_egress?: boolean;
 };
 
 export type TaskStatus = "running" | "succeeded" | "failed" | "timed_out" | "skipped" | "cancelled";
@@ -3653,6 +3715,11 @@ export interface TrustedProxiesSpec {
   cluster?: boolean;
 }
 
+export interface Ulimit {
+  hard: number;
+  soft: number;
+}
+
 /**
  * `GET /api/servers/{name}/unmanaged`：服务器上还没纳管的一组容器，
  * 是一个 compose 项目或一个 `docker run` 起的容器。
@@ -3696,6 +3763,7 @@ export type Upstream = "docker_hub" | "git_hub" | "cloudflare";
 export type UsageKind = "service" | "gateway" | "agent";
 
 export interface UsageRow {
+  components?: ComponentUsage[];
   cpu: number | null;
   kind: UsageKind;
   mem: number | null;
@@ -3740,10 +3808,12 @@ export interface VolumeSpec {
    * 同机拥有者的托管卷，格式为 <服务名>:<卷名>。
    */
   from_service?: string | null;
+  host_path?: string | null;
   /**
    * 本地卷名。共享卷省略时取拥有者的卷名。
    */
   name?: string;
+  owner?: string | null;
   read_only?: boolean;
   target: string;
 }

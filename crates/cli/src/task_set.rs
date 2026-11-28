@@ -6,6 +6,8 @@ use std::{collections::BTreeMap, io::Read};
 
 #[derive(Args, Default)]
 pub struct SetArgs {
+  #[command(flatten)]
+  resources: crate::runtime_options::TaskLimitEdits,
   name: String,
   #[arg(long)]
   dry_run: bool,
@@ -71,15 +73,24 @@ pub struct SetArgs {
   artifacts_max_mb: Option<u32>,
   #[arg(long)]
   artifacts_keep: Option<u32>,
+  #[arg(long, conflicts_with = "no_use_egress")]
+  use_egress: bool,
+  #[arg(long)]
+  no_use_egress: bool,
 }
 
 impl SetArgs {
   fn edits(
     &self,
-  ) -> [(bool, &'static str, &'static [&'static str]); 25] {
+  ) -> [(bool, &'static str, &'static [&'static str]); 26] {
     [
       (self.schedule.is_some(), "--schedule", &[]),
-      (self.clear_schedule, "--clear-schedule", &["脚本"]),
+      (self.use_egress || self.no_use_egress, "--use-egress", &[]),
+      (
+        self.clear_schedule,
+        "--clear-schedule",
+        &["脚本", "容器内", "一次性容器", "宿主机"],
+      ),
       (self.server.is_some(), "--server", &[]),
       (self.timeout.is_some(), "--timeout", &[]),
       (self.notify.is_some(), "--notify", &[]),
@@ -143,7 +154,8 @@ impl SetArgs {
   }
 
   fn has_edits(&self) -> bool {
-    self.edits().iter().any(|(present, _, _)| *present)
+    self.resources.has_edits()
+      || self.edits().iter().any(|(present, _, _)| *present)
   }
 }
 
@@ -189,6 +201,7 @@ fn apply_task_set(
   spec: &mut TaskSpec,
   args: &SetArgs,
 ) -> Result<(), ApiError> {
+  args.resources.apply(spec)?;
   let current = kind(&spec.how);
   for (present, flag, allowed) in args.edits() {
     if present && !allowed.is_empty() && !allowed.contains(&current) {
@@ -199,6 +212,9 @@ fn apply_task_set(
         .with_hint("更换任务形式请用 wharf task add"),
       );
     }
+  }
+  if args.use_egress || args.no_use_egress {
+    spec.use_egress = args.use_egress;
   }
   if let Some(server) = &args.server {
     spec.server.clone_from(server);

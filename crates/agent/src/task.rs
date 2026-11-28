@@ -30,6 +30,24 @@ use crate::{
 
 /// 输出只留最后这么多字节。
 const OUTPUT_TAIL: usize = 16 * 1024;
+
+fn add_resource_limits(mut cmd: Cmd, job: &TaskRunJob) -> Cmd {
+  if let Some(limits) = &job.limits {
+    if let Some(value) = limits.memory_mb {
+      cmd = cmd.args(["--memory", &format!("{value}m")]);
+    }
+    if let Some(value) = limits.cpu_milli {
+      cmd = cmd.args([
+        "--cpus",
+        &format!("{}.{:03}", value / 1000, value % 1000),
+      ]);
+    }
+    if let Some(value) = limits.pids {
+      cmd = cmd.args(["--pids-limit", &value.to_string()]);
+    }
+  }
+  cmd
+}
 const QUICK: Duration = Duration::from_secs(20);
 const MAX_TIMEOUT: u64 = 6 * 3600;
 const MAX_RESULT: u64 = 64 * 1024;
@@ -53,6 +71,13 @@ pub async fn run(
   }
   if job.out_dir {
     return run_sso(docker, job, ctx).await;
+  }
+  let proxy = job.workload_no_proxy.as_deref();
+  if proxy.is_some() {
+    crate::workload_egress::require_running()?;
+    if !matches!(job.how, TaskHow::Exec { .. }) && !job.network_host {
+      crate::workload_egress::default_bridge(docker, ctx).await?;
+    }
   }
   let timeout = Duration::from_secs(job.timeout_secs);
   let started = Instant::now();
@@ -92,6 +117,16 @@ pub async fn run(
         clear_deps(&deps_dir)?;
       }
       let mut vars = env.clone();
+      if let Some(bypass) = proxy {
+        let host = if job.network_host {
+          "127.0.0.1"
+        } else {
+          wharf_api_types::egress::WORKLOAD_PROXY_HOST
+        };
+        wharf_api_types::egress::workload_env(
+          host, bypass, &mut vars,
+        )?;
+      }
       if with_deps && *runtime == ScriptRuntime::Python {
         vars.insert("PYTHONPATH".into(), "/deps".into());
       }
@@ -151,6 +186,7 @@ pub async fn run(
           ])
           .args(["-v", &format!("{}:/deps", deps_dir.display())])
           .args(["-v", &format!("{}:/wharf:ro", dir.display())]);
+        cmd = add_resource_limits(cmd, job);
         cmd = match runtime {
           ScriptRuntime::Python => {
             let mut c = cmd.args([
@@ -240,6 +276,9 @@ pub async fn run(
       }
       if job.network_host {
         cmd = cmd.args(["--network", "host"]);
+      } else if proxy.is_some() {
+        cmd = cmd
+          .args(["--add-host", "host.docker.internal:host-gateway"]);
       }
       if *runtime == ScriptRuntime::Node
         && with_deps
@@ -261,7 +300,7 @@ pub async fn run(
       if let Some(dir) = &artifacts_dir {
         cmd = dir.mount(cmd);
       }
-      let run = cmd
+      let run = add_resource_limits(cmd, job)
         .args([
           "--entrypoint",
           entry,
@@ -307,9 +346,17 @@ pub async fn run(
       let id =
         find_container(docker, project, service.as_deref(), ctx)
           .await?;
+      let mut env = env.clone();
+      if let Some(bypass) = proxy {
+        let host =
+          crate::workload_egress::exec_host(docker, &id, ctx).await?;
+        wharf_api_types::egress::workload_env(
+          &host, bypass, &mut env,
+        )?;
+      }
       let result = if *cancellable || !env.is_empty() {
         crate::service_exec::run_task(
-          docker, &id, command, env, timeout, ctx,
+          docker, &id, command, &env, timeout, ctx,
         )
         .await
       } else {
@@ -342,8 +389,22 @@ pub async fn run(
         .cmd()
         .args(["run", "--rm", "--name", &name])
         .args(["--label", &format!("wharf.task={}", job.name)]);
-      let (with_env, work) =
-        container_env(cmd, &docker.data_dir, &job.name, env)?;
+      let mut effective_env = env.clone();
+      if let Some(bypass) = proxy {
+        wharf_api_types::egress::workload_env(
+          wharf_api_types::egress::WORKLOAD_PROXY_HOST,
+          bypass,
+          &mut effective_env,
+        )?;
+        cmd = cmd
+          .args(["--add-host", "host.docker.internal:host-gateway"]);
+      }
+      let (with_env, work) = container_env(
+        cmd,
+        &docker.data_dir,
+        &job.name,
+        &effective_env,
+      )?;
       cmd = with_env;
       for m in mounts {
         cmd = cmd.args(["-v", m]);
@@ -356,6 +417,7 @@ pub async fn run(
       if let Some(dir) = &artifacts_dir {
         cmd = dir.mount(cmd);
       }
+      cmd = add_resource_limits(cmd, job);
       cmd = match command {
         Some(c) => cmd.args(["--entrypoint", "sh", image, "-c", c]),
         None => cmd.arg(image),

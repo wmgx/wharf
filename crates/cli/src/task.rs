@@ -80,6 +80,8 @@ pub enum TaskCmd {
 
 #[derive(Args)]
 pub struct AddArgs {
+  #[command(flatten)]
+  resources: crate::runtime_options::TaskLimitEdits,
   name: String,
   /// 只预览会改什么，不保存。
   #[arg(long)]
@@ -145,6 +147,10 @@ pub struct AddArgs {
   /// 失败时不通知。
   #[arg(long)]
   no_notify: bool,
+  #[arg(long, conflicts_with = "no_use_egress")]
+  use_egress: bool,
+  #[arg(long)]
+  no_use_egress: bool,
   /// 关联服务停用时跳过，仅适用于容器内执行任务。
   #[arg(long)]
   skip_if_stopped: bool,
@@ -485,11 +491,28 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
         .into(),
     );
   };
-  let spec = TaskSpec {
+  let mut path = format!("/api/tasks/{}", seg(&a.name));
+  let before = crate::preview::get_or_null(c, &path).await?;
+  let previous = before.get("spec");
+  let prior_limits = previous
+    .and_then(|spec| spec.get("limits"))
+    .map(|value| {
+      serde_json::from_value::<Option<wharf_api_types::spec::Limits>>(
+        value.clone(),
+      )
+    })
+    .transpose()
+    .map_err(anyhow::Error::from)?
+    .flatten();
+  let mut spec = TaskSpec {
+    limits: prior_limits,
+    inherit_server_limits: previous
+      .and_then(|spec| spec["inherit_server_limits"].as_bool())
+      .unwrap_or_default(),
     server,
     schedule: match a.schedule {
       Some(s) => s,
-      None if matches!(how, TaskKind::Script { .. }) => String::new(),
+      None if !matches!(how, TaskKind::Ping { .. }) => String::new(),
       None => {
         return Err(ApiError::invalid("缺少 --schedule").into());
       }
@@ -498,11 +521,13 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
     timeout_secs: a.timeout,
     enabled: !a.disabled,
     notify: !a.no_notify,
+    use_egress: a.use_egress && !a.no_use_egress,
     skip_if_stopped: a.skip_if_stopped,
     catch_up_mins: a.catch_up,
     artifacts_max_mb: a.artifacts_max_mb,
     artifacts_keep: a.artifacts_keep,
   };
+  a.resources.apply(&mut spec)?;
   if a.rotate_token
     && !matches!(
       &spec.how,
@@ -512,11 +537,6 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
     return Err(ApiError::invalid("只有开启了 --hook 的脚本任务或 --ping 外部报到任务支持轮换口令").into());
   }
   if a.dry_run {
-    let before = crate::preview::get_or_null(
-      c,
-      &format!("/api/tasks/{}", seg(&a.name)),
-    )
-    .await?;
     let mut after =
       serde_json::to_value(&spec).map_err(anyhow::Error::from)?;
     if a.rotate_token {
@@ -529,7 +549,6 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
       &after,
     );
   }
-  let mut path = format!("/api/tasks/{}", seg(&a.name));
   if a.rotate_token {
     path.push_str("?rotate_token=true");
   }

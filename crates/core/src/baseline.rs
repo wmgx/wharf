@@ -283,6 +283,7 @@ pub async fn run(
     .call(
       server,
       AgentOp::HostExec(HostExecJob {
+        workload_no_proxy: None,
         stream: false,
         command,
         timeout_secs: EXEC_SECS,

@@ -494,6 +494,8 @@ pub(crate) async fn deploy_server(
     .call(
       &w.target,
       AgentOp::ProjectUp(ProjectUp {
+        image_pull_mode: None,
+        local_images: Default::default(),
         project: project.to_string(),
         compose,
         hash,
@@ -508,6 +510,13 @@ pub(crate) async fn deploy_server(
         start_timeout_secs: None,
         readiness: None,
         init: None,
+        networks: Default::default(),
+        project_env: None,
+        host_binds: Vec::new(),
+        volume_owners: Default::default(),
+        project_files: Vec::new(),
+        workload_egress: false,
+        refresh_files_from: None,
       }),
       SERVER_TIMEOUT,
       Some(progress.clone()),

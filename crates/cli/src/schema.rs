@@ -17,6 +17,7 @@ fn entries() -> BTreeMap<&'static str, Schema> {
     ("route", schema_for!(spec::RouteSpec)),
     ("change", schema_for!(spec::Change)),
     ("plan", schema_for!(plan::Plan)),
+    ("plan_run", schema_for!(crate::commands::PlanRun<'_>)),
     ("plan_summary", schema_for!(plan::PlanSummary)),
     ("run", schema_for!(plan::Run)),
     ("status", schema_for!(view::Status)),
@@ -111,6 +112,7 @@ fn entries() -> BTreeMap<&'static str, Schema> {
     ),
     ("server_view", schema_for!(view::ServerView)),
     ("service_render", schema_for!(view::ServiceRenderView)),
+    ("var", schema_for!(spec::VarView)),
     ("service_exec", schema_for!(view::ServiceExecResponse)),
     ("host_exec", schema_for!(view::HostExecResponse)),
     ("exec_stream_event", schema_for!(view::ExecStreamEvent)),
@@ -170,6 +172,10 @@ fn entries() -> BTreeMap<&'static str, Schema> {
     ("token_explain", schema_for!(view::TokenExplain)),
     ("report", schema_for!(wharf_api_types::report::ReportView)),
     ("top", schema_for!(wharf_api_types::resources::UsageRow)),
+    (
+      "service_limits",
+      schema_for!(crate::runtime_options::LimitView<'_>),
+    ),
     (
       "access_logs",
       schema_for!(wharf_api_types::access_logs::AccessLogsResult),
