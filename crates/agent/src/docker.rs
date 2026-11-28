@@ -1415,35 +1415,48 @@ pub(crate) fn clean_project_dir(
       "compose.tmp",
     ],
   )?;
-  // 只有网关会生成 conf；服务里的同名配置文件可能是用户挂载。
-  if !dir
+  // 只清理 Wharf 管理的网关和隧道配置。
+  let name = dir
     .file_name()
     .and_then(|name| name.to_str())
-    .is_some_and(|name| name.starts_with("wharf-gw-"))
-  {
+    .unwrap_or_default();
+  let files: &[&str] = if name.starts_with("wharf-gw-") {
+    &[
+      "Caddyfile",
+      "Caddyfile.next",
+      "Caddyfile.prev",
+      "Caddyfile.tmp",
+      "link.crt",
+      "link.crt.prev",
+      "link.crt.tmp",
+      "link.key",
+      "link.key.prev",
+      "link.key.tmp",
+      "link.tmp",
+      CONFIG_HASH_FILE,
+      ".wharf-config-hash.tmp",
+    ]
+  } else if name.starts_with("wharf-link-") {
+    &[
+      "frpc.toml",
+      "frpc.toml.next",
+      "frpc.toml.prev",
+      "frpc.toml.tmp",
+      "frpc.tmp",
+      "ca.pem",
+      "ca.pem.prev",
+      "ca.pem.tmp",
+      "ca.tmp",
+      CONFIG_HASH_FILE,
+      ".wharf-config-hash.tmp",
+    ]
+  } else {
     return remove_empty(dir);
-  }
+  };
   let conf = dir.join("conf");
   match fs::symlink_metadata(&conf) {
     Ok(meta) if meta.is_dir() => {
-      remove_files(
-        &conf,
-        &[
-          "Caddyfile",
-          "Caddyfile.next",
-          "Caddyfile.prev",
-          "Caddyfile.tmp",
-          "link.crt",
-          "link.crt.prev",
-          "link.crt.tmp",
-          "link.key",
-          "link.key.prev",
-          "link.key.tmp",
-          "link.tmp",
-          CONFIG_HASH_FILE,
-          ".wharf-config-hash.tmp",
-        ],
-      )?;
+      remove_files(&conf, files)?;
       remove_empty(&conf)?;
     }
     Ok(_) => {}
@@ -2058,6 +2071,24 @@ esac
     std::fs::write(conf.join("link.tmp"), "interrupted").unwrap();
     assert!(super::clean_project_dir(&gateway).unwrap());
     assert!(!gateway.exists());
+  }
+
+  #[test]
+  fn clean_project_dir_removes_managed_frpc_files() {
+    let root = tempfile::tempdir().unwrap();
+    let link = root.path().join("wharf-link-s1");
+    let conf = link.join("conf");
+    std::fs::create_dir_all(&conf).unwrap();
+    for file in [
+      "frpc.toml",
+      "frpc.toml.next",
+      "ca.pem",
+      ".wharf-config-hash",
+    ] {
+      std::fs::write(conf.join(file), "fixture").unwrap();
+    }
+    assert!(super::clean_project_dir(&link).unwrap());
+    assert!(!link.exists());
   }
 
   #[test]

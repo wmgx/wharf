@@ -537,6 +537,7 @@ pub(crate) fn route_view_with_upstream_error(
   Some((
     RouteView {
       failover_pending: crate::failover::pending_view(hostname),
+      failover_pinned: crate::failover::pinned(hostname),
       core: crate::gate::is_core_host(world, net, hostname),
       note: snap.route_notes.get(hostname).cloned(),
       sso_login: row

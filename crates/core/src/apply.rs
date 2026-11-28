@@ -464,6 +464,7 @@ pub(crate) async fn start_with_actor(
     let run_body = serde_json::to_string(&run).map_err(json_err)?;
     let actor_name = run.actor.clone();
     let confirmed = req.confirm;
+    let verify_before_dns = req.verify_before_dns;
     let run_status = if run.status == RunStatus::Running {
       "running"
     } else {
@@ -495,7 +496,7 @@ pub(crate) async fn start_with_actor(
           params![plan_id],
         )
         .map_err(sql_err)?;
-        let meta = retry::RetryMeta::capture(&tx, key, (step_plans, offset), account_refs, confirmed)?;
+        let meta = retry::RetryMeta::capture(&tx, key, (step_plans, offset), account_refs, confirmed, verify_before_dns)?;
         let meta = serde_json::to_string(&meta).map_err(json_err)?;
         tx.execute(
           "INSERT INTO runs (id, plan_id, status, body, started_at, actor, retry_meta) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -526,7 +527,7 @@ pub(crate) async fn start_with_actor(
       state.clone(),
       shared,
       stored.steps,
-      (first_pending, false),
+      (first_pending, false, req.verify_before_dns, None),
       actor.clone(),
       cancel,
       guard,
@@ -787,7 +788,14 @@ pub(crate) async fn start_task_locked(
     .call_credentials(move |c, key| {
       let meta = stored_steps
         .map(|steps| {
-          retry::RetryMeta::capture(c, key, (steps, 0), None, vec![])
+          retry::RetryMeta::capture(
+            c,
+            key,
+            (steps, 0),
+            None,
+            vec![],
+            None,
+          )
         })
         .transpose()?;
       insert_task_run(
@@ -798,7 +806,7 @@ pub(crate) async fn start_task_locked(
       )
     })
     .await?;
-  spawn_run(state, run, scope, steps, None, guard);
+  spawn_run(state, run, scope, steps, (None, Some(false)), guard);
   Ok(ApplyResponse { run_id })
 }
 
@@ -806,7 +814,8 @@ pub(crate) async fn run_batch_sync(
   state: Arc<AppState>,
   steps: Vec<StepPlan>,
   guard: OpLockGuard,
-) -> Result<(Vec<RunStep>, OpLockGuard), ApiError> {
+  manual_gateway: Option<String>,
+) -> Result<(String, Vec<RunStep>, OpLockGuard), ApiError> {
   let run = Run {
     run_id: crate::world::new_id("r"),
     plan_id: String::new(),
@@ -837,15 +846,15 @@ pub(crate) async fn run_batch_sync(
     state,
     shared.clone(),
     steps,
-    (0, true),
+    (0, true, Some(false), manual_gateway),
     None,
     cancel,
     guard,
   )
   .await
   .expect("独立 DNS 步骤保留执行锁");
-  let results = lock(&shared).steps.clone();
-  Ok((results, guard))
+  let run = lock(&shared);
+  Ok((run.run_id.clone(), run.steps.clone(), guard))
 }
 
 fn pending_run_step(step: &StepPlan) -> RunStep {
@@ -885,7 +894,10 @@ fn spawn_run(
   run: Run,
   scope_services: Option<Vec<String>>,
   steps: Vec<StepPlan>,
-  actor: Option<crate::security_receipt::Actor>,
+  (actor, verify): (
+    Option<crate::security_receipt::Actor>,
+    Option<bool>,
+  ),
   guard: OpLockGuard,
 ) {
   let run_id = run.run_id.clone();
@@ -904,7 +916,7 @@ fn spawn_run(
     state,
     shared,
     steps,
-    (0, false),
+    (0, false, verify, None),
     actor,
     cancel,
     guard,
@@ -915,7 +927,12 @@ async fn execute(
   state: Arc<AppState>,
   run: Arc<Mutex<Run>>,
   steps: Vec<StepPlan>,
-  (offset, independent): (usize, bool),
+  (offset, independent, verify, manual_gateway): (
+    usize,
+    bool,
+    Option<bool>,
+    Option<String>,
+  ),
   actor: Option<crate::security_receipt::Actor>,
   cancel: CancellationToken,
   guard: OpLockGuard,
@@ -992,7 +1009,15 @@ async fn execute(
       )
       .await
     } else {
-      run_step(&state, &run_id, &step.step, progress, &cancel).await
+      run_step_with_dns(
+        &state,
+        &run_id,
+        &step.step,
+        progress,
+        &cancel,
+        (verify, manual_gateway.as_deref()),
+      )
+      .await
     };
     let result = match result {
       Ok(()) => crate::pending::finish_step(&state, &step.step).await,
@@ -1246,12 +1271,32 @@ async fn record_op(
   }
 }
 
+#[cfg(test)]
 pub(crate) async fn run_step(
   state: &AppState,
   run_id: &str,
   step: &Step,
   progress: ProgressFn,
   cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  run_step_with_dns(
+    state,
+    run_id,
+    step,
+    progress,
+    cancel,
+    (Some(false), None),
+  )
+  .await
+}
+
+async fn run_step_with_dns(
+  state: &AppState,
+  run_id: &str,
+  step: &Step,
+  progress: ProgressFn,
+  cancel: &CancellationToken,
+  (verify, manual_gateway): (Option<bool>, Option<&str>),
 ) -> Result<(), ApiError> {
   let mut snap = snapshot::load(&state.db).await?;
   if matches!(step, Step::LinkUp { .. } | Step::GatewaySync { .. }) {
@@ -1543,7 +1588,9 @@ pub(crate) async fn run_step(
     Step::CleanupData { .. } => {
       return Err(ApiError::internal("清理只能由定时任务执行"));
     }
-    Step::GatewaySync { gateway, expect } => {
+    Step::GatewaySync {
+      gateway, expect, ..
+    } => {
       let gw = world.gateways.get(gateway).ok_or_else(|| {
         ApiError::new(
           ErrorCode::PlanStale,
@@ -1629,7 +1676,20 @@ pub(crate) async fn run_step(
         &[],
       )?;
     }
-    Step::LinkUp { server, project } => {
+    Step::LinkUp {
+      server,
+      project,
+      hot_reload,
+    } => {
+      if *hot_reload && !state.hub.supports_frpc_reload(server) {
+        return Err(
+          ApiError::new(
+            ErrorCode::PlanStale,
+            format!("服务器 {server} 当前不支持 frpc 热重载"),
+          )
+          .suggest("wharf plan"),
+        );
+      }
       let p = crate::link::projects(world, &net)?
         .into_iter()
         .find(|p| &p.server == server && &p.project == project)
@@ -1680,35 +1740,48 @@ pub(crate) async fn run_step(
       if let Some(ca) = ca {
         secrets.insert(crate::link::CA_CERT_SECRET.into(), ca);
       }
-      let p =
-        crate::link::projects_with_secrets(world, &net, &secrets)?
-          .into_iter()
-          .find(|p| &p.server == server && &p.project == project)
-          .ok_or_else(|| ApiError::internal("反向隧道配置丢失"))?;
+      let p = crate::link::projects_for_servers(
+        world,
+        &net,
+        &secrets,
+        |p| {
+          *hot_reload && &p.server == server && &p.project == project
+        },
+      )?
+      .into_iter()
+      .find(|p| &p.server == server && &p.project == project)
+      .ok_or_else(|| ApiError::internal("反向隧道配置丢失"))?;
+      let up = ProjectUp {
+        project: project.clone(),
+        compose: p.compose,
+        hash: p.hash,
+        pull: snapshot::pull_policy(&world.servers[server]),
+        pull_missing_only: false,
+        retire: None,
+        rollback: true,
+        pins: Default::default(),
+        expected_images: Default::default(),
+        no_start: false,
+        trial: None,
+        start_timeout_secs: None,
+        readiness: None,
+        init: None,
+      };
+      let op = match p.reload {
+        Some(r) => {
+          AgentOp::LinkApply(wharf_api_types::agent::LinkApply {
+            up,
+            config: r.config,
+            config_hash: r.config_hash,
+            extra_files: r.extra_files,
+            image: render::FRPC_IMAGE.into(),
+          })
+        }
+        None => AgentOp::ProjectUp(up),
+      };
       let result: ProjectUpResult = state
         .hub
-        .call(
-          server,
-          AgentOp::ProjectUp(ProjectUp {
-            project: project.clone(),
-            compose: p.compose,
-            hash: p.hash,
-            pull: snapshot::pull_policy(&world.servers[server]),
-            pull_missing_only: false,
-            retire: None,
-            rollback: true,
-            pins: Default::default(),
-            expected_images: Default::default(),
-            no_start: false,
-            trial: None,
-            start_timeout_secs: None,
-            readiness: None,
-            init: None,
-          }),
-          GATEWAY_TIMEOUT,
-          Some(progress),
-          cancel,
-        )
+        .call(server, op, GATEWAY_TIMEOUT, Some(progress), cancel)
         .await?;
       ensure_running(
         &result,
@@ -1853,13 +1926,32 @@ pub(crate) async fn run_step(
       existing,
       extra,
       expected_gateway,
+      verify_target,
     } => {
       if let Some(gateway) = expected_gateway {
-        let active = state
-          .db
-          .call(|c| crate::failover::load_active_from_conn(c))
+        if manual_gateway != Some(gateway.as_str()) {
+          let active = state
+            .db
+            .call(crate::failover::load_active_from_conn)
+            .await?;
+          check_dns_gateway(world, &active, hostname, gateway)?;
+        }
+        if verify.unwrap_or(*verify_target)
+          && let Some(route) = world.routes.get(hostname)
+        {
+          let checked = crate::gateway_probe::verify_before_dns(
+            state,
+            &snap,
+            &net,
+            (hostname, &route.spec, gateway),
+            cancel,
+          )
           .await?;
-        check_dns_gateway(world, &active, hostname, gateway)?;
+          progress(format!(
+            "改 DNS 前预验 {gateway}：{}",
+            checked.detail
+          ));
+        }
       } else if world.routes.contains_key(hostname) {
         return Err(
           ApiError::new(
@@ -3195,6 +3287,7 @@ mod tests {
       ApplyRequest {
         plan_id: plan.plan.plan_id,
         confirm: vec!["service/blog".into()],
+        verify_before_dns: None,
         skip_snapshot: false,
       },
       &BTreeSet::from([Perm::Admin, Perm::Confirm]),
@@ -3396,7 +3489,7 @@ mod tests {
       state.clone(),
       run.clone(),
       steps,
-      (0, false),
+      (0, false, None, None),
       None,
       CancellationToken::new(),
       guard,
@@ -3777,8 +3870,8 @@ mod tests {
       .locks
       .acquire(LockSpec::apply([]), "主备切换测试")
       .unwrap();
-    let (results, _) =
-      run_batch_sync(state, steps, guard).await.unwrap();
+    let (_, results, _) =
+      run_batch_sync(state, steps, guard, None).await.unwrap();
     assert_eq!(
       results[0].error.as_ref().unwrap().code,
       ErrorCode::PlanStale
@@ -3862,6 +3955,7 @@ mod tests {
       gateway,
       Step::GatewaySync {
         gateway: "gw".into(),
+        after_dns: false,
         expect: None,
       }
     );

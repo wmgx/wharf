@@ -520,6 +520,8 @@ pub struct FailoverPendingView {
 pub struct RouteView {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub failover_pending: Option<FailoverPendingView>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub failover_pinned: Option<FailoverPinTarget>,
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub core: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -539,9 +541,109 @@ pub struct RouteView {
   /// 最近一次域名体检的 HTTP(S) 结果和连续失败次数；还没检查过时为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub probe: Option<ProbeView>,
-  /// 主网关那台离线，DNS 现在指向备用入口（`gateway` 是备用网关）。
+  /// 当前生效入口是备用网关。
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub on_backup: bool,
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FailoverTarget {
+  Primary,
+  Backup,
+  Auto,
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FailoverPinTarget {
+  Backup,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RouteFailoverRequest {
+  pub target: FailoverTarget,
+  #[serde(default = "default_failover_verify")]
+  pub verify_before_dns: bool,
+  #[serde(default)]
+  pub force: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub reason: Option<String>,
+}
+
+fn default_failover_verify() -> bool {
+  true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FailoverEntryHealth {
+  pub ok: bool,
+  pub stage: String,
+  pub detail: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub status: Option<u16>,
+}
+
+impl From<crate::agent::GatewayProbeResult> for FailoverEntryHealth {
+  fn from(result: crate::agent::GatewayProbeResult) -> Self {
+    Self {
+      ok: result.ok,
+      stage: result.stage,
+      detail: result.detail,
+      status: result.status,
+    }
+  }
+}
+
+#[derive(
+  Debug, Clone, Default, Serialize, Deserialize, JsonSchema,
+)]
+pub struct FailoverHealthSnapshot {
+  pub at: i64,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub primary: Option<FailoverEntryHealth>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub backup: Option<FailoverEntryHealth>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub service_stopped: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RouteFailoverView {
+  pub hostname: String,
+  pub primary_gateway: String,
+  pub backup_gateway: String,
+  pub on_backup: bool,
+  #[serde(default)]
+  pub pinned: Option<FailoverPinTarget>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub pending: Option<FailoverPendingView>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub health: Option<FailoverHealthSnapshot>,
+  #[serde(default)]
+  pub changed: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub run_id: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub verification: Option<String>,
 }
 
 /// 自定义监控的最近一次结果。

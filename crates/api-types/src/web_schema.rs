@@ -50,6 +50,8 @@ pub fn web_schema() -> Value {
   let _ = generator.subschema_for::<view::GatewayView>();
   let _ = generator.subschema_for::<spec::RouteSpec>();
   let _ = generator.subschema_for::<view::RouteView>();
+  let _ = generator.subschema_for::<view::RouteFailoverRequest>();
+  let _ = generator.subschema_for::<view::RouteFailoverView>();
   let _ = generator.subschema_for::<view::ProbeView>();
   let _ = generator.subschema_for::<spec::EdgeKind>();
   let _ = generator.subschema_for::<spec::EdgeSource>();

@@ -18,6 +18,8 @@ pub(super) struct RetryMeta {
   inputs: String,
   account_refs: Option<BTreeSet<String>>,
   confirmed: Vec<String>,
+  #[serde(default)]
+  verify_before_dns: Option<bool>,
 }
 
 impl RetryMeta {
@@ -27,6 +29,7 @@ impl RetryMeta {
     (steps, offset): (Vec<StepPlan>, usize),
     account_refs: Option<BTreeSet<String>>,
     confirmed: Vec<String>,
+    verify_before_dns: Option<bool>,
   ) -> Result<Self, ApiError> {
     Ok(Self {
       steps,
@@ -36,6 +39,7 @@ impl RetryMeta {
       inputs: db::inputs(c, key, account_refs.as_ref())?,
       account_refs,
       confirmed,
+      verify_before_dns,
     })
   }
 
@@ -408,6 +412,7 @@ pub async fn retry_run(
     steps: steps.iter().map(pending_run_step).collect(),
   };
   let run_id = run.run_id.clone();
+  let verify = meta.verify_before_dns;
   let stored_steps = steps.clone();
   let stored_run = run.clone();
   let scope = scope_services.clone();
@@ -439,7 +444,14 @@ pub async fn retry_run(
     .await?;
   let actor =
     crate::security_receipt::Actor::from_request((auth, source));
-  spawn_run(state, run, scope_services, steps, Some(actor), guard);
+  spawn_run(
+    state,
+    run,
+    scope_services,
+    steps,
+    (Some(actor), verify),
+    guard,
+  );
   Ok(ApplyResponse { run_id })
 }
 
@@ -476,6 +488,7 @@ fn select_retry_steps_only_failed_and_skipped() {
     inputs: String::new(),
     account_refs: None,
     confirmed: vec![],
+    verify_before_dns: None,
   };
   let selected = select_retry_steps(&run, &meta).unwrap();
   assert_eq!(
@@ -569,7 +582,7 @@ async fn run_retry_reruns_only_failed_and_skipped_and_rejects_stale()
       .db
       .call_credentials(move |c, key| {
         let meta =
-          RetryMeta::capture(c, key, (plans, 0), None, vec![])?;
+          RetryMeta::capture(c, key, (plans, 0), None, vec![], None)?;
         insert_task_run(
           c,
           &stored,
@@ -694,7 +707,7 @@ async fn retry_requires_confirm_only_for_remaining_risky_steps() {
     .db
     .call_credentials(move |c, key| {
       let meta =
-        RetryMeta::capture(c, key, (steps, 0), None, approved)?;
+        RetryMeta::capture(c, key, (steps, 0), None, approved, None)?;
       insert_task_run(c, &recorded, None, Some(&meta))
     })
     .await
@@ -750,7 +763,7 @@ async fn retry_baseline_tracks_run_writes_without_accepting_external_drift()
           serde_json::from_str(&meta).map_err(json_err)
         };
       let meta =
-        RetryMeta::capture(c, key, (vec![], 0), None, vec![])?;
+        RetryMeta::capture(c, key, (vec![], 0), None, vec![], None)?;
       insert_task_run(c, &run, None, Some(&meta))?;
       record_changes(c, key, &run.run_id, |tx| {
         db::finish_import(tx, "notes", "s2", &Default::default(), &[])

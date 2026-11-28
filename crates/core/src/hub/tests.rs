@@ -36,6 +36,8 @@ fn old_hello_has_no_host_shell_capability() {
     build_v2,
     safe_rollback,
     key_rotation,
+    gateway_probe,
+    frpc_reload,
     ..
   } = hello
   else {
@@ -54,6 +56,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!build_v2);
   assert!(!safe_rollback);
   assert!(!key_rotation);
+  assert!(!gateway_probe && !frpc_reload);
 }
 
 #[test]
@@ -95,6 +98,8 @@ fn old_core_ignores_new_hello_capability() {
     backup_isolation: true,
     safe_delete: true,
     safe_gateway: true,
+    gateway_probe: false,
+    frpc_reload: false,
     safe_adopt: false,
     safe_migrate: true,
     safe_backup: true,
@@ -132,6 +137,13 @@ impl Hub {
 
   pub(crate) fn enable_mock_build_v2(&self, server: &str) {
     lock(&self.conns).get_mut(server).unwrap().build_v2 = true;
+  }
+
+  pub(crate) fn enable_mock_failover_features(&self, server: &str) {
+    let mut conns = lock(&self.conns);
+    let conn = conns.get_mut(server).unwrap();
+    conn.gateway_probe = true;
+    conn.frpc_reload = true;
   }
 
   pub(crate) fn mock_safe_gateway_agent(
@@ -258,6 +270,8 @@ impl Hub {
         backup_isolation,
         safe_delete: false,
         safe_gateway: false,
+        gateway_probe: false,
+        frpc_reload: false,
         safe_adopt: false,
         safe_migrate: false,
         safe_backup: false,
@@ -398,6 +412,8 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     backup_isolation: false,
     safe_delete: false,
     safe_gateway: false,
+    gateway_probe: false,
+    frpc_reload: false,
     safe_adopt: false,
     safe_migrate: false,
     safe_backup: false,
@@ -464,6 +480,8 @@ fn probe_connection(
     backup_isolation: false,
     safe_delete: false,
     safe_gateway: false,
+    gateway_probe: false,
+    frpc_reload: false,
     safe_adopt: false,
     safe_migrate: false,
     safe_backup: false,

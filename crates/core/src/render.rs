@@ -23,7 +23,7 @@ use crate::world::{ServerRow, World, gateway_project};
 mod frp;
 mod gate;
 
-pub use frp::{frpc_compose, frps_compose};
+pub use frp::{FrpcRender, frpc_compose, frpc_render, frps_compose};
 
 /// 网关默认镜像：官方 Caddy 加 layer4、限速、Cloudflare DNS 插件（deploy/caddy/Dockerfile）。
 /// 标签只在 Caddy 或插件版本变化时改，改了会重建所有没指定镜像的 caddy 网关。

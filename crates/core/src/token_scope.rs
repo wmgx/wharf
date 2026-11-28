@@ -138,7 +138,7 @@ pub fn check_service_scope(
       ]
       | ["", "api", "logs", "services"]
       | ["", "api", "metrics"]
-      | ["", "api", "routes", _, "cert" | "dns-check"]
+      | ["", "api", "routes", _, "cert" | "dns-check" | "failover"]
       | ["", "api", "tasks", _]
       | ["", "api", "tasks", _, "runs"]
       | ["", "api", "runs", _, "logs"]
@@ -160,6 +160,7 @@ pub fn check_service_scope(
         *method == Method::PUT
       }
       ["", "api", "routes", _, "cert", "retry"]
+      | ["", "api", "routes", _, "failover"]
       | ["", "api", "routes", _, "sso", "test"]
       | ["", "api", "plan" | "apply"]
       | ["", "api", "runs", _, "cancel" | "retry"]

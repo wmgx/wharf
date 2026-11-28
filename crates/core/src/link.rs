@@ -36,6 +36,8 @@ pub const GATEWAY_SECRET_PREFIXES: &[&str] =
   &[TOKEN_PREFIX, CERT_PREFIX, KEY_PREFIX];
 /// frps 只监听 127.0.0.1，Caddy 把 `FRP_PATH` 转发过来。
 pub const FRPS_PORT: u16 = 7000;
+pub const FRPC_ADMIN_PORTS: std::ops::RangeInclusive<u16> =
+  47400..=47499;
 /// frp 的 websocket 路径，frps 认这个路径。
 pub const FRP_PATH: &str = "/~!frp";
 /// frpc 握手时带的名字（SNI 和 Host）。按 IP 连时不带 SNI，Caddy 选不出证书。
@@ -325,8 +327,23 @@ pub fn tunnels(
 }
 
 fn pick_port(key: &str, taken: &mut BTreeSet<u16>) -> Option<u16> {
-  let base = *TUNNEL_PORTS.start() as u32;
-  let n = TUNNEL_PORTS.len() as u32;
+  pick_from(TUNNEL_PORTS, key, taken)
+}
+
+fn pick_admin_port(
+  key: &str,
+  taken: &mut BTreeSet<u16>,
+) -> Option<u16> {
+  pick_from(FRPC_ADMIN_PORTS, key, taken)
+}
+
+fn pick_from(
+  range: std::ops::RangeInclusive<u16>,
+  key: &str,
+  taken: &mut BTreeSet<u16>,
+) -> Option<u16> {
+  let base = u32::from(*range.start());
+  let n = range.len() as u32;
   // FNV-1a：跨版本稳定，同一个服务端口每次算出来一样。
   let hash = key.bytes().fold(0x811c9dc5u32, |h, b| {
     (h ^ b as u32).wrapping_mul(0x01000193)
@@ -364,6 +381,7 @@ pub struct LinkProject {
   pub project: String,
   pub compose: String,
   pub hash: String,
+  pub reload: Option<render::FrpcRender>,
   /// 给人看的说明。
   pub summary: String,
 }
@@ -379,6 +397,15 @@ pub fn projects_with_secrets(
   world: &World,
   net: &Net,
   secrets: &BTreeMap<String, String>,
+) -> Result<Vec<LinkProject>, ApiError> {
+  projects_for_servers(world, net, secrets, |_| false)
+}
+
+pub fn projects_for_servers(
+  world: &World,
+  net: &Net,
+  secrets: &BTreeMap<String, String>,
+  hot_reload: impl Fn(&LinkProject) -> bool,
 ) -> Result<Vec<LinkProject>, ApiError> {
   let token = |gateway: &str| {
     secrets
@@ -421,10 +448,21 @@ pub fn projects_with_secrets(
       project: SERVER_PROJECT.to_string(),
       hash: render::hash(&compose),
       compose,
+      reload: None,
       summary: "隧道服务端 frps，经 Caddy 网关的 443 接入"
         .to_string(),
     });
   }
+  // 在已配置的承载机上分配端口，增删路由不会推挤同机其他 frpc。
+  let mut taken = BTreeSet::new();
+  let admin_ports: BTreeMap<_, _> = world
+    .servers
+    .keys()
+    .filter(|server| link_gateway(world, server).is_some())
+    .filter_map(|server| {
+      pick_admin_port(server, &mut taken).map(|port| (server, port))
+    })
+    .collect();
   for ((service_server, gateway_server), list) in clients {
     let addr = frps_addr(net, &gateway_server)?;
     let (gateway, spec) = carrier(&gateway_server)?;
@@ -452,9 +490,10 @@ pub fn projects_with_secrets(
       .iter()
       .map(|t| format!("{}:{}", t.service, t.port))
       .collect();
-    out.push(LinkProject {
+    let mut rendered = LinkProject {
       gateway: gateway.to_string(),
       server: service_server.clone(),
+      reload: None,
       hash: render::hash(&compose),
       compose,
       project,
@@ -462,7 +501,25 @@ pub fn projects_with_secrets(
         "{service_server} → {gateway_server} 反向隧道：{}",
         names.join("、")
       ),
-    });
+    };
+    if hot_reload(&rendered) {
+      let admin_port = admin_ports
+        .get(&gateway_server)
+        .copied()
+        .ok_or_else(|| ApiError::invalid("frpc 管理端口已用完"))?;
+      let reload = render::frpc_render(
+        &rendered.project,
+        (&addr, port),
+        admin_port,
+        &proxies,
+        token(gateway),
+        ca,
+      );
+      rendered.hash = render::hash(&reload.compose);
+      rendered.compose.clone_from(&reload.compose);
+      rendered.reload = Some(reload);
+    }
+    out.push(rendered);
   }
   Ok(out)
 }

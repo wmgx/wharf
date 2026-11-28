@@ -24,6 +24,8 @@ use crate::{
 };
 
 mod gateway;
+mod gateway_probe;
+mod link;
 mod validation;
 use validation::{
   check_own_container, check_project, data_dir_relative,
@@ -163,6 +165,20 @@ impl Ops {
           crate::dirfd::ensure_beneath(Path::new("/srv"), relative)?;
         }
         Ok(Value::Null)
+      }
+      AgentOp::GatewayProbe(job) => {
+        to_value(gateway_probe::run(&job, ctx).await?)
+      }
+      AgentOp::LinkApply(apply) => {
+        check_project(&apply.up.project)?;
+        let lock = self.lock_for(&apply.up.project);
+        let _guard = tokio::select! {
+          guard = lock.lock() => guard,
+          _ = ctx.cancel.cancelled() => {
+            return Err(ApiError::new(ErrorCode::Cancelled, "隧道配置操作已取消"));
+          }
+        };
+        to_value(self.link_apply(&apply, ctx).await?)
       }
       AgentOp::ProjectUp(up) => {
         check_project(&up.project)?;

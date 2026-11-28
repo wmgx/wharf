@@ -356,6 +356,8 @@ pub struct ApplyRequest {
   pub confirm: Vec<String>,
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub skip_snapshot: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub verify_before_dns: Option<bool>,
 }
 
 #[derive(

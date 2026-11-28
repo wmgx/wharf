@@ -1067,3 +1067,43 @@ pub fn normalize_image_digests(images: &mut [ImageInfo]) {
       .and_then(|d| normalize_image_digest(&image.image, d));
   }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayProbeJob {
+  pub hostname: String,
+  pub path: String,
+  pub tls: bool,
+  pub http_port: u16,
+  pub https_port: u16,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub upstream: Option<String>,
+  #[serde(default)]
+  pub upstream_only: bool,
+  #[serde(default = "default_gateway_probe_timeout")]
+  pub timeout_secs: u16,
+}
+
+fn default_gateway_probe_timeout() -> u16 {
+  5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayProbeResult {
+  pub ok: bool,
+  pub stage: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub status: Option<u16>,
+  #[serde(default)]
+  pub cert_pending: bool,
+  pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkApply {
+  pub up: ProjectUp,
+  pub config: String,
+  pub config_hash: String,
+  #[serde(default)]
+  pub extra_files: BTreeMap<String, String>,
+  pub image: String,
+}

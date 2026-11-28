@@ -1347,6 +1347,18 @@ impl World {
           "路由 {host} 的限速要在每分钟 10 到 100000 次之间"
         )));
       }
+      if let Some(minutes) = route.spec.failover_minutes {
+        if !(1..=60).contains(&minutes) {
+          return Err(ApiError::invalid(format!(
+            "路由 {host} 的 failover_minutes 必须在 1 到 60 分钟之间"
+          )));
+        }
+        if route.spec.backup_gateway.is_none() {
+          return Err(ApiError::invalid(format!(
+            "路由 {host} 配置 failover_minutes 前需要配置备用入口"
+          )));
+        }
+      }
       if let Some(ttl) = route.spec.dns_ttl.filter(|ttl| *ttl != 1) {
         if !(60..=86400).contains(&ttl) {
           return Err(ApiError::invalid(format!(
@@ -1881,6 +1893,7 @@ pub(crate) fn is_reserved_host_port(port: u16) -> bool {
   ]
   .contains(&port)
     || (30000..=39999).contains(&port)
+    || crate::link::FRPC_ADMIN_PORTS.contains(&port)
 }
 
 fn validate_deploy_options(
@@ -2466,6 +2479,56 @@ mod tests {
     ])
     .unwrap();
     assert_eq!(crate::share::expired(&w, now), vec!["a.example.com"]);
+  }
+
+  #[test]
+  fn failover_minutes_requires_backup_and_a_valid_range() {
+    let mut world = World::default();
+    for server in ["s1", "s2"] {
+      world
+        .apply_changes(&[Change::UpsertServer {
+          name: server.into(),
+          settings: Default::default(),
+        }])
+        .unwrap();
+    }
+    for (name, server) in [("primary", "s1"), ("backup", "s2")] {
+      world.gateways.insert(
+        name.into(),
+        GatewayRow {
+          spec: serde_json::from_value(
+            json!({"kind":"caddy","server":server}),
+          )
+          .unwrap(),
+          version: 1,
+        },
+      );
+    }
+    let host = "minutes.example.test";
+    for (backup, minutes, valid) in [
+      (Some("backup"), 0, false),
+      (Some("backup"), 61, false),
+      (None, 3, false),
+      (Some("backup"), 2, true),
+    ] {
+      let spec = serde_json::from_value(json!({
+        "hostname":host, "upstream":"127.0.0.1:8080", "gateway":"primary",
+        "backup_gateway":backup, "failover_minutes":minutes
+      })).unwrap();
+      world.routes.insert(
+        host.into(),
+        RouteRow {
+          spec,
+          id: "rt_fixture".into(),
+          version: 1,
+        },
+      );
+      assert_eq!(
+        world.validate().is_ok(),
+        valid,
+        "{backup:?} {minutes}"
+      );
+    }
   }
 
   #[test]
@@ -3125,6 +3188,7 @@ services:
           gateway: None,
           backup_gateway: None,
           dns_ttl: None,
+          failover_minutes: None,
           auth: false,
           paths: vec![],
           caddy: None,
@@ -3218,6 +3282,7 @@ services:
       gateway: None,
       backup_gateway: Some(backup.into()),
       dns_ttl: None,
+      failover_minutes: None,
       auth: false,
       paths: vec![],
       caddy: None,

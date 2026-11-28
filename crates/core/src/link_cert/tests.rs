@@ -524,6 +524,7 @@ async fn old_agent_defaults_and_capability_gate_only_tunnel_gateways()
   assert_eq!(error.suggest, ["wharf server upgrade s1"]);
   let step = Step::GatewaySync {
     gateway: "gw-a".into(),
+    after_dns: false,
     expect: None,
   };
   let cancel = tokio_util::sync::CancellationToken::new();
