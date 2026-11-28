@@ -36,7 +36,7 @@ pub(crate) use paths::{
 };
 
 // 同步渲染只读的启动参数和公钥，不保存私钥。
-static RENDER: OnceLock<(String, u16, Option<String>)> =
+static RENDER: OnceLock<(String, u16, Option<String>, bool)> =
   OnceLock::new();
 static TICKETS: LazyLock<Mutex<BTreeMap<String, Ticket>>> =
   LazyLock::new(|| Mutex::new(BTreeMap::new()));
@@ -102,12 +102,21 @@ async fn key(db: &Db) -> Result<SigningKey, ApiError> {
 async fn rt_key(db: &Db) -> Result<[u8; 32], ApiError> {
   db.call(|c| seed(c, RT_SEED)).await
 }
-pub async fn init(s: &AppState) -> Result<(), ApiError> {
+pub async fn init(
+  s: &AppState,
+  loopback_only: bool,
+) -> Result<(), ApiError> {
   let public = public_b64(&key(&s.db).await?);
   RENDER
-    .set((public, s.listen_port, s.public_url.clone()))
+    .set((public, s.listen_port, s.public_url.clone(), loopback_only))
     .map_err(|_| ApiError::internal("门禁重复初始化"))
 }
+pub(crate) fn core_listener() -> Option<(u16, bool)> {
+  RENDER
+    .get()
+    .map(|(_, port, _, loopback)| (*port, *loopback))
+}
+
 pub(crate) fn public_url() -> Option<&'static str> {
   RENDER.get()?.2.as_deref()
 }
@@ -119,7 +128,7 @@ pub fn render_context(
   if !world.routes.values().any(|r| r.spec.sso.is_some()) {
     return (None, None);
   }
-  let Some((public, port, fallback)) = RENDER.get() else {
+  let Some((public, port, fallback, _)) = RENDER.get() else {
     return (None, None);
   };
   let login = crate::join::route_urls(world, net, *port)
@@ -133,7 +142,7 @@ pub fn is_core_host(
   net: &crate::render::Net,
   host: &str,
 ) -> bool {
-  RENDER.get().is_some_and(|(_, port, _)| {
+  RENDER.get().is_some_and(|(_, port, _, _)| {
     world.routes.get(host).is_some_and(|route| {
       crate::join::is_core_route(world, net, &route.spec, *port)
     })

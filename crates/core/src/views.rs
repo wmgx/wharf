@@ -259,6 +259,7 @@ fn empty_project(name: &str) -> ProjectState {
     project: name.to_string(),
     hash: None,
     config_hash: None,
+    acme_dns_url_hash: None,
     containers: Vec::new(),
   }
 }
@@ -414,7 +415,7 @@ pub fn gateway_view(
 ) -> Option<GatewayView> {
   let world = &snap.world;
   let row = world.gateways.get(name)?;
-  let routes = world
+  let routes: Vec<String> = world
     .routes
     .iter()
     .filter(|(_, r)| world.route_gateways(&r.spec).contains(&name))
@@ -435,24 +436,73 @@ pub fn gateway_view(
       l.in_sync = states.get(&gateway_project(name)).map(|s| {
         let applied = match row.spec.kind {
           GatewayKind::Caddy => s.config_hash.as_deref(),
-          GatewayKind::CloudflareTunnel => {
-            snap.tunnels.get(name).map(|t| t.config_hash.as_str())
-          }
+          GatewayKind::CloudflareTunnel => snap
+            .tunnels
+            .get(name)
+            .filter(|t| {
+              Some(t.account.as_str()) == row.spec.account.as_deref()
+            })
+            .map(|t| t.config_hash.as_str()),
         };
         s.hash.as_deref() == Some(r.compose_hash.as_str())
-          && applied == Some(r.config_hash.as_str())
+          && snapshot::gateway_config_matches(
+            world,
+            net,
+            name,
+            &r,
+            applied,
+            s.acme_dns_url_hash.as_deref(),
+          )
           && s.all_running()
       });
     }
     l
   });
+  let gate_core = if routes
+    .iter()
+    .any(|host| world.routes[host].spec.sso.is_some())
+  {
+    snapshot::gateway_render(world, net, name)
+      .ok()
+      .and_then(|r| {
+        r.sites.into_iter().find_map(|s| s.gate).map(|gate| {
+          let network = if gate.core == gate.login {
+            "公网"
+          } else {
+            "内网"
+          };
+          format!("{network} ({})", gate.core)
+        })
+      })
+  } else {
+    None
+  };
   Some(GatewayView {
+    gate_core,
     name: name.to_string(),
     spec: row.spec.clone(),
     routes,
     version: row.version,
     live,
   })
+}
+
+pub(crate) fn route_url(
+  hostname: &str,
+  gw_spec: Option<&wharf_api_types::spec::GatewaySpec>,
+) -> String {
+  match gw_spec {
+    Some(g) if g.tls == GatewayTls::Off => {
+      match g.http_port.filter(|p| *p != 80) {
+        Some(port) => format!("http://{hostname}:{port}"),
+        None => format!("http://{hostname}"),
+      }
+    }
+    g => match g.and_then(|g| g.https_port).filter(|p| *p != 443) {
+      Some(port) => format!("https://{hostname}:{port}"),
+      None => format!("https://{hostname}"),
+    },
+  }
 }
 
 pub fn route_view(
@@ -483,20 +533,10 @@ pub(crate) fn route_view_with_upstream_error(
     Some(Err(error)) => (None, Some(error)),
     None => (None, None),
   };
-  let url = match gw_spec.map(|g| &g.spec) {
-    Some(g) if g.tls == GatewayTls::Off => {
-      match g.http_port.filter(|p| *p != 80) {
-        Some(port) => format!("http://{hostname}:{port}"),
-        None => format!("http://{hostname}"),
-      }
-    }
-    g => match g.and_then(|g| g.https_port).filter(|p| *p != 443) {
-      Some(port) => format!("https://{hostname}:{port}"),
-      None => format!("https://{hostname}"),
-    },
-  };
+  let url = route_url(hostname, gw_spec.map(|g| &g.spec));
   Some((
     RouteView {
+      failover_pending: crate::failover::pending_view(hostname),
       core: crate::gate::is_core_host(world, net, hostname),
       note: snap.route_notes.get(hostname).cloned(),
       sso_login: row

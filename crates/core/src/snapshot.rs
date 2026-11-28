@@ -300,6 +300,18 @@ impl Snapshot {
   pub fn net(&self, world: &World) -> Net {
     let mut base = Net::derive(&world.servers, &self.agents);
     base.core_server = crate::core_node::server_of(self);
+    base.core_listener = crate::gate::core_listener();
+    base.acme_dns_url = base
+      .core_listener
+      .and_then(|(port, _)| {
+        crate::join::default_url_with(
+          world,
+          &base,
+          port,
+          crate::gate::public_url(),
+        )
+      })
+      .filter(|url| crate::caddy_validate::valid_public_url(url));
     let (gate_public, gate_login) =
       crate::gate::render_context(world, &base);
     Net {
@@ -342,6 +354,17 @@ impl Snapshot {
         .unwrap_or_default(),
       ..base
     }
+  }
+
+  pub(crate) fn gateway_has_external_dns(
+    &self,
+    world: &World,
+    gateway: &str,
+  ) -> bool {
+    world.routes.iter().any(|(host, r)| {
+      world.route_gateways(&r.spec).contains(&gateway)
+        && self.account_for(host).is_none()
+    })
   }
 
   /// hostname 所属的厂商账号和 zone，取最长匹配。
@@ -594,6 +617,65 @@ pub fn gateway_render(
   )
 }
 
+fn gate_core_direct(
+  net: &Net,
+  gateway_server: &str,
+) -> Option<String> {
+  let (port, loopback_only) = net.core_listener?;
+  let core = net.core_server.as_ref()?;
+  if gateway_server == core {
+    return Some(format!("http://127.0.0.1:{port}"));
+  }
+  let ip = net
+    .private
+    .get(core)
+    .filter(|addr| addr.network.encrypted())?;
+  if loopback_only
+    || net.reach.get(&(gateway_server.into(), core.clone()))
+      != Some(&true)
+  {
+    return None;
+  }
+  let ip: std::net::IpAddr = ip.ip.parse().ok()?;
+  Some(format!("http://{}", std::net::SocketAddr::new(ip, port)))
+}
+
+pub(crate) fn gateway_config_matches(
+  world: &World,
+  net: &Net,
+  name: &str,
+  rendered: &GatewayRender,
+  applied: Option<&str>,
+  observed_acme_dns: Option<&str>,
+) -> bool {
+  if let (Some(observed), Some(expected)) =
+    (observed_acme_dns, &net.acme_dns_url)
+    && rendered.needs_acme_dns
+    && observed
+      != render::hash(&format!(
+        "{}/agent/acme-dns",
+        expected.trim_end_matches('/')
+      ))
+  {
+    return false;
+  }
+  if applied == Some(rendered.config_hash.as_str()) {
+    return true;
+  }
+  // 旧指纹只忽略回调地址占位符，保留门禁回源等实际配置差异。
+  if world.gateways[name].spec.kind != GatewayKind::Caddy
+    || !rendered.needs_acme_dns
+  {
+    return false;
+  }
+  let legacy = Net {
+    acme_dns_url: None,
+    ..net.clone()
+  };
+  gateway_render(world, &legacy, name)
+    .is_ok_and(|r| applied == Some(r.config_hash.as_str()))
+}
+
 pub fn gateway_render_with_fill(
   world: &World,
   net: &Net,
@@ -715,6 +797,7 @@ pub fn gateway_render_with_fill(
           })
           .transpose()?
           .map(|u| format!("http://{u}"))
+          .or_else(|| gate_core_direct(net, &gateway.spec.server))
           .unwrap_or_else(|| login.clone());
         Ok(render::Gate {
           public: sso.public,
@@ -815,7 +898,17 @@ pub fn gateway_render_with_fill(
                 "服务 {svc} 的端口 {port} 没有分配"
               ))
             })?;
-          match crate::link::choose(world, net, &gateway.spec, svc, wharf_api_types::spec::LinkMode::Auto)? {
+          if world.services[svc].spec.server != gateway.spec.server
+            && crate::link::service_port_bind(
+              &world.services[svc],
+              port,
+            ) == crate::link::PortBind::LoopbackV4Only
+          {
+            return Err(ApiError::invalid(
+              "四层转发不支持反向隧道，请把该端口绑定到内网地址",
+            ));
+          }
+          match crate::link::choose(world, net, &gateway.spec, svc, port, wharf_api_types::spec::LinkMode::Auto)? {
             crate::link::Choice::Local => format!("127.0.0.1:{host}"),
             crate::link::Choice::Direct(ip) => format!("{ip}:{host}"),
             crate::link::Choice::Tunnel => return Err(ApiError::invalid(format!("入口 {name} 的四层转发 {}：入口所在机器连不到 {svc} 所在机器的内网地址，四层转发不支持反向隧道", f.listen)).with_hint(format!("让两台机器在同一个组网里，或者在 {svc} 所在的机器上建入口"))),
@@ -855,7 +948,10 @@ pub fn gateway_render_with_fill(
             &gateway.spec,
             &net.cloudflare_ips,
           ),
-          fill,
+          render::CaddyFill {
+            acme_dns_url: net.acme_dns_url.as_deref(),
+            ..fill
+          },
         ),
       )
     }
@@ -911,16 +1007,76 @@ pub async fn project_status(
   projects: Vec<String>,
   timeout: Duration,
 ) -> Result<BTreeMap<String, ProjectState>, ApiError> {
+  project_status_with_links(hub, server, projects, timeout, false)
+    .await
+}
+
+pub(crate) async fn project_status_with_links(
+  hub: &crate::hub::Hub,
+  server: &str,
+  projects: Vec<String>,
+  timeout: Duration,
+  include_links: bool,
+) -> Result<BTreeMap<String, ProjectState>, ApiError> {
   let states: Vec<ProjectState> = hub
     .call(
       server,
-      wharf_api_types::agent::AgentOp::ProjectStatus { projects },
+      wharf_api_types::agent::AgentOp::ProjectStatus {
+        projects,
+        include_links,
+      },
       timeout,
       None,
       &tokio_util::sync::CancellationToken::new(),
     )
     .await?;
   Ok(states.into_iter().map(|s| (s.project.clone(), s)).collect())
+}
+
+pub(crate) async fn read_legacy_acme_dns_hash(
+  hub: &crate::hub::Hub,
+  server: &str,
+  project: &str,
+) -> Option<String> {
+  use wharf_api_types::agent::{
+    AgentOp, TaskHow, TaskRunJob, TaskRunResult,
+  };
+  // 只在 Caddy 容器内读取回调地址的指纹，避免传输完整配置。
+  let result: TaskRunResult = hub
+    .call(
+      server,
+      AgentOp::TaskRun(TaskRunJob {
+        name: "gateway-acme-hash".into(),
+        how: TaskHow::Exec {
+          project: project.into(),
+          service: Some("caddy".into()),
+          command: r#"url=$(awk '$1 == "server_url" && $2 ~ /\/agent\/acme-dns$/ {print $2; exit}' /etc/caddy/Caddyfile) && [ -n "$url" ] && printf '%s' "$url" | sha256sum"#.into(),
+        },
+        input: None,
+        network_host: false,
+        out_dir: false,
+        wait_for_deps: false,
+        timeout_secs: 5,
+        pull: PullPolicy {
+          mirrors: BTreeMap::new(),
+          mirrors_only: false,
+          attempt_timeout_secs: PULL_ATTEMPT_SECS,
+          git_proxy: None,
+          github_mirror: None,
+          registry_proxy: None,
+        },
+      }),
+      Duration::from_secs(10),
+      None,
+      &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .ok()?;
+  let hash = result.output.split_whitespace().next()?;
+  (result.exit_code == Some(0)
+    && hash.len() == 64
+    && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+  .then(|| hash.to_string())
 }
 
 pub fn provider_error(e: ProviderError) -> ApiError {
@@ -1471,5 +1627,79 @@ mod tests {
         .config
         .contains("core https://core.example.test")
     );
+    let mut direct = Net {
+      core_server: Some("s1".into()),
+      core_listener: Some((7700, false)),
+      ..net
+    };
+    direct.private.insert(
+      "s1".into(),
+      wharf_api_types::spec::PrivateAddr {
+        ip: "100.64.0.2".into(),
+        network: wharf_api_types::spec::PrivateNetwork::Tailscale,
+      },
+    );
+    direct.reach.insert(("s2".into(), "s1".into()), true);
+    let upstream = |n: &Net| {
+      gateway_render(&world, n, "other").unwrap().sites[0]
+        .gate
+        .as_ref()
+        .unwrap()
+        .core
+        .clone()
+    };
+    assert_eq!(upstream(&direct), "http://100.64.0.2:7700");
+    direct.core_listener = Some((7700, true));
+    assert_eq!(upstream(&direct), "https://core.example.test");
+    direct.core_listener = Some((7700, false));
+    direct.reach.clear();
+    assert_eq!(upstream(&direct), "https://core.example.test");
+  }
+
+  #[test]
+  fn acme_callback_updates_fingerprint_without_drifting_legacy_hash()
+  {
+    let mut w = World::default();
+    w.gateways.insert("edge".into(), crate::world::GatewayRow {
+      spec: serde_json::from_value(serde_json::json!({"kind":"caddy","server":"s1","wildcard":["example.com"]})).unwrap(),
+      version: 1,
+    });
+    let mut net = Net::default();
+    let legacy = gateway_render(&w, &net, "edge").unwrap();
+    net.acme_dns_url = Some("https://old.example.net".into());
+    let before = gateway_render(&w, &net, "edge").unwrap();
+    assert!(gateway_config_matches(
+      &w,
+      &net,
+      "edge",
+      &before,
+      Some(&legacy.config_hash),
+      Some(&render::hash("https://old.example.net/agent/acme-dns")),
+    ));
+    net.acme_dns_url = Some("https://new.example.net".into());
+    let after = gateway_render(&w, &net, "edge").unwrap();
+    assert!(
+      after
+        .config
+        .contains("https://new.example.net/agent/acme-dns")
+    );
+    assert!(after.config.contains(render::ACME_DNS_KEY));
+    assert!(!gateway_config_matches(
+      &w,
+      &net,
+      "edge",
+      &after,
+      Some(&before.config_hash),
+      None,
+    ));
+    assert!(!gateway_config_matches(
+      &w,
+      &net,
+      "edge",
+      &after,
+      Some(&legacy.config_hash),
+      Some(&render::hash("https://old.example.net/agent/acme-dns"))
+    ));
+    assert_eq!(before.compose_hash, after.compose_hash);
   }
 }

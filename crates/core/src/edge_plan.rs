@@ -369,6 +369,7 @@ async fn worker_dns(
         remote: RemoteRef {
           scope: owned.scope.clone(),
           remote_id: owned.remote_id.clone(),
+          record_type: None,
         },
         owner: Some(owned.route_id.clone()),
       },
@@ -420,6 +421,7 @@ pub async fn pages_record(
     record_type: "CNAME".into(),
     content: record.content,
     proxied: record.proxied,
+    ttl: 1,
     tunnel: None,
   })
 }

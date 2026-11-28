@@ -133,11 +133,16 @@ impl Ops {
       AgentOp::ResolveImages(job) => {
         to_value(crate::registry::resolve(&job, ctx).await?)
       }
-      AgentOp::ProjectStatus { projects } => {
+      AgentOp::ProjectStatus {
+        projects,
+        include_links,
+      } => {
         for p in &projects {
           check_project(p)?;
         }
-        to_value(self.docker.status(&projects, ctx).await?)
+        to_value(
+          self.docker.status(&projects, include_links, ctx).await?,
+        )
       }
       AgentOp::DiagnoseContainer { project, ports } => {
         check_project(&project)?;
@@ -245,6 +250,12 @@ impl Ops {
         ctx.say("强制热重载 Caddy");
         self.caddy_reload(&project, true, ctx).await?;
         to_value(String::new())
+      }
+      AgentOp::ProjectRestart { project } => {
+        check_project(&project)?;
+        let lock = self.lock_for(&project);
+        let _guard = lock.lock().await;
+        to_value(self.docker.restart(&project, ctx).await?)
       }
       AgentOp::ProjectStop { project } => {
         self.stop_start(&project, false, ctx).await

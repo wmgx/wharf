@@ -94,6 +94,7 @@ fn old_core_ignores_new_hello_capability() {
     core_probe: true,
     backup_isolation: true,
     safe_delete: true,
+    safe_gateway: true,
     safe_adopt: false,
     safe_migrate: true,
     safe_backup: true,
@@ -131,6 +132,17 @@ impl Hub {
 
   pub(crate) fn enable_mock_build_v2(&self, server: &str) {
     lock(&self.conns).get_mut(server).unwrap().build_v2 = true;
+  }
+
+  pub(crate) fn mock_safe_gateway_agent(
+    &self,
+    server: &str,
+    handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
+    + Send
+    + 'static,
+  ) {
+    self.mock_agent(server, false, handle);
+    lock(&self.conns).get_mut(server).unwrap().safe_gateway = true;
   }
 
   pub(crate) fn mock_safe_delete_agent(
@@ -245,6 +257,7 @@ impl Hub {
         gateway_extra_files,
         backup_isolation,
         safe_delete: false,
+        safe_gateway: false,
         safe_adopt: false,
         safe_migrate: false,
         safe_backup: false,
@@ -384,6 +397,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     gateway_extra_files: false,
     backup_isolation: false,
     safe_delete: false,
+    safe_gateway: false,
     safe_adopt: false,
     safe_migrate: false,
     safe_backup: false,
@@ -449,6 +463,7 @@ fn probe_connection(
     gateway_extra_files: false,
     backup_isolation: false,
     safe_delete: false,
+    safe_gateway: false,
     safe_adopt: false,
     safe_migrate: false,
     safe_backup: false,

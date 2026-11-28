@@ -96,15 +96,17 @@ pub async fn route(
       .suggest("wharf route list")
   })?;
   let name =
-    snap.world.route_gateway(&route.spec).ok_or_else(|| {
+    snap.world.live_gateway(&host, &route.spec).ok_or_else(|| {
       ApiError::invalid(format!("域名 {host} 没有入口"))
     })?;
   query.host = Some(host);
   let mut result = fetch(&state, &snap.world, name, query).await?;
   if let Some(backup) = &route.spec.backup_gateway {
-    result.warnings.push(format!(
-      "本次只查询主网关 {name}。备用网关可用 wharf gateway logs {backup} --access 单独查询"
-    ));
+    result.warnings.push(if name == backup {
+      format!("本次查询活跃的备用网关 {name}")
+    } else {
+      format!("本次只查询主网关 {name}。备用网关可用 wharf gateway logs {backup} --access 单独查询")
+    });
   }
   Ok(Json(result))
 }

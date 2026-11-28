@@ -608,6 +608,9 @@ pub struct ProjectState {
   /// 网关配置的指纹。
   #[serde(default)]
   pub config_hash: Option<String>,
+  /// 只上报 DNS-01 回调地址的指纹，不上报 Caddyfile。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub acme_dns_url_hash: Option<String>,
   pub containers: Vec<ContainerInfo>,
 }
 

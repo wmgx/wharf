@@ -81,6 +81,20 @@ pub struct RouteRow {
   pub version: u64,
 }
 
+pub const BACKUP_DEFAULT_DNS_TTL: u32 = 60;
+
+pub fn effective_dns_ttl(route: &RouteSpec, proxied: bool) -> u32 {
+  if proxied {
+    1
+  } else {
+    route.dns_ttl.unwrap_or(if route.backup_gateway.is_some() {
+      BACKUP_DEFAULT_DNS_TTL
+    } else {
+      1
+    })
+  }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct World {
   pub servers: BTreeMap<String, ServerRow>,
@@ -885,12 +899,12 @@ impl World {
     }
     let bad =
       |m: String| Err(ApiError::invalid(format!("路由 {host}：{m}")));
-    if let Some(gw) = self.route_gateway(route)
-      && self
+    if self.route_gateways(route).iter().any(|gw| {
+      self
         .gateways
-        .get(gw)
+        .get(*gw)
         .is_some_and(|g| g.spec.kind != GatewayKind::Caddy)
-    {
+    }) {
       return bad("按路径转发只支持 caddy 网关".into());
     }
     let mut seen = BTreeSet::new();
@@ -1333,6 +1347,21 @@ impl World {
           "路由 {host} 的限速要在每分钟 10 到 100000 次之间"
         )));
       }
+      if let Some(ttl) = route.spec.dns_ttl.filter(|ttl| *ttl != 1) {
+        if !(60..=86400).contains(&ttl) {
+          return Err(ApiError::invalid(format!(
+            "路由 {host} 的 dns_ttl 必须是 1（自动）或 60 到 86400 秒之间"
+          )));
+        }
+        if self.route_gateways(&route.spec).iter().all(|gw| {
+          self.gateways[*gw].spec.kind
+            == GatewayKind::CloudflareTunnel
+        }) {
+          return Err(ApiError::invalid(format!(
+            "路由 {host} 走 Cloudflare 隧道（代理记录），TTL 固定由厂商自动管理，不能自定义 dns_ttl"
+          )));
+        }
+      }
       if route.spec.internal {
         if route.spec.redirect.is_some() {
           return Err(ApiError::invalid(format!(
@@ -1456,7 +1485,15 @@ impl World {
 
   /// 为 image 来源的服务分配宿主机端口：保留已有分配，新端口从 20000 起取最小空闲值。
   /// 宿主机端口在同一台服务器上唯一。
+  #[cfg(test)]
   pub fn allocate_ports(&mut self) -> Result<(), ApiError> {
+    self.allocate_ports_with(&BTreeMap::new())
+  }
+
+  pub fn allocate_ports_with(
+    &mut self,
+    reserved: &BTreeMap<String, BTreeMap<u16, String>>,
+  ) -> Result<(), ApiError> {
     let mut used: BTreeMap<String, BTreeSet<u16>> = BTreeMap::new();
     let mut take = |server: &str, port: u16| {
       used.entry(server.to_string()).or_default().insert(port)
@@ -1482,7 +1519,18 @@ impl World {
               )
               && compose_bindings.contains(&(p, !port.udp))
               && !compose_bindings.contains(&(p, port.udp));
-            if !shared && !take(&server, p) {
+            if let Some(owner) = reserved
+              .get(&server)
+              .and_then(|r| r.get(&p))
+              .filter(|owner| *owner != name)
+            {
+              if fixed.is_some() {
+                return Err(ApiError::invalid(format!(
+                  "服务器 {server} 上宿主机端口 {p} 仍被本轮稍后下线的服务 {owner} 占用"
+                )).with_hint("先下线或迁走旧服务，或为新服务换一个端口"));
+              }
+              pending.push((name.clone(), port.name.clone()));
+            } else if !shared && !take(&server, p) {
               if fixed.is_some() {
                 return Err(ApiError::invalid(format!(
                   "服务器 {server} 上宿主机端口 {p} 被多个服务使用（服务 {name}）"
@@ -1516,7 +1564,12 @@ impl World {
       let set = used.entry(server.clone()).or_default();
       let port = HOST_PORTS
         .clone()
-        .find(|p| !set.contains(p))
+        .find(|p| {
+          !set.contains(p)
+            && !reserved
+              .get(&server)
+              .is_some_and(|r| r.contains_key(p))
+        })
         .ok_or_else(|| {
           ApiError::internal(format!(
             "服务器 {server} 上没有空闲端口了"
@@ -3071,6 +3124,7 @@ services:
           port: None,
           gateway: None,
           backup_gateway: None,
+          dns_ttl: None,
           auth: false,
           paths: vec![],
           caddy: None,
@@ -3163,6 +3217,7 @@ services:
       port: None,
       gateway: None,
       backup_gateway: Some(backup.into()),
+      dns_ttl: None,
       auth: false,
       paths: vec![],
       caddy: None,

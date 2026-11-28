@@ -78,6 +78,7 @@ struct Conn {
   gateway_extra_files: bool,
   backup_isolation: bool,
   safe_delete: bool,
+  safe_gateway: bool,
   safe_adopt: bool,
   safe_migrate: bool,
   safe_backup: bool,
@@ -388,6 +389,12 @@ impl Hub {
     lock(&self.conns)
       .get(server)
       .is_some_and(|c| !c.upgrade_only && c.safe_rollback)
+  }
+
+  pub fn supports_safe_gateway(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|c| !c.upgrade_only && c.safe_gateway)
   }
 
   pub fn supports_safe_delete(&self, server: &str) -> bool {
@@ -1040,6 +1047,7 @@ async fn handle_socket(
     core_probe,
     backup_isolation,
     safe_delete,
+    safe_gateway,
     safe_adopt,
     safe_migrate,
     safe_backup,
@@ -1207,6 +1215,7 @@ async fn handle_socket(
     gateway_extra_files,
     backup_isolation,
     safe_delete,
+    safe_gateway,
     safe_adopt,
     safe_migrate,
     safe_backup,
