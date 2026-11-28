@@ -12,10 +12,10 @@ use crate::{
 #[derive(Args)]
 pub struct NoteArgs {
   /// 备注文本，传空字符串清除。
-  #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+  #[arg(conflicts_with = "clear")]
   note: Option<String>,
   /// 清除备注。
-  #[arg(long)]
+  #[arg(long, visible_alias = "off")]
   clear: bool,
   /// 只预览会改什么，不执行。
   #[arg(long)]
@@ -29,6 +29,13 @@ pub async fn run(
   args: NoteArgs,
   j: bool,
 ) -> CliResult<()> {
+  let normalized;
+  let name = if kind == "route" {
+    normalized = wharf_api_types::normalize_host(name);
+    &normalized
+  } else {
+    name
+  };
   let name_segment = seg(name);
   let (target, path) = match kind {
     "service" => (
@@ -44,9 +51,18 @@ pub async fn run(
       format!("/api/routes/{name_segment}/note"),
     ),
   };
-  let note = args.note.as_deref().unwrap_or_default().trim();
-  if args.dry_run {
-    let before = if kind == "route" {
+  let (note, _) = wharf_api_types::split_note(
+    args.note.as_deref().unwrap_or_default(),
+  );
+  let read_only = args.note.is_none() && !args.clear;
+  if read_only && args.dry_run {
+    return Err(
+      ApiError::invalid("--dry-run 需要提供备注内容或 --clear")
+        .into(),
+    );
+  }
+  if read_only || args.dry_run {
+    let (mut before, mut has_sealed) = if kind == "route" {
       let routes: Vec<RouteView> = c.get(&target).await?;
       let route = routes
         .into_iter()
@@ -55,17 +71,34 @@ pub async fn run(
           ApiError::not_found(format!("域名 {name} 不存在"))
             .with_hint("用 wharf route list 查看现有域名")
         })?;
-      json!(route.note)
+      (route.note, route.has_sealed_note)
     } else {
       let value: Value = c.get(&target).await?;
-      value["note"].clone()
+      (
+        value["note"].as_str().map(str::to_string),
+        value["has_sealed_note"].as_bool().unwrap_or(false),
+      )
     };
-    let after = Some(note).filter(|n| !n.is_empty());
+    wharf_api_types::filter_note(&mut before, &mut has_sealed, false);
+    if read_only {
+      out(
+        j,
+        &json!({"target": format!("{kind}/{name}"), "note": before, "has_sealed_note": has_sealed}),
+        |_| {
+          println!("{}", before.as_deref().unwrap_or("没有备注"));
+          if has_sealed {
+            println!("（含页面加密私密内容）");
+          }
+        },
+      );
+      return Ok(());
+    }
+    let after = (!note.is_empty()).then_some(note);
     return crate::preview::show(
       j,
       &format!("{kind}/{name}"),
       &json!({"note": before}),
-      &json!({"note": after}),
+      &json!({"note": after, "sealed_preserved": has_sealed}),
     );
   }
   let value: Value = c.put(&path, &json!({"note": note})).await?;

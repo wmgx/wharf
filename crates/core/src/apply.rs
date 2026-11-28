@@ -56,7 +56,7 @@ mod run_scope;
 
 use run_scope::{StoredRun, persist};
 pub use run_scope::{
-  list_runs, load_plan_for, load_run, load_run_for,
+  list_plans, list_runs, load_plan_for, load_run, load_run_for,
 };
 
 struct ActiveRun {
@@ -200,14 +200,27 @@ async fn stored_plan(
   })?;
   let mut body: StoredPlanBody =
     serde_json::from_str(&body).map_err(json_err)?;
-  if status == "applied" {
-    body.plan.status = PlanStatus::Applied;
-  }
+  body.plan.status =
+    persisted_plan_status(&status, &body.plan, Utc::now());
   Ok(StoredPlan {
     body,
     steps: serde_json::from_str(&steps).map_err(json_err)?,
     writes: serde_json::from_str(&writes).map_err(json_err)?,
   })
+}
+
+fn persisted_plan_status(
+  status: &str,
+  plan: &Plan,
+  now: chrono::DateTime<Utc>,
+) -> PlanStatus {
+  if status == "applied" {
+    PlanStatus::Applied
+  } else if plan.expires_at <= now {
+    PlanStatus::Expired
+  } else {
+    PlanStatus::Pending
+  }
 }
 
 mod confirm;
@@ -294,7 +307,7 @@ pub(crate) async fn start_with_actor(
         .suggest("wharf plan"),
     );
   }
-  if plan.expires_at < Utc::now() {
+  if plan.expires_at <= Utc::now() {
     return Err(
       ApiError::new(
         ErrorCode::PlanStale,
@@ -360,7 +373,20 @@ pub(crate) async fn start_with_actor(
     &plan.needs_confirm,
     &req.confirm,
     perms.contains(&Perm::Confirm),
-  )?;
+  )
+  .map_err(|error| {
+    if error.code != ErrorCode::ConfirmRequired {
+      return error;
+    }
+    let missing: Vec<_> = plan
+      .needs_confirm
+      .iter()
+      .filter(|address| !req.confirm.contains(address))
+      .collect();
+    error.with_details(wharf_api_types::plan::confirm_details(
+      plan, &missing,
+    ))
+  })?;
 
   let skip = if req.skip_snapshot {
     crate::auth::require_perm(perms, Perm::Admin)?;

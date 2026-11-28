@@ -221,6 +221,7 @@ async fn monitoring_only_plan_skips_deploy_but_heartbeat_changes_compose()
       heartbeat: Some(
         wharf_api_types::service_checks::HeartbeatSpec {
           targeted: false,
+          rotate: false,
           every_mins,
           grace_mins,
           token: String::new(),
@@ -245,6 +246,45 @@ async fn monitoring_only_plan_skips_deploy_but_heartbeat_changes_compose()
     );
     assert_eq!(compose(enabled), compose(&updated));
   }
+
+  state.db.call(|c| {
+    c.execute("INSERT INTO service_heartbeat_reports(service, at, ok, output) VALUES ('app', 1, 1, '')", [])
+      .map_err(crate::db::sql_err)?;
+    Ok(())
+  }).await.unwrap();
+  let mut rotate = enabled.clone();
+  rotate.heartbeat.as_mut().unwrap().rotate = true;
+  let rotation = plan(rotate).await.unwrap();
+  assert!(
+    rotation
+      .plan
+      .items
+      .iter()
+      .any(|item| item.reason.contains("轮换心跳口令"))
+  );
+  let writes = rotation.writes;
+  let new_token: String = state
+    .db
+    .call(move |c| {
+      for write in &writes {
+        crate::db::apply_write(c, write)?;
+      }
+      assert_eq!(heartbeat::reports(c, "app", 5)?[0].at, 1);
+      c.query_row(
+        "SELECT token FROM service_heartbeats WHERE service = 'app'",
+        [],
+        |row| row.get(0),
+      )
+      .map_err(crate::db::sql_err)
+    })
+    .await
+    .unwrap();
+  assert_ne!(new_token, previous.token);
+  assert!(
+    !serde_json::to_string(&rotation.plan)
+      .unwrap()
+      .contains(&new_token)
+  );
 
   let disabled = plan(spec).await.unwrap();
   assert!(disabled.steps.iter().any(|s| matches!(

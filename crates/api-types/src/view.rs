@@ -124,6 +124,8 @@ pub struct ReachView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ServerView {
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub omitted: BTreeMap<String, usize>,
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub key_rotation: bool,
   /// 当前已注册 agent 公钥的 12 位指纹。
@@ -131,6 +133,8 @@ pub struct ServerView {
   pub key_fingerprint: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub note: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub has_sealed_note: bool,
   pub name: String,
   pub settings: ServerSettings,
   #[serde(default)]
@@ -209,6 +213,8 @@ pub struct MigrationView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ServiceView {
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub omitted: BTreeMap<String, usize>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub migration: Option<MigrationView>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -225,6 +231,8 @@ pub struct ServiceView {
   /// 备注：给人看的说明，不影响部署。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub note: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub has_sealed_note: bool,
   pub version: u64,
   /// 容器现状，查不到时为空；状态看 `status`。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -543,6 +551,8 @@ pub struct LiveState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct GatewayView {
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub omitted: BTreeMap<String, usize>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub gate_core: Option<String>,
   pub name: String,
@@ -564,6 +574,8 @@ pub struct FailoverPendingView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RouteView {
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub omitted: BTreeMap<String, usize>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub failover_pending: Option<FailoverPendingView>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -572,6 +584,8 @@ pub struct RouteView {
   pub core: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub note: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub has_sealed_note: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub sso_login: Option<SsoLoginState>,
   pub id: String,
@@ -1810,6 +1824,16 @@ pub struct AlertRuleView {
   pub muted_until: Option<i64>,
   /// 和内置默认值不同。
   pub customized: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub defaults: Option<AlertRuleDefaults>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AlertRuleDefaults {
+  pub enabled: bool,
+  pub threshold: f64,
+  pub for_n: u32,
+  pub level: AlertLevel,
 }
 
 /// 一类事件通知：发生就推，没有阈值。
@@ -1824,6 +1848,8 @@ pub struct NoticeView {
   pub muted_until: Option<i64>,
   #[serde(default)]
   pub customized: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub default_level: Option<AlertLevel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

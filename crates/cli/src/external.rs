@@ -34,11 +34,7 @@ pub enum ExternalCmd {
   Set {
     name: String,
     /// 关闭检查。
-    #[arg(
-      long,
-      required_unless_present = "on",
-      conflicts_with = "on"
-    )]
+    #[arg(long, conflicts_with = "on")]
     off: bool,
     /// 开启检查。
     #[arg(long)]
@@ -148,7 +144,21 @@ pub async fn command(
         .await?;
       out(j, &v, show_status);
     }
-    ExternalCmd::Set { name, off, on: _ } => {
+    ExternalCmd::Set { name, off, on } => {
+      if !on && !off {
+        let entries: Vec<ExternalStatus> =
+          c.get("/api/external").await?;
+        let item = entries
+          .into_iter()
+          .find(|item| item.name == name)
+          .ok_or_else(|| {
+            wharf_api_types::ApiError::not_found(format!(
+              "外部服务 {name} 不存在"
+            ))
+          })?;
+        out(j, &item, show_status);
+        return Ok(());
+      }
       let v: ExternalStatus = c
         .put(
           &format!("/api/external/{}", seg(&name)),

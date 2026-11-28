@@ -24,10 +24,12 @@ mod fleet;
 mod gh;
 mod note;
 mod pack;
+mod plan_cmd;
 mod preview;
 mod print;
 mod probe;
 mod report;
+mod schema;
 mod selfcmd;
 mod server;
 mod service_checks;
@@ -52,7 +54,7 @@ pub struct Cli {
   /// 例：`wharf service list --fields name,status.summary`。
   #[arg(long, global = true)]
   pub fields: Option<String>,
-  /// 列表分页：每页多少项；隐含 `--json`。总数写在标准错误里。
+  /// 列表分页：每页多少项；隐含 `--json`。总数随 JSON 一起返回。
   /// 例：`wharf service list --page-size 20 --page 2`。
   #[arg(long, global = true)]
   pub page_size: Option<usize>,
@@ -66,8 +68,11 @@ pub struct Cli {
   pub page: usize,
   /// 只输出和上次执行同一条命令相比变了的地方（`path`、`before`、`after`）；隐含 `--json`。
   /// 第一次执行时整份输出算一条变化。上次的结果存在本机缓存目录里。
-  #[arg(long, global = true)]
-  pub changed: bool,
+  #[arg(long, global = true, num_args = 0..=1, require_equals = true, default_missing_value = "default", value_name = "CURSOR", value_parser = changed_cursor)]
+  pub changed: Option<String>,
+  /// 比较时保留延迟和观测时间等高频变化字段。
+  #[arg(long, global = true, requires = "changed")]
+  pub include_volatile: bool,
   /// 这次操作的原因，记进操作记录（`wharf audit` 和页面上看得到）。
   /// 例：`wharf service restart blog --reason "内存泄漏，先重启"`。
   #[arg(long, global = true)]
@@ -100,9 +105,8 @@ pub enum SsoCmd {
   Oidc { hostname: Option<String> },
   /// 设置发给应用的邮箱；--clear 清除。
   Email {
-    #[arg(required_unless_present = "clear")]
     email: Option<String>,
-    #[arg(long, conflicts_with = "email")]
+    #[arg(long, visible_alias = "off", conflicts_with = "email")]
     clear: bool,
   },
   /// 管理应用账号和关联域名。
@@ -166,7 +170,10 @@ pub enum Command {
     token_cmd: Option<String>,
   },
   /// 总览：服务器、服务、网关、路由的状态。
-  Status,
+  Status {
+    #[arg(long)]
+    brief: bool,
+  },
   /// 全局资源或镜像排行。server usage 看单台用量均值，server disk 看目录和卷，server host 看整机概况。
   Top(top::TopArgs),
   /// 周期指标和告警摘要报告（默认对比近 7 天与上一个 7 天）。
@@ -187,6 +194,9 @@ pub enum Command {
     port: Vec<String>,
     #[arg(long)]
     env: Vec<String>,
+    /// 只识别语言、Dockerfile 和默认端口，不上传也不部署。
+    #[arg(long, conflicts_with = "apply")]
+    detect_only: bool,
     #[command(flatten)]
     build: BuildOpts,
     #[command(flatten)]
@@ -360,6 +370,8 @@ pub enum Command {
   /// 加 `--partial` 时只新建或修改文件里写到的对象，其余不动。
   /// 例：`wharf export --service blog -o blog.toml` 改完后 `wharf plan -f blog.toml --partial`。
   Plan {
+    #[command(subcommand)]
+    cmd: Option<plan_cmd::PlanCmd>,
     #[arg(short = 'f', long)]
     file: Option<std::path::PathBuf>,
     /// 文件是局部的：没写到的服务、网关、路由保持原样，不会被删除。
@@ -370,6 +382,8 @@ pub enum Command {
   },
   /// 执行计划。
   Apply {
+    #[arg(long)]
+    brief: bool,
     plan_id: String,
     /// 紧急跳过数据库热快照，需要 Admin。
     #[arg(long)]
@@ -400,10 +414,10 @@ pub enum Command {
   Validate { file: std::path::PathBuf },
   /// 输出字段说明（JSON Schema），不需要连接控制面。
   Schema {
-    #[arg(long, requires = "resource")]
-    paths: bool,
     /// fleet、service、gateway、route、server、change、plan、run、status、error。不填则列出全部。
     resource: Option<String>,
+    #[arg(long, requires = "resource")]
+    paths: bool,
   },
   /// API token。
   #[command(subcommand)]
@@ -418,6 +432,8 @@ pub enum Command {
     /// 只看这一版和本机上次用的版本相比，命令和参数有哪些增删改。
     #[arg(long)]
     changes: bool,
+    #[arg(long, conflicts_with = "changes")]
+    usable: bool,
   },
 }
 
@@ -475,6 +491,12 @@ pub struct DeployOps {
   /// 初始化超时秒数（10 到 1800），0 恢复默认 300 秒。
   #[arg(long)]
   pub init_timeout: Option<u32>,
+  #[arg(long, conflicts_with = "stop_grace")]
+  pub unset_stop_grace: bool,
+  #[arg(long, conflicts_with = "stop_signal")]
+  pub unset_stop_signal: bool,
+  #[arg(long, conflicts_with = "init_cmd")]
+  pub unset_init_cmd: bool,
 }
 
 /// 看日志的公共参数。
@@ -609,6 +631,9 @@ pub struct ApplyFlags {
   /// 生成计划后直接执行并等待结束。有高风险项时仍需要 `--confirm`。
   #[arg(long)]
   pub apply: bool,
+  /// 省略计划和执行记录中较大的内容。
+  #[arg(long)]
+  pub brief: bool,
   /// 和 `--apply` 一起用：确认高风险项。
   #[arg(long)]
   pub confirm: Vec<String>,
@@ -617,6 +642,20 @@ pub struct ApplyFlags {
   /// 计划备注，随计划保存，执行时记进操作记录。
   #[arg(long)]
   pub note: Option<String>,
+}
+
+impl ApplyFlags {
+  fn check_read_only(&self) -> Result<(), wharf_api_types::ApiError> {
+    if self.apply || self.note.is_some() || !self.confirm.is_empty() {
+      return Err(
+        wharf_api_types::ApiError::invalid("没有指定要修改的配置项")
+          .with_hint(
+            "去掉计划参数可只读查看当前配置，或传入要修改的参数",
+          ),
+      );
+    }
+    Ok(())
+  }
 }
 
 #[derive(Subcommand)]
@@ -677,6 +716,8 @@ pub enum ServerCmd {
     /// 取消监视。
     #[arg(long)]
     off: bool,
+    #[arg(long, conflicts_with = "off")]
+    on: bool,
   },
   /// 查看单台服务器的服务、网关和 agent 最近 10 分钟平均资源用量。
   Usage {
@@ -804,6 +845,26 @@ pub enum ServerCmd {
     /// agent 内存上限，例如 256M、1G 或 none（不限）。默认 256 MiB，应用时无需重启 agent。
     #[arg(long, value_parser = top::parse_agent_memory)]
     agent_memory: Option<String>,
+    #[arg(long, conflicts_with = "public_ip")]
+    unset_public_ip: bool,
+    #[arg(long, conflicts_with = "private_ip")]
+    unset_private_ip: bool,
+    #[arg(long, conflicts_with = "git_proxy")]
+    unset_git_proxy: bool,
+    #[arg(long, conflicts_with = "pull_proxy")]
+    unset_pull_proxy: bool,
+    #[arg(long, conflicts_with = "via")]
+    unset_via: bool,
+    #[arg(long, conflicts_with = "github_mirror")]
+    unset_github_mirror: bool,
+    #[arg(long, conflicts_with = "renew_at")]
+    unset_renew_at: bool,
+    #[arg(long, conflicts_with = "traffic_quota_gb")]
+    unset_traffic_quota: bool,
+    #[arg(long, conflicts_with = "traffic_reset_day")]
+    unset_traffic_reset_day: bool,
+    #[arg(long, conflicts_with = "agent_memory")]
+    unset_agent_memory: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -836,6 +897,16 @@ pub enum ServerCmd {
     /// 从另一台服务器复制整份基线。
     #[arg(long)]
     copy_from: Option<String>,
+    #[arg(long, conflicts_with = "timezone")]
+    unset_timezone: bool,
+    #[arg(long, conflicts_with = "swap_gb")]
+    unset_swap: bool,
+    #[arg(long, conflicts_with = "docker_log")]
+    unset_docker_log: bool,
+    #[arg(long, conflicts_with = "journal_max")]
+    unset_journal_max: bool,
+    #[arg(long)]
+    unset_sysctl: Vec<String>,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -881,9 +952,7 @@ pub enum ServiceCmd {
   /// 从服务容器的网络探测一个目标。
   Probe(probe::ServiceProbeArgs),
   /// 查看服务的代码包来自哪台服务器的哪个目录。
-  Origin {
-    name: String,
-  },
+  Origin { name: String },
   /// 删除未纳管的容器或 Compose 项目。
   UnmanagedRemove {
     server: String,
@@ -927,23 +996,7 @@ pub enum ServiceCmd {
   /// 设置宿主机端口探测。默认检查 TCP，UDP 需要提供 DNS 或自定义报文。
   PortCheck(service_checks::PortArgs),
   /// 设置服务心跳。启停时重新部署以添加或移除 WHARF_HEARTBEAT_URL。
-  Heartbeat {
-    name: String,
-    /// 目标 Compose 容器。
-    #[arg(long)]
-    container: Option<String>,
-    /// 报到间隔，例如 10m。
-    #[arg(long, required_unless_present_any = ["off", "grace", "container"], conflicts_with = "off", value_parser = service_checks::minutes)]
-    every: Option<u32>,
-    /// 宽限，默认 5 分钟。心跳已开启时可以单独调整。
-    #[arg(long, conflicts_with = "off", value_parser = service_checks::minutes)]
-    grace: Option<u32>,
-    /// 关闭心跳。
-    #[arg(long)]
-    off: bool,
-    #[command(flatten)]
-    apply: ApplyFlags,
-  },
+  Heartbeat(service_checks::HeartbeatArgs),
 
   /// 服务的时间线：部署、备份、任务、自动重启、告警、操作记录。
   Timeline {
@@ -954,7 +1007,10 @@ pub enum ServiceCmd {
     #[arg(long)]
     before: Option<i64>,
   },
-  List,
+  List {
+    #[arg(long)]
+    brief: bool,
+  },
   Show {
     name: String,
     /// 显示完整的心跳报到地址。
@@ -1018,9 +1074,7 @@ pub enum ServiceCmd {
     path: String,
   },
   /// 部署历史。
-  History {
-    name: String,
-  },
+  History { name: String },
   /// 设置备注，直接生效。
   Note {
     name: String,
@@ -1040,9 +1094,7 @@ pub enum ServiceCmd {
     apply: ApplyFlags,
   },
   /// 重启容器，不改配置、不重建。
-  Restart {
-    name: String,
-  },
+  Restart { name: String },
   /// 检查更新：镜像（image 来源和 compose 里的镜像）重新查标签现在的版本，git 构建来源重新查分支现在的 commit，
   /// 有新版本时计划里会更新。平时改配置不会换版本。不会换标签，换标签用 `wharf service retag`。
   Update {
@@ -1070,6 +1122,8 @@ pub enum ServiceCmd {
     name: String,
     #[arg(long)]
     off: bool,
+    #[arg(long, conflicts_with = "off")]
+    on: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -1089,9 +1143,7 @@ pub enum ServiceCmd {
     apply: ApplyFlags,
   },
   /// 列出服务器上还没纳管的容器（compose 项目或 `docker run` 起的容器）。
-  Discover {
-    server: String,
-  },
+  Discover { server: String },
   /// 把服务器上已有的 compose 项目或容器导入成服务。
   Import {
     server: String,
@@ -1138,7 +1190,7 @@ pub enum ServiceCmd {
     #[arg(long)]
     server: Option<String>,
     /// 端口：`名字=容器端口` 或 `名字=容器端口:宿主机端口`，可以多次使用。
-    /// compose 来源只有宿主机端口，写 `名字=:宿主机端口`。给出后替换全部端口。
+    /// compose 来源只有宿主机端口，写 `名字=:宿主机端口`。按端口名合并，同名替换。
     #[arg(long)]
     port: Vec<String>,
     /// 环境变量 `KEY=VALUE`，值里可以用 `[[SECRET]]`。可以多次使用。
@@ -1159,6 +1211,11 @@ pub enum ServiceCmd {
     /// 按本地卷名解除挂载。
     #[arg(long)]
     unset_volume: Vec<String>,
+    /// 按名称解除发布。
+    #[arg(long)]
+    unset_port: Vec<String>,
+    #[arg(long, conflicts_with = "start_timeout")]
+    unset_start_timeout: bool,
     #[command(flatten)]
     build: Box<BuildArgs>,
     #[command(flatten)]
@@ -1252,6 +1309,16 @@ pub enum ServiceCmd {
     /// 关闭监控。
     #[arg(long)]
     off: bool,
+    #[arg(long, conflicts_with = "off")]
+    on: bool,
+    #[arg(long, conflicts_with_all = ["port", "off"])]
+    unset_port: bool,
+    #[arg(long, conflicts_with_all = ["expect", "off"])]
+    unset_expect: bool,
+    #[arg(long, conflicts_with_all = ["keyword", "off"])]
+    unset_keyword: bool,
+    #[arg(long, conflicts_with = "start_timeout")]
+    unset_start_timeout: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -1270,6 +1337,10 @@ pub enum ServiceCmd {
     /// 去掉全部上限。
     #[arg(long)]
     off: bool,
+    #[arg(long, conflicts_with_all = ["memory", "off"])]
+    unset_memory: bool,
+    #[arg(long, conflicts_with_all = ["cpus", "off"])]
+    unset_cpus: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -1357,6 +1428,18 @@ pub enum GatewayCmd {
     /// 证书方式：auto（默认，公网签证书）、internal（自签）、off（只走 HTTP，内网用）。
     #[arg(long, value_parser = ["auto", "internal", "off"])]
     tls: Option<String>,
+    #[arg(long, conflicts_with = "default")]
+    no_default: bool,
+    #[arg(long, conflicts_with = "email")]
+    unset_email: bool,
+    #[arg(long, conflicts_with = "image")]
+    unset_image: bool,
+    #[arg(long, conflicts_with = "account")]
+    unset_account: bool,
+    #[arg(long, conflicts_with = "http_port")]
+    unset_http_port: bool,
+    #[arg(long, conflicts_with = "https_port")]
+    unset_https_port: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -1365,14 +1448,10 @@ pub enum GatewayCmd {
   ErrorPage {
     name: String,
     /// HTML 文件；`-` 从标准输入读。
-    #[arg(
-      long,
-      conflicts_with = "default",
-      required_unless_present = "default"
-    )]
+    #[arg(long, conflicts_with = "default")]
     file: Option<String>,
     /// 换回内置的默认页。
-    #[arg(long)]
+    #[arg(long, visible_alias = "off")]
     default: bool,
     #[command(flatten)]
     apply: ApplyFlags,
@@ -1382,8 +1461,8 @@ pub enum GatewayCmd {
   Wildcard {
     name: String,
     #[arg(long)]
-    zone: String,
-    #[arg(long)]
+    zone: Option<String>,
+    #[arg(long, requires = "zone")]
     off: bool,
     #[command(flatten)]
     apply: ApplyFlags,
@@ -1415,16 +1494,16 @@ pub enum GatewayCmd {
   Forward {
     name: String,
     #[arg(long)]
-    listen: u16,
+    listen: Option<u16>,
     #[arg(long)]
     udp: bool,
-    #[arg(long, conflicts_with = "upstream")]
+    #[arg(long, requires = "listen", conflicts_with = "upstream")]
     service: Option<String>,
-    #[arg(long)]
+    #[arg(long, requires = "service")]
     port: Option<String>,
-    #[arg(long)]
+    #[arg(long, requires = "listen")]
     upstream: Option<String>,
-    #[arg(long, conflicts_with_all = ["service", "upstream", "port"])]
+    #[arg(long, requires = "listen", visible_alias = "off", conflicts_with_all = ["service", "upstream", "port"])]
     rm: bool,
     #[command(flatten)]
     apply: ApplyFlags,
@@ -1538,6 +1617,10 @@ pub enum RouteCmd {
     no_internal: bool,
     #[command(flatten)]
     protection: commands::entry_protection::RouteProtectionArgs,
+    #[arg(long, conflicts_with = "backup_gateway")]
+    unset_backup_gateway: bool,
+    #[arg(long, conflicts_with = "port")]
+    unset_port: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -1568,6 +1651,12 @@ pub enum RouteCmd {
     /// 公开站点（如博客）：不加门禁，访客照常访问。login 方式由主人打开 https://<域名>/_wharf/login 代登录进后台；oidc 方式由应用自己决定哪里要登录。只能配 login 或 oidc。
     #[arg(long, requires = "mode")]
     public: bool,
+    #[arg(long, conflicts_with = "mode")]
+    off: bool,
+    #[arg(long, requires = "mode", conflicts_with = "skip")]
+    unset_skip: bool,
+    #[arg(long, requires = "mode", conflicts_with = "header")]
+    unset_header: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -1586,6 +1675,8 @@ pub enum RouteCmd {
     /// 关闭拦截。
     #[arg(long)]
     no_block: bool,
+    #[arg(long, conflicts_with_all = ["rate", "no_rate", "block", "no_block"])]
+    off: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
@@ -1674,13 +1765,9 @@ pub enum SecretCmd {
   },
   Restrict {
     name: String,
-    #[arg(
-      long,
-      value_delimiter = ',',
-      required_unless_present = "clear"
-    )]
+    #[arg(long, value_delimiter = ',')]
     services: Vec<String>,
-    #[arg(long, conflicts_with = "services")]
+    #[arg(long, visible_alias = "off", conflicts_with = "services")]
     clear: bool,
   },
   /// 检查服务引用的公开 GitHub 仓库。
@@ -1921,10 +2008,31 @@ pub enum TokenCmd {
     /// 只预览会改什么，不执行。
     #[arg(long)]
     dry_run: bool,
+    #[arg(long, conflicts_with = "expires")]
+    unset_expires: bool,
+    #[arg(long, conflicts_with = "from")]
+    unset_from: bool,
+    #[arg(long, conflicts_with = "services")]
+    unset_services: bool,
   },
   Rm {
     name: String,
   },
+}
+
+fn changed_cursor(value: &str) -> Result<String, &'static str> {
+  if (1..=64).contains(&value.len())
+    && !matches!(value, "." | "..")
+    && value.bytes().all(|byte| {
+      byte.is_ascii_alphanumeric() || b"._-".contains(&byte)
+    })
+  {
+    Ok(value.to_string())
+  } else {
+    Err(
+      "游标名只允许 1 到 64 个字母、数字、.、_、-，且不能是 . 或 ..",
+    )
+  }
 }
 
 fn wants_json() -> bool {
@@ -1979,7 +2087,7 @@ async fn main() {
     print::set_fields(fields);
     cli.json = true;
   }
-  if cli.page_size.is_some() || cli.changed {
+  if cli.page_size.is_some() || cli.changed.is_some() {
     cli.json = true;
   }
   if let Some(reason) = &cli.reason {
@@ -1987,11 +2095,19 @@ async fn main() {
   }
   let key: Vec<String> = std::env::args()
     .skip(1)
-    .filter(|a| a != "--changed")
+    .filter(|a| {
+      a != "--changed"
+        && !a.starts_with("--changed=")
+        && a != "--include-volatile"
+    })
     .collect();
   view::set(
     cli.page_size.map(|size| (size, cli.page)),
-    cli.changed.then_some(key.as_slice()),
+    cli
+      .changed
+      .as_deref()
+      .map(|cursor| (cursor, key.as_slice())),
+    cli.include_volatile,
   );
   let as_json = cli.json;
   let code = match commands::run(cli).await {
@@ -2035,7 +2151,11 @@ pub enum NotifyKeyCmd {
 #[derive(Subcommand)]
 pub enum EgressCmd {
   /// 设置控制面调厂商 API 经哪台出口（按那台的规则分流）；空字符串直连。
-  Api { server: String },
+  Api {
+    server: Option<String>,
+    #[arg(long, conflicts_with = "server")]
+    off: bool,
+  },
   /// 列出预置分组和包含的域名。
   Presets,
 }
@@ -2056,4 +2176,28 @@ pub enum GateKeyCmd {
   Rm {
     name: String,
   },
+}
+
+#[test]
+fn limits_autoupdate_serverset_watchunit_readonly() {
+  for args in [
+    &["service", "port-check", "app", "http"][..],
+    &["service", "monitor", "app"],
+    &["service", "heartbeat", "app"],
+    &["service", "limits", "app"],
+    &["service", "auto-update", "app"],
+    &["server", "set", "s1"],
+    &["server", "watch-unit", "s1", "app.service"],
+    &["route", "guard", "a.test"],
+    &["token", "set", "example"],
+    &["sso", "email"],
+    &["secret", "restrict", "EXAMPLE"],
+    &["external", "set", "example"],
+    &["egress", "api"],
+  ] {
+    let cli = Cli::try_parse_from(
+      std::iter::once("wharf").chain(args.iter().copied()),
+    );
+    assert!(cli.is_ok(), "{args:?}");
+  }
 }

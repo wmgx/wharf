@@ -78,6 +78,9 @@ pub fn web_schema() -> Value {
   let _ = generator.subschema_for::<plan::Impact>();
   let _ = generator.subschema_for::<plan::PlanItem>();
   let _ = generator.subschema_for::<plan::Plan>();
+  let _ = generator.subschema_for::<plan::PlanSummary>();
+  let _ = generator
+    .subschema_for::<crate::service_checks::HeartbeatReportView>();
   let _ = generator.subschema_for::<plan::StepStatus>();
   let _ = generator.subschema_for::<plan::RunStep>();
   let _ = generator.subschema_for::<plan::Run>();

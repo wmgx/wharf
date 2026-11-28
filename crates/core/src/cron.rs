@@ -2,9 +2,16 @@
 //! 周的 0 和 7 都是周日。日和周都不是 `*` 时，满足其一即可（和 crontab 一样）。
 
 use chrono::{
-  DateTime, Datelike, Duration, FixedOffset, Timelike, Utc,
+  DateTime, Datelike, Duration, FixedOffset, Months, Timelike, Utc,
 };
 use wharf_api_types::ApiError;
+
+const ALL_DOM: u64 = ((1 << 32) - 1) & !1;
+const ALL_DOW: u64 = (1 << 7) - 1;
+
+fn has(set: u64, value: u32) -> bool {
+  set & (1 << value) != 0
+}
 
 pub struct Cron {
   minute: u64,
@@ -31,33 +38,48 @@ impl Cron {
     if dow & (1 << 7) != 0 {
       dow |= 1;
     }
+    dow &= ALL_DOW;
+    let dom = field(d, 1, 31)?;
+    let month = field(mo, 1, 12)?;
+    let dow_any = dow == ALL_DOW;
+    let month_days = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if dow_any
+      && !month_days.iter().enumerate().any(|(i, days)| {
+        has(month, i as u32 + 1)
+          && (1..=*days).any(|day| has(dom, day))
+      })
+    {
+      return Err(ApiError::invalid("cron 指定的月和日永远不会出现"));
+    }
     Ok(Cron {
       minute: field(mi, 0, 59)?,
       hour: field(h, 0, 23)?,
-      dom: field(d, 1, 31)?,
-      month: field(mo, 1, 12)?,
+      dom,
+      month,
       dow,
-      dom_any: *d == "*",
-      dow_any: *w == "*",
+      dom_any: dom == ALL_DOM,
+      dow_any,
     })
   }
 
   /// 这一分钟（北京时间）是否到点。
   pub fn matches(&self, t: DateTime<Utc>) -> bool {
     let t = t.with_timezone(&beijing());
-    let bit = |set: u64, v: u32| set & (1 << v) != 0;
-    let dom = bit(self.dom, t.day());
-    let dow = bit(self.dow, t.weekday().num_days_from_sunday());
-    let day = match (self.dom_any, self.dow_any) {
+    has(self.minute, t.minute())
+      && has(self.hour, t.hour())
+      && has(self.month, t.month())
+      && self.matches_day(t.day(), t.weekday().num_days_from_sunday())
+  }
+
+  fn matches_day(&self, day: u32, weekday: u32) -> bool {
+    let dom = has(self.dom, day);
+    let dow = has(self.dow, weekday);
+    match (self.dom_any, self.dow_any) {
       (true, true) => true,
       (true, false) => dow,
       (false, true) => dom,
       (false, false) => dom || dow,
-    };
-    bit(self.minute, t.minute())
-      && bit(self.hour, t.hour())
-      && bit(self.month, t.month())
-      && day
+    }
   }
 
   pub fn prev_at_or_before(
@@ -71,17 +93,40 @@ impl Cron {
       .find(|t| self.matches(*t))
   }
 
-  /// `after` 之后（不含这一分钟）第一次到点的时间，一年内没有就是 `None`。
+  /// `after` 之后（不含这一分钟）第一次到点的时间。
   pub fn next_after(
     &self,
     after: DateTime<Utc>,
   ) -> Option<DateTime<Utc>> {
-    let mut t = minute_floor(after) + Duration::minutes(1);
-    for _ in 0..366 * 24 * 60 {
-      if self.matches(t) {
-        return Some(t);
+    let start =
+      minute_floor(after).checked_add_signed(Duration::minutes(1))?;
+    let mut t = start.with_timezone(&beijing()).naive_local();
+    let limit = t.checked_add_months(Months::new(48))?;
+    while t <= limit {
+      let midnight = || t.date().and_hms_opt(0, 0, 0);
+      if !has(self.month, t.month()) {
+        t = midnight()?
+          .with_day(1)?
+          .checked_add_months(Months::new(1))?;
+      } else if !self
+        .matches_day(t.day(), t.weekday().num_days_from_sunday())
+      {
+        t = midnight()?.checked_add_signed(Duration::days(1))?;
+      } else if !has(self.hour, t.hour()) {
+        t =
+          t.with_minute(0)?.checked_add_signed(Duration::hours(1))?;
+      } else if let Some(minute) =
+        (t.minute()..60).find(|minute| has(self.minute, *minute))
+      {
+        return t
+          .with_minute(minute)?
+          .and_local_timezone(beijing())
+          .single()
+          .map(|t| t.to_utc());
+      } else {
+        t =
+          t.with_minute(0)?.checked_add_signed(Duration::hours(1))?;
       }
-      t += Duration::minutes(1);
     }
     None
   }
@@ -159,6 +204,20 @@ mod tests {
       .with_ymd_and_hms(y, mo, d, h, mi, 0)
       .unwrap()
       .to_utc()
+  }
+
+  #[test]
+  fn cron_dom_any_impossible_date_and_jump() {
+    let monday = Cron::parse("0 3 */1 * 1").unwrap();
+    assert!(!monday.matches(at(2026, 11, 10, 3, 0)));
+    assert!(monday.matches(at(2026, 11, 9, 3, 0)));
+    assert!(Cron::parse("0 0 31 2 *").is_err());
+    assert_eq!(
+      Cron::parse("0 0 29 2 *")
+        .unwrap()
+        .next_after(at(2028, 2, 29, 0, 0)),
+      Some(at(2032, 2, 29, 0, 0))
+    );
   }
 
   #[test]

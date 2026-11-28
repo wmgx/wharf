@@ -67,6 +67,12 @@ async fn build_view(
         Mode::Window(w) => format!("最近 {w} 次里有 {for_n} 次"),
       };
       AlertRuleView {
+        defaults: Some(wharf_api_types::view::AlertRuleDefaults {
+          enabled: true,
+          threshold: r.threshold,
+          for_n: r.for_n,
+          level: r.default_level,
+        }),
         id: r.id.into(),
         name: r.name.into(),
         metric: r.metric.into(),
@@ -95,6 +101,7 @@ async fn build_view(
     .map(|(id, name, def_level)| {
       let o = cfg.get(*id).cloned().unwrap_or_default();
       NoticeView {
+        default_level: Some(*def_level),
         id: (*id).into(),
         name: (*name).into(),
         enabled: o.enabled(),
