@@ -344,6 +344,7 @@ mod tests {
    {
     let world = shared_world();
     let up = |name: &str| Step::ServiceUp {
+      images: Default::default(),
       service: name.into(),
       instance_id: None,
       expect: None,

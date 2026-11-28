@@ -1119,6 +1119,7 @@ pub(crate) async fn read_legacy_acme_dns_hash(
     .call(
       server,
       AgentOp::TaskRun(TaskRunJob {
+        limits: None,
         name: "gateway-acme-hash".into(),
         how: TaskHow::Exec {
           cancellable: false,

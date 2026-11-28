@@ -158,6 +158,8 @@ struct StoredPlanBody {
   dns_gateways: Option<std::collections::BTreeMap<String, String>>,
   #[serde(default)]
   host_requirements: Option<Vec<crate::host_access::HostRequirement>>,
+  #[serde(default)]
+  privilege_reviewed: bool,
 }
 
 struct StoredPlan {
@@ -343,6 +345,14 @@ pub(crate) async fn start_with_actor(
     );
   }
   let human = auth.is_some_and(|auth| auth.human);
+  if !stored.body.privilege_reviewed && !stored.writes.is_empty() {
+    let snap = snapshot::load(&state.db).await?;
+    crate::host_access::check_privilege_review(
+      plan,
+      &snap.world,
+      &stored.writes,
+    )?;
+  }
   let requirements = stored.body.host_requirements.as_deref();
   if requirements.is_none()
     || !human
@@ -1612,6 +1622,7 @@ async fn run_step_with_dns(
       service,
       expect,
       instance_id,
+      images,
     } => {
       check_step_instance(world, service, instance_id.as_deref())?;
       let migration =
@@ -1643,7 +1654,7 @@ async fn run_step_with_dns(
         &snap,
         service,
         false,
-        expect.as_deref(),
+        (expect.as_deref(), Some(images)),
         progress.clone(),
         cancel,
       )
@@ -1682,7 +1693,14 @@ async fn run_step_with_dns(
     Step::Rebuild { service } => {
       crate::build::require_not_migrating(&snap, service)?;
       service_up(
-        state, run_id, &snap, service, true, None, progress, cancel,
+        state,
+        run_id,
+        &snap,
+        service,
+        true,
+        (None, None),
+        progress,
+        cancel,
       )
       .await?;
     }
@@ -1929,6 +1947,8 @@ async fn run_step_with_dns(
           server,
           AgentOp::GatewayApply(GatewayApply {
             up: ProjectUp {
+              image_pull_mode: None,
+              local_images: Default::default(),
               project: gateway_project(gateway),
               compose: r.compose,
               hash: r.compose_hash,
@@ -2043,6 +2063,8 @@ async fn run_step_with_dns(
       .find(|p| &p.server == server && &p.project == project)
       .ok_or_else(|| ApiError::internal("反向隧道配置丢失"))?;
       let up = ProjectUp {
+        image_pull_mode: None,
+        local_images: Default::default(),
         project: project.clone(),
         compose: p.compose,
         hash: p.hash,
@@ -2096,6 +2118,8 @@ async fn run_step_with_dns(
         .call(
           server,
           AgentOp::ProjectUp(ProjectUp {
+            image_pull_mode: None,
+            local_images: Default::default(),
             project: crate::tailscale::PROJECT.to_string(),
             compose,
             hash: crate::tailscale::hash(server),
@@ -2804,7 +2828,10 @@ async fn service_up(
   snap: &snapshot::Snapshot,
   service: &str,
   force: bool,
-  expect: Option<&str>,
+  (expect, images): (
+    Option<&str>,
+    Option<&crate::pins::ImageSelection>,
+  ),
   progress: ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
@@ -2953,7 +2980,38 @@ async fn service_up(
       "提醒：服务器 {server} 的 agent 版本较旧，自定义启动上限和就绪探活暂未生效，请运行 wharf upgrade 升级"
     ));
   }
+  let runtime_conn = row
+    .spec
+    .uses_runtime_options()
+    .then(|| state.hub.runtime_options_conn_id(server))
+    .transpose()?;
+  let explicit_images =
+    match (images, row.spec.pull_policy, runtime_conn) {
+      (Some(images), Some(_), _) if images.is_empty() => {
+        return Err(
+          ApiError::new(ErrorCode::PlanStale, "计划缺少镜像身份")
+            .suggest("wharf plan"),
+        );
+      }
+      (Some(images), _, _) => images.clone(),
+      (None, Some(_), Some(conn)) => {
+        crate::pins::select_explicit_images(
+          state, snap, row, conn, cancel,
+        )
+        .await?
+      }
+      _ => Default::default(),
+    };
+  let mut pins: std::collections::BTreeMap<String, String> = row
+    .pins
+    .iter()
+    .filter(|(image, _)| !image.contains('@'))
+    .map(|(image, digest)| (image.clone(), digest.clone()))
+    .collect();
+  pins.extend(explicit_images.pins);
   let op = AgentOp::ProjectUp(ProjectUp {
+    image_pull_mode: row.spec.pull_policy,
+    local_images: explicit_images.local,
     project: service.to_string(),
     compose,
     hash: hash.clone(),
@@ -2961,12 +3019,7 @@ async fn service_up(
     pull_missing_only,
     retire,
     rollback,
-    pins: row
-      .pins
-      .iter()
-      .filter(|(image, _)| !image.contains('@'))
-      .map(|(image, digest)| (image.clone(), digest.clone()))
-      .collect(),
+    pins,
     expected_images: row
       .import
       .as_ref()
@@ -2978,38 +3031,40 @@ async fn service_up(
     start_timeout_secs: row.spec.start_timeout_secs,
     readiness,
   });
-  let result: ProjectUpResult = if let Some(what) = required {
-    let conn = state.hub.deploy_v2_conn_id(server, what)?;
-    state
-      .hub
-      .call_bound(
-        (server, conn),
-        op,
-        SERVICE_UP_TIMEOUT,
-        Some(progress.clone()),
-        cancel,
+  let deploy_conn = required
+    .map(|what| state.hub.deploy_v2_conn_id(server, what))
+    .transpose()?;
+  if runtime_conn.is_some()
+    && deploy_conn.is_some()
+    && runtime_conn != deploy_conn
+  {
+    return Err(
+      ApiError::new(
+        ErrorCode::PlanStale,
+        format!("服务器 {server} 的连接已变化"),
       )
-      .await
-  } else {
-    state
-      .hub
-      .call(
-        server,
-        op,
-        SERVICE_UP_TIMEOUT,
-        Some(progress.clone()),
-        cancel,
-      )
-      .await
+      .with_hint("重新运行 wharf plan"),
+    );
   }
-  .map_err(|mut e| {
-    e.message =
-      crate::log_redact::redact_text_with(&e.message, &values);
-    e.hint = e.hint.map(|hint| {
-      crate::log_redact::redact_text_with(&hint, &values)
-    });
-    e
-  })?;
+  let result: ProjectUpResult = state
+    .hub
+    .call_optional_bound(
+      server,
+      runtime_conn.or(deploy_conn),
+      op,
+      SERVICE_UP_TIMEOUT,
+      Some(progress.clone()),
+      cancel,
+    )
+    .await
+    .map_err(|mut e| {
+      e.message =
+        crate::log_redact::redact_text_with(&e.message, &values);
+      e.hint = e.hint.map(|hint| {
+        crate::log_redact::redact_text_with(&hint, &values)
+      });
+      e
+    })?;
   let retired = result.retired.clone();
   for warning in &result.warnings {
     progress(format!("提醒：{warning}"));
@@ -3817,6 +3872,7 @@ mod tests {
       Ok(serde_json::json!(true))
     });
     let step = Step::ServiceUp {
+      images: Default::default(),
       service: "notes".into(),
       instance_id: None,
       expect: None,
@@ -3881,6 +3937,7 @@ mod tests {
         after_sync: true,
       },
       Step::ServiceUp {
+        images: Default::default(),
         service: "notes".into(),
         expect: None,
         instance_id: None,
@@ -3957,6 +4014,7 @@ mod tests {
     let cancel = CancellationToken::new();
     let progress: ProgressFn = Arc::new(|_| {});
     let up = Step::ServiceUp {
+      images: Default::default(),
       service: "notes".into(),
       instance_id: None,
       expect: None,
@@ -3984,6 +4042,7 @@ mod tests {
    {
     let state = crate::migrate::tests::seed_service(true).await;
     let step = Step::ServiceUp {
+      images: Default::default(),
       service: "notes".into(),
       instance_id: None,
       expect: None,
@@ -4509,12 +4568,14 @@ mod tests {
     assert_eq!(
       step,
       Step::ServiceUp {
+        images: Default::default(),
         instance_id: None,
         service: "web".into(),
         expect: None,
       }
     );
     let with = serde_json::to_string(&Step::ServiceUp {
+      images: Default::default(),
       instance_id: None,
       service: "web".into(),
       expect: Some("h".into()),

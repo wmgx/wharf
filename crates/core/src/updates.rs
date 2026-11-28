@@ -558,7 +558,10 @@ async fn images(
   // 服务器 → [(服务, 镜像, 固定的版本)]
   let mut by_server: BTreeMap<String, Vec<Item>> = BTreeMap::new();
   for (name, row) in &snap.world.services {
-    if !included(only, name, row) {
+    if !included(only, name, row)
+      || row.spec.pull_policy
+        == Some(wharf_api_types::spec::ImagePullMode::Never)
+    {
       continue;
     }
     let Some(server) = snapshot::service_runtime_server(snap, name)

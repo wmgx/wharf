@@ -80,6 +80,8 @@ pub enum TaskCmd {
 
 #[derive(Args)]
 pub struct AddArgs {
+  #[command(flatten)]
+  resources: crate::runtime_options::TaskLimitEdits,
   name: String,
   /// 只预览会改什么，不保存。
   #[arg(long)]
@@ -485,7 +487,9 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
         .into(),
     );
   };
-  let spec = TaskSpec {
+  let mut spec = TaskSpec {
+    limits: None,
+    inherit_server_limits: false,
     server,
     schedule: match a.schedule {
       Some(s) => s,
@@ -503,6 +507,7 @@ async fn add(c: &Client, a: AddArgs, j: bool) -> CliResult<()> {
     artifacts_max_mb: a.artifacts_max_mb,
     artifacts_keep: a.artifacts_keep,
   };
+  a.resources.apply(&mut spec)?;
   if a.rotate_token
     && !matches!(
       &spec.how,

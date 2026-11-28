@@ -362,7 +362,14 @@ impl World {
               "请清除 bg_bwlimit 以关闭限速",
             ));
           }
-          server.settings = settings.clone();
+          let mut settings = settings.clone();
+          if let Some(limits) = &mut settings.task_limits {
+            validate_limits(limits)?;
+            if limits.is_empty() {
+              settings.task_limits = None;
+            }
+          }
+          server.settings = settings;
         }
         Change::AdoptData { .. } => {}
         Change::UpsertService {
@@ -466,6 +473,11 @@ impl World {
           }
           // compose 来源没填端口时按 compose 里映射的端口补上，否则服务没有内网地址。
           let mut spec = spec.clone();
+          if import.is_some() && spec.pull_policy.is_some() {
+            return Err(ApiError::invalid(
+              "请先完成接管，再设置显式拉取策略",
+            ));
+          }
           validate_deploy_options(name, &spec)?;
           if let Some(signal) = &mut spec.stop_signal {
             *signal =
@@ -474,11 +486,7 @@ impl World {
               )?;
           }
           crate::shared_volumes::normalize(&mut spec)?;
-          if spec.limits.as_ref().is_some_and(|l| {
-            l.memory_mb.is_none() && l.cpu_milli.is_none()
-          }) {
-            spec.limits = None;
-          }
+          normalize_runtime_options(&mut spec)?;
           if let Source::Compose {
             content: Some(content),
             ..
@@ -487,20 +495,14 @@ impl World {
               old.spec.source != spec.source
                 || old.spec.container != spec.container
                 || old.spec.limits != spec.limits
+                || old.spec.container_limits != spec.container_limits
+                || old.spec.pull_policy != spec.pull_policy
                 || old.spec.env != spec.env
             })
           {
             crate::render::compose_with_settings(
               name, content, &spec,
             )?;
-          }
-          if let Some(limits) = &spec.limits {
-            if limits.memory_mb.is_some_and(|n| n < 32) {
-              return Err(ApiError::invalid("内存上限至少 32 MB"));
-            }
-            if limits.cpu_milli.is_some_and(|n| n < 10) {
-              return Err(ApiError::invalid("CPU 上限至少 0.01 核"));
-            }
           }
           if spec.auto_update {
             match &spec.source {
@@ -591,6 +593,18 @@ impl World {
             ApiError::not_found(format!("服务 {name} 不存在"))
               .suggest("wharf service list")
           })?;
+          if row.spec.pull_policy
+            == Some(wharf_api_types::spec::ImagePullMode::Never)
+          {
+            return Err(
+              ApiError::invalid(format!(
+                "服务 {name} 的拉取策略是 never"
+              ))
+              .with_hint(
+                "先导入新镜像并重新 plan，或改为 if_missing",
+              ),
+            );
+          }
           match image {
             Some(image) => {
               if !crate::pins::images(&row.spec.source)
@@ -1939,10 +1953,261 @@ pub(crate) fn is_reserved_host_port(port: u16) -> bool {
     || (30000..=39999).contains(&port)
 }
 
+pub(crate) fn validate_limits(
+  limits: &mut wharf_api_types::spec::Limits,
+) -> Result<(), ApiError> {
+  limits.normalize();
+  if limits.memory_mb.is_some_and(|n| n < 32) {
+    return Err(ApiError::invalid("内存上限至少 32 MB"));
+  }
+  if limits.cpu_milli.is_some_and(|n| n < 10) {
+    return Err(ApiError::invalid("CPU 上限至少 0.01 核"));
+  }
+  Ok(())
+}
+
+fn normalize_runtime_options(
+  spec: &mut ServiceSpec,
+) -> Result<(), ApiError> {
+  if let Some(limits) = &mut spec.limits {
+    validate_limits(limits)?;
+    if limits.is_empty() {
+      spec.limits = None;
+    }
+  }
+  for limits in spec.container_limits.values_mut() {
+    validate_limits(limits)?;
+  }
+  spec.container_limits.retain(|_, limits| !limits.is_empty());
+  for cap in &mut spec.cap_add {
+    *cap = cap.to_ascii_uppercase();
+    if let Some(value) = cap.strip_prefix("CAP_") {
+      *cap = value.to_owned();
+    }
+    if !CAPABILITIES.contains(&cap.as_str()) {
+      return Err(
+        ApiError::invalid(format!("内核能力 {cap} 不支持"))
+          .with_hint("填写具体能力名，例如 NET_BIND_SERVICE"),
+      );
+    }
+  }
+  spec.cap_add.sort_unstable();
+  spec.cap_add.dedup();
+  Ok(())
+}
+
+const CAPABILITIES: &[&str] = &[
+  "AUDIT_CONTROL",
+  "AUDIT_READ",
+  "AUDIT_WRITE",
+  "BLOCK_SUSPEND",
+  "BPF",
+  "CHECKPOINT_RESTORE",
+  "CHOWN",
+  "DAC_OVERRIDE",
+  "DAC_READ_SEARCH",
+  "FOWNER",
+  "FSETID",
+  "IPC_LOCK",
+  "IPC_OWNER",
+  "KILL",
+  "LEASE",
+  "LINUX_IMMUTABLE",
+  "MAC_ADMIN",
+  "MAC_OVERRIDE",
+  "MKNOD",
+  "NET_ADMIN",
+  "NET_BIND_SERVICE",
+  "NET_BROADCAST",
+  "NET_RAW",
+  "PERFMON",
+  "SETFCAP",
+  "SETGID",
+  "SETPCAP",
+  "SETUID",
+  "SYS_ADMIN",
+  "SYS_BOOT",
+  "SYS_CHROOT",
+  "SYS_MODULE",
+  "SYS_NICE",
+  "SYS_PACCT",
+  "SYS_PTRACE",
+  "SYS_RAWIO",
+  "SYS_RESOURCE",
+  "SYS_TIME",
+  "SYS_TTY_CONFIG",
+  "SYSLOG",
+  "WAKE_ALARM",
+];
+
+fn validate_runtime_options(
+  spec: &ServiceSpec,
+) -> Result<(), ApiError> {
+  if matches!(spec.source, Source::Compose { .. })
+    && let Some(field) = spec.image_runtime_fields().next()
+  {
+    return Err(
+      ApiError::invalid(format!("{field} 只用于镜像和构建来源"))
+        .with_hint(format!(
+          "在 Compose 的 services.<组件>.{field} 设置"
+        )),
+    );
+  }
+  if !matches!(spec.source, Source::Compose { .. })
+    && !spec.container_limits.is_empty()
+  {
+    return Err(ApiError::invalid(
+      "container_limits 只用于 Compose 来源",
+    ));
+  }
+  if spec.pull_policy.is_some()
+    && matches!(spec.source, Source::Build(_))
+  {
+    return Err(ApiError::invalid(
+      "pull_policy 只用于镜像和 Compose 来源",
+    ));
+  }
+  if spec.pull_policy
+    == Some(wharf_api_types::spec::ImagePullMode::Never)
+    && spec.auto_update
+  {
+    return Err(ApiError::invalid(
+      "pull_policy=never 不能开启自动更新",
+    ));
+  }
+  if spec
+    .command
+    .as_ref()
+    .is_some_and(|argv| argv.iter().any(|arg| arg.contains('\0')))
+  {
+    return Err(ApiError::invalid("启动参数不合法")
+      .with_hint("逐个传入参数；需要 shell 时显式提供相应 argv，镜像 ENTRYPOINT 仍会保留"));
+  }
+  if spec.shm_size == Some(0) {
+    return Err(
+      ApiError::invalid("共享内存大小不合法")
+        .with_hint("例如 --shm-size 128m"),
+    );
+  }
+  if spec
+    .log_max
+    .is_some_and(|log| log.max_bytes == 0 || log.max_files == 0)
+  {
+    return Err(
+      ApiError::invalid("日志轮转需要正数大小和保留文件数")
+        .with_hint("例如 --log-max 5m:1"),
+    );
+  }
+  if spec.hostname.as_ref().is_some_and(|hostname| {
+    hostname.len() > 253
+      || hostname.split('.').any(|label| {
+        label.is_empty()
+          || label.len() > 63
+          || label.starts_with('-')
+          || label.ends_with('-')
+          || !label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+      })
+  }) {
+    return Err(
+      ApiError::invalid("容器主机名不合法")
+        .with_hint("例如 --hostname worker-a"),
+    );
+  }
+  for group in &spec.group_add {
+    if group.is_empty()
+      || !group
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+    {
+      return Err(ApiError::invalid(format!(
+        "容器组 {group} 不支持"
+      )));
+    }
+  }
+  for (name, limit) in &spec.ulimits {
+    const NAMES: &[&str] = &[
+      "as",
+      "core",
+      "cpu",
+      "data",
+      "fsize",
+      "locks",
+      "memlock",
+      "msgqueue",
+      "nice",
+      "nofile",
+      "nproc",
+      "rss",
+      "rtprio",
+      "rttime",
+      "sigpending",
+      "stack",
+    ];
+    let bound = |value| if value == -1 { i64::MAX } else { value };
+    if !NAMES.contains(&name.as_str())
+      || limit.soft < -1
+      || limit.hard < -1
+      || (limit.soft == -1 && limit.hard != -1)
+      || bound(limit.soft) > bound(limit.hard)
+    {
+      return Err(
+        ApiError::invalid(format!(
+          "{name} 的软上限必须小于等于硬上限"
+        ))
+        .with_hint("例如 --add-ulimit nofile=1024:2048"),
+      );
+    }
+  }
+  for (target, size) in &spec.tmpfs {
+    if *size == 0
+      || !target.starts_with('/')
+      || target.contains(['\0', '$'])
+      || target[1..]
+        .split('/')
+        .any(|part| matches!(part, "" | "." | ".."))
+    {
+      return Err(
+        ApiError::invalid(format!(
+          "tmpfs {target} 需要绝对规范路径和正数大小"
+        ))
+        .with_hint("例如 --add-tmpfs /tmp:64m"),
+      );
+    }
+    let path = std::path::Path::new(target);
+    for other in spec
+      .volumes
+      .iter()
+      .map(|volume| &volume.target)
+      .chain(spec.files.iter().map(|file| &file.path))
+      .chain(spec.tmpfs.keys().filter(|other| *other != target))
+      .map(String::as_str)
+      .chain(std::iter::once(crate::render::SECRET_FILE_DIR))
+    {
+      let other_path = std::path::Path::new(other);
+      if path.starts_with(other_path) || other_path.starts_with(path)
+      {
+        return Err(
+          ApiError::invalid(format!(
+            "tmpfs {target} 与挂载 {other} 冲突"
+          ))
+          .with_hint("换一个临时目录"),
+        );
+      }
+    }
+  }
+  if let Some(value) = spec.timezone.as_deref() {
+    crate::config_api::validate_container_timezone(value)?;
+  }
+  Ok(())
+}
+
 fn validate_deploy_options(
   name: &str,
   spec: &ServiceSpec,
 ) -> Result<(), ApiError> {
+  validate_runtime_options(spec)?;
   if matches!(spec.source, Source::Compose { .. })
     && (spec.stop_grace_secs.is_some() || spec.stop_signal.is_some())
   {
@@ -2822,6 +3087,18 @@ mod tests {
       stop_signal: None,
       init_cmd: None,
       init_timeout_secs: None,
+      command: Default::default(),
+      shm_size: Default::default(),
+      cap_add: Default::default(),
+      ulimits: Default::default(),
+      init: Default::default(),
+      group_add: Default::default(),
+      hostname: Default::default(),
+      tmpfs: Default::default(),
+      timezone: Default::default(),
+      pull_policy: Default::default(),
+      log_max: Default::default(),
+      container_limits: Default::default(),
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {
@@ -3206,6 +3483,7 @@ services:
     spec.limits = Some(wharf_api_types::spec::Limits {
       memory_mb: Some(512),
       cpu_milli: None,
+      pids: None,
     });
     let err = w
       .apply_changes(&[Change::UpsertService {

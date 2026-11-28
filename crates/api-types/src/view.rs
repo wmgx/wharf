@@ -1637,6 +1637,10 @@ pub struct PendingCheck {
 /// 定时任务。名字全局唯一。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TaskSpec {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub limits: Option<crate::spec::Limits>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub inherit_server_limits: bool,
   pub server: String,
   /// 5 段 cron（分 时 日 月 周），北京时间。
   pub schedule: String,

@@ -277,7 +277,10 @@ pub(crate) fn service_limit(spec: &ServiceSpec) -> Option<u64> {
 pub(crate) fn service_limit_with_source(
   spec: &ServiceSpec,
 ) -> Option<(u64, bool)> {
-  if let Some(mb) = spec
+  if !matches!(
+    spec.source,
+    wharf_api_types::spec::Source::Compose { .. }
+  ) && let Some(mb) = spec
     .limits
     .as_ref()
     .and_then(|l| l.memory_mb)

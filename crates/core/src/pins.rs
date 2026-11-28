@@ -238,6 +238,135 @@ fn registry_hint(why: &str) -> Option<&'static str> {
 /// 部署过、镜像没换的：固定到正在跑的版本，不会因为补查版本而升级；
 /// 正在跑的版本查不清又不是最新的，不固定，提醒用户检查更新。
 /// compose 来源查不到时（例如要登录的私有仓库）只提醒，照旧按标签拉取。
+#[derive(
+  Clone,
+  Debug,
+  Default,
+  PartialEq,
+  serde::Serialize,
+  serde::Deserialize,
+)]
+pub struct ImageSelection {
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub local: BTreeMap<String, String>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub pins: BTreeMap<String, String>,
+}
+
+impl ImageSelection {
+  pub fn is_empty(&self) -> bool {
+    self.local.is_empty() && self.pins.is_empty()
+  }
+}
+
+pub(crate) async fn select_explicit_images(
+  state: &AppState,
+  snap: &Snapshot,
+  row: &crate::world::ServiceRow,
+  conn: u64,
+  cancel: &tokio_util::sync::CancellationToken,
+) -> Result<ImageSelection, ApiError> {
+  use wharf_api_types::{agent::ImageInfo, spec::ImagePullMode};
+  let Some(mode) = row.spec.pull_policy else {
+    return Ok(ImageSelection::default());
+  };
+  let server = &row.spec.server;
+  let images = match &row.spec.source {
+    Source::Image(image) => vec![image.clone()],
+    Source::Compose {
+      content: Some(content),
+      ..
+    } => wharf_api_types::compose::static_project_images(
+      &crate::render::parse_compose(content)?,
+    )?,
+    _ => return Err(ApiError::invalid("无法确定项目镜像")),
+  };
+  let locals: Vec<ImageInfo> = if mode == ImagePullMode::Always {
+    vec![]
+  } else {
+    state
+      .hub
+      .call_bound(
+        (server, conn),
+        AgentOp::InspectLocalImages {
+          images: images.clone(),
+        },
+        RESOLVE_TIMEOUT,
+        None,
+        cancel,
+      )
+      .await?
+  };
+  let mut result = ImageSelection::default();
+  let mut resolve = Vec::new();
+  for image in images {
+    let pinned = image
+      .split_once('@')
+      .map(|(_, digest)| digest)
+      .or_else(|| row.pins.get(&image).map(String::as_str));
+    let found = locals.iter().find(|local| {
+      local.image == image
+        && !local.id.is_empty()
+        && (image.contains('@')
+          || pinned.is_none_or(|digest| {
+            local
+              .digest
+              .as_deref()
+              .and_then(|value| value.split_once('@'))
+              .is_some_and(|(_, actual)| actual == digest)
+          }))
+    });
+    if let Some(local) = found {
+      result.local.insert(image, local.id.clone());
+    } else if mode == ImagePullMode::Never {
+      return Err(
+        ApiError::invalid(format!(
+          "服务器 {server} 本机没有镜像 {image} 的计划版本"
+        ))
+        .with_hint("先导入镜像到该服务器，或改为 if_missing"),
+      );
+    } else if let Some(digest) = pinned {
+      result.pins.insert(image, digest.to_owned());
+    } else {
+      resolve.push(image);
+    }
+  }
+  if !resolve.is_empty() {
+    let found: Vec<ResolvedImage> = state
+      .hub
+      .call_bound(
+        (server, conn),
+        AgentOp::ResolveImages(ResolveImages {
+          images: resolve.clone(),
+          pull: snapshot::committed_pull_policy(&snap.world, server),
+          tags: false,
+        }),
+        RESOLVE_TIMEOUT,
+        None,
+        cancel,
+      )
+      .await?;
+    for image in resolve {
+      let digest = found
+        .iter()
+        .find(|verified| verified.image == image)
+        .and_then(|verified| verified.digest.as_deref())
+        .filter(|digest| {
+          digest.strip_prefix("sha256:").is_some_and(|hash| {
+            hash.len() == 64
+              && hash.bytes().all(|b| b.is_ascii_hexdigit())
+          })
+        })
+        .ok_or_else(|| {
+          ApiError::invalid(format!("无法验证镜像 {image} 的版本"))
+            .with_hint("检查镜像名称、仓库权限和服务器网络")
+        })?;
+      result.pins.insert(image, digest.into());
+    }
+  }
+  Ok(result)
+}
+
 pub async fn resolve(
   state: &AppState,
   snap: &Snapshot,
@@ -262,7 +391,13 @@ pub async fn resolve(
     BTreeMap::new();
   for (name, row) in desired.services.iter_mut() {
     // 导入时按本机已有的镜像启动，不查仓库里的最新版本；部署后记下实际的版本。
-    if row.import.is_some() {
+    if row.import.is_some()
+      || row.spec.pull_policy.is_some()
+        && !refresh.contains(name)
+        && !images(&row.spec.source)
+          .iter()
+          .any(|image| refreshing(refresh, name, image))
+    {
       continue;
     }
     let check_platform = check_migrated_images
@@ -405,7 +540,12 @@ pub async fn resolve(
             .and_then(|r| r.error.clone())
             .unwrap_or_else(|| "agent 没有返回结果".into());
           let hint = registry_hint(&why);
-          if compose {
+          if compose
+            && desired
+              .services
+              .get(&name)
+              .is_none_or(|row| row.spec.pull_policy.is_none())
+          {
             let why = match hint {
               Some(hint) => format!("{why}（{hint}）"),
               None => why,

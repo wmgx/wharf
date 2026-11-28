@@ -132,6 +132,11 @@ pub enum Step {
     /// 计划时渲染出的 compose 指纹，执行前重算比对；没有这个字段的旧计划不校验。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     expect: Option<String>,
+    #[serde(
+      default,
+      skip_serializing_if = "crate::pins::ImageSelection::is_empty"
+    )]
+    images: crate::pins::ImageSelection,
   },
   GatewaySync {
     gateway: String,
@@ -535,6 +540,19 @@ pub(crate) async fn require_plan_request(
   Ok(())
 }
 
+fn service_needs_default_timezone(
+  previous: Option<&crate::world::ServiceRow>,
+  row: &crate::world::ServiceRow,
+) -> bool {
+  !matches!(row.spec.source, Source::Compose { .. })
+    && (row.spec.timezone.as_deref() == Some("default")
+      || (row.spec.timezone.is_none()
+        && row.import.is_none()
+        && !row.spec.env.contains_key("TZ")
+        && previous
+          .is_none_or(|old| old.instance_id != row.instance_id)))
+}
+
 pub(crate) async fn make_plan_inner(
   state: &AppState,
   req: PlanRequest,
@@ -598,6 +616,25 @@ pub(crate) async fn make_plan_inner(
       if !job.items.is_empty() {
         adoption.insert(service.clone(), job);
       }
+    }
+  }
+  if desired.services.iter().any(|(name, row)| {
+    service_needs_default_timezone(current.services.get(name), row)
+  }) {
+    let timezone =
+      state.db.call(crate::config_api::container_timezone).await?;
+    for (name, row) in &mut desired.services {
+      if service_needs_default_timezone(
+        current.services.get(name),
+        row,
+      ) {
+        row.spec.timezone = Some(timezone.clone());
+      }
+    }
+  }
+  for row in desired.services.values_mut() {
+    if row.spec.timezone.as_deref() == Some("off") {
+      row.spec.timezone = None;
     }
   }
   // 换了服务器的服务在新机器上重新分配宿主机端口，不和那里已有的服务抢。
@@ -1071,11 +1108,25 @@ pub(crate) async fn make_plan_inner(
     crate::adopt_data::add_step(&mut b, &desired, job);
   }
   build_agent_warnings(state, &desired, &mut b)?;
-  for step in &b.steps {
-    if let Step::ServiceUp { service, .. } = &step.step
+  for step in &mut b.steps {
+    if let Step::ServiceUp {
+      service, images, ..
+    } = &mut step.step
       && let Some(row) = desired.services.get(service)
     {
       crate::monitor::require_agent(state, &row.spec)?;
+      if row.spec.uses_runtime_options() {
+        let conn =
+          state.hub.runtime_options_conn_id(&row.spec.server)?;
+        *images = crate::pins::select_explicit_images(
+          state,
+          &snap,
+          row,
+          conn,
+          &Default::default(),
+        )
+        .await?;
+      }
     }
   }
   let old_agents: BTreeSet<_> = b
@@ -2138,6 +2189,7 @@ fn service_items(
         vec![id],
         format!("在 {server} 上部署 {name}"),
         Step::ServiceUp {
+          images: Default::default(),
           service: name.clone(),
           expect: Some(hash.clone()),
           instance_id: Some(svc.instance_id.clone()),
@@ -4136,6 +4188,7 @@ pub(crate) fn save_in(
   body["dns_gateways"] = json!(dns_gateways);
   body["account_refs"] = json!(&planned.account_refs);
   body["host_access_checked"] = json!(true);
+  body["privilege_reviewed"] = json!(true);
   body["host_requirements"] = json!(&planned.host_requirements);
   if !planned.route_effects.is_empty() {
     body["route_effects"] = json!(&planned.route_effects);
@@ -6668,6 +6721,7 @@ mod tests {
       items: vec![],
       title: String::new(),
       step: Step::ServiceUp {
+        images: Default::default(),
         service: "app".into(),
         instance_id: None,
         expect: None,
@@ -7169,6 +7223,7 @@ mod tests {
       Some(Limits {
         memory_mb: Some(256),
         cpu_milli: None,
+        pids: None,
       });
     let b = plan(
       &current,

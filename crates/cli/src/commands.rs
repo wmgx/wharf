@@ -42,7 +42,7 @@ use crate::{
 };
 
 pub(crate) mod entry_protection;
-mod list_edits;
+pub(crate) mod list_edits;
 
 pub async fn run(cli: Cli) -> CliResult<()> {
   let j = cli.json;
@@ -1790,6 +1790,7 @@ async fn server(
     }
     ServerCmd::Set {
       name,
+      task_limits,
       region,
       public_ip,
       mirror,
@@ -1835,7 +1836,9 @@ async fn server(
       let current: ServerView =
         c.get(&format!("/api/servers/{}", seg(&name))).await?;
       let mut settings: ServerSettings = current.settings;
-      if !(!mirror.is_empty()
+      let task_limits = task_limits.edits();
+      if !(task_limits.has_edits()
+        || !mirror.is_empty()
         || !rm_mirror.is_empty()
         || clear_mirrors
         || !lan_ip.is_empty()
@@ -1883,6 +1886,10 @@ async fn server(
           pretty,
         );
         return Ok(());
+      }
+      if task_limits.has_edits() {
+        settings.task_limits =
+          task_limits.apply(settings.task_limits)?;
       }
       if unset_public_ip {
         settings.public_ip = None;
@@ -2749,8 +2756,22 @@ fn reconcile_source_switch(
   let is_compose = matches!(source, Source::Compose { .. });
   if is_compose && !was_compose {
     spec.volumes.clear();
+    spec.command = None;
+    spec.shm_size = None;
+    spec.cap_add.clear();
+    spec.ulimits.clear();
+    spec.group_add.clear();
+    spec.init = None;
+    spec.hostname = None;
+    spec.tmpfs.clear();
+    spec.timezone = None;
+    spec.log_max = None;
+  }
+  if matches!(source, Source::Build(_)) {
+    spec.pull_policy = None;
   }
   if was_compose && !is_compose {
+    spec.container_limits.clear();
     spec.container = None;
     spec.ports.clear();
   }
@@ -3414,7 +3435,8 @@ async fn service(
           || ops.unset_stop_signal
           || ops.init_cmd.is_some()
           || ops.unset_init_cmd
-          || ops.init_timeout.is_some())
+          || ops.init_timeout.is_some()
+          || ops.runtime.has_edits())
       {
         apply.check_read_only()?;
         wharf_api_types::filter_note(
@@ -3529,6 +3551,18 @@ async fn service(
             stop_signal: None,
             init_cmd: None,
             init_timeout_secs: None,
+            command: Default::default(),
+            shm_size: Default::default(),
+            cap_add: Default::default(),
+            ulimits: Default::default(),
+            init: Default::default(),
+            group_add: Default::default(),
+            hostname: Default::default(),
+            tmpfs: Default::default(),
+            timezone: Default::default(),
+            pull_policy: Default::default(),
+            log_max: Default::default(),
+            container_limits: Default::default(),
           }
         }
       };
@@ -3540,6 +3574,7 @@ async fn service(
           refresh_ports && port.is_empty(),
         );
       }
+      ops.runtime.apply(&mut spec)?;
       if unset_start_timeout || start_timeout.is_some() {
         spec.start_timeout_secs =
           start_timeout.filter(|seconds| *seconds != 0);
@@ -3924,34 +3959,19 @@ async fn service(
     ServiceCmd::Limits {
       name,
       container,
-      memory,
-      cpus,
+      limits,
       off,
-      unset_memory,
-      unset_cpus,
       apply,
     } => {
-      if cpus.is_some_and(|n| {
-        !n.is_finite() || n < 0.0 || n * 1000.0 > f64::from(u32::MAX)
-      }) {
-        return Err(
-          ApiError::invalid("CPU 上限不合法")
-            .with_hint("填写有限的非负核数，0 表示去掉 CPU 上限")
-            .into(),
-        );
-      }
       let mut spec = c
         .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
         .await?
         .spec;
-      if container.is_none()
-        && memory.is_none()
-        && cpus.is_none()
-        && !off
-        && !unset_memory
-        && !unset_cpus
-      {
+      let editing = off || limits.has_edits();
+      if !editing {
         apply.check_read_only()?;
+      }
+      if !editing && container.is_none() {
         out(
           j,
           &json!({"service": name, "limits": spec.limits}),
@@ -3959,25 +3979,61 @@ async fn service(
         );
         return Ok(());
       }
-      if let Some(container) = container {
-        spec.container = Some(container);
-      }
-      if off {
-        spec.limits = None;
+      if let Source::Compose { content, .. } = &spec.source {
+        let components = wharf_api_types::compose::parse_compose(
+          content.as_deref().unwrap_or_default(),
+        )?;
+        let component = crate::runtime_options::select_component(
+          &components,
+          container.as_deref(),
+        )?;
+        let legacy_target = spec.container.as_deref().map_or_else(
+          || {
+            components["services"]
+              .as_mapping()
+              .is_some_and(|services| services.len() == 1)
+          },
+          |target| target == component,
+        );
+        let declared =
+          spec.container_limits.get(component).cloned().or_else(
+            || legacy_target.then(|| spec.limits.clone()).flatten(),
+          );
+        if !editing {
+          out(
+            j,
+            &json!({
+              "service": name,
+              "container": component,
+              "limits": declared,
+              "effective": crate::runtime_options::effective_limits(&components["services"][component], declared.as_ref()),
+            }),
+            pretty,
+          );
+          return Ok(());
+        }
+        let updated =
+          if off { None } else { limits.apply(declared)? };
+        if legacy_target {
+          spec.limits = None;
+        }
+        if let Some(updated) = updated {
+          spec.container_limits.insert(component.into(), updated);
+        } else {
+          spec.container_limits.remove(component);
+        }
       } else {
-        let limits =
-          spec.limits.get_or_insert(wharf_api_types::spec::Limits {
-            memory_mb: None,
-            cpu_milli: None,
-          });
-        if unset_memory || memory.is_some() {
-          limits.memory_mb = memory.filter(|memory| *memory != 0);
+        if container.is_some() {
+          return Err(
+            ApiError::invalid("--container 只用于 Compose 来源")
+              .into(),
+          );
         }
-        if unset_cpus || cpus.is_some() {
-          limits.cpu_milli = cpus
-            .filter(|cpus| *cpus != 0.0)
-            .map(|cpus| (cpus * 1000.0).round() as u32);
-        }
+        spec.limits = if off {
+          None
+        } else {
+          limits.apply(spec.limits)?
+        };
       }
       changes(
         c,

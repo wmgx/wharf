@@ -18,6 +18,81 @@ fn services(doc: &Value) -> impl Iterator<Item = (&Value, &Value)> {
   doc["services"].as_mapping().into_iter().flatten()
 }
 
+fn expanded_value(before: &Value, after: &Value) -> bool {
+  match after {
+    Value::Null => false,
+    Value::Bool(false) => false,
+    Value::Sequence(values) => values.iter().any(|value| {
+      before
+        .as_sequence()
+        .is_none_or(|existing| !existing.contains(value))
+    }),
+    Value::Mapping(values) => values
+      .iter()
+      .any(|(key, after)| expanded_value(&before[key], after)),
+    _ => before != after,
+  }
+}
+
+pub(super) fn expanded_compose_privilege(
+  service: &str,
+  before: Option<&str>,
+  after: &str,
+) -> Vec<String> {
+  let Ok(after_doc) = merged_compose(after) else {
+    return vec![];
+  };
+  let before = before
+    .and_then(|text| merged_compose(text).ok())
+    .unwrap_or_default();
+  let mut changed = serde_yaml_ng::Mapping::new();
+  for (name, body) in services(&after_doc) {
+    let Some(fields) = body.as_mapping() else {
+      continue;
+    };
+    let old = &before["services"][name];
+    let mut expanded = serde_yaml_ng::Mapping::new();
+    for (key, value) in fields {
+      if !expanded_value(&old[key], value) {
+        continue;
+      }
+      let value = match value {
+        Value::Sequence(values) => Value::Sequence(
+          values
+            .iter()
+            .filter(|value| {
+              old[key]
+                .as_sequence()
+                .is_none_or(|existing| !existing.contains(value))
+            })
+            .cloned()
+            .collect(),
+        ),
+        _ => value.clone(),
+      };
+      expanded.insert(key.clone(), value);
+    }
+    changed.insert(name.clone(), Value::Mapping(expanded));
+  }
+  let top_volumes = after_doc["volumes"]
+    .as_mapping()
+    .into_iter()
+    .flatten()
+    .filter(|(name, volume)| {
+      expanded_value(
+        &before["volumes"][*name]["driver_opts"],
+        &volume["driver_opts"],
+      )
+    })
+    .map(|(name, volume)| (name.clone(), volume.clone()))
+    .collect::<serde_yaml_ng::Mapping>();
+  let doc = serde_yaml_ng::Mapping::from_iter([
+    (Value::String("services".into()), Value::Mapping(changed)),
+    (Value::String("volumes".into()), Value::Mapping(top_volumes)),
+  ]);
+  compose_host_reasons_doc(service, &Value::Mapping(doc))
+}
+
 pub fn compose_host_reasons(
   service: &str,
   content: &str,
@@ -25,8 +100,15 @@ pub fn compose_host_reasons(
   let Ok(doc) = merged_compose(content) else {
     return vec![];
   };
+  compose_host_reasons_doc(service, &doc)
+}
+
+fn compose_host_reasons_doc(
+  service: &str,
+  doc: &Value,
+) -> Vec<String> {
   let mut reasons = Vec::new();
-  for (component, body) in services(&doc) {
+  for (component, body) in services(doc) {
     let prefix =
       format!("compose 容器 {}", component.as_str().unwrap_or("?"));
     if body["privileged"].as_bool() == Some(true) {

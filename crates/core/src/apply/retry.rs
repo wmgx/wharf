@@ -245,6 +245,17 @@ async fn require_retry_access(
   let core_server = crate::join::core_server_of(snap);
   if !original.plan_id.is_empty() {
     let stored = stored_plan(state, &original.plan_id).await?;
+    if !stored.body.privilege_reviewed
+      && steps.iter().any(|step| matches!(&step.step,
+        Step::ServiceUp { service, .. }
+          if stored.body.host_requirements.as_ref().is_some_and(|requirements| {
+            requirements.iter().any(|req| req.address == format!("service/{service}"))
+          })
+      ))
+    {
+      return Err(ApiError::new(ErrorCode::PlanStale, "旧计划的宿主机配置需要重新 plan")
+        .suggest("wharf plan"));
+    }
     let mut plan = stored.body.plan;
     let items: BTreeSet<_> =
       steps.iter().flat_map(|s| s.items.iter().copied()).collect();
@@ -339,6 +350,7 @@ async fn require_retry_access(
     let deploy;
     let step = if let Step::Rebuild { service } = &step.step {
       deploy = Step::ServiceUp {
+        images: Default::default(),
         service: service.clone(),
         instance_id: None,
         expect: None,
@@ -859,6 +871,7 @@ async fn retry_reinserts_volume_sync_after_source_restarts() {
     items: vec![1],
     title: "部署".into(),
     step: Step::ServiceUp {
+      images: Default::default(),
       service: "notes".into(),
       instance_id: None,
       expect: None,

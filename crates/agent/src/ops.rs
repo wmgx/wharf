@@ -134,6 +134,12 @@ impl Ops {
       AgentOp::ResolveCommit(job) => to_value(
         crate::build::resolve_commit(&self.docker, &job, ctx).await?,
       ),
+      AgentOp::InspectLocalImages { images } => {
+        if images.iter().any(|image| image.starts_with('-')) {
+          return Err(ApiError::invalid("镜像引用不合法"));
+        }
+        to_value(self.docker.image_info(&images, ctx).await)
+      }
       AgentOp::ResolveImages(job) => {
         to_value(crate::registry::resolve(&job, ctx).await?)
       }
@@ -882,6 +888,73 @@ impl Ops {
     Ok(images)
   }
 
+  async fn verify_local_images(
+    &self,
+    up: &ProjectUp,
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    if up.local_images.keys().any(|image| image.starts_with('-')) {
+      return Err(ApiError::invalid("镜像引用不合法"));
+    }
+    let refs = up.local_images.keys().cloned().collect::<Vec<_>>();
+    for info in self.docker.image_info(&refs, ctx).await {
+      if up.local_images.get(&info.image) != Some(&info.id) {
+        return Err(
+          ApiError::new(
+            ErrorCode::PlanStale,
+            format!("镜像 {} 自 plan 后已变化", info.image),
+          )
+          .suggest("wharf plan"),
+        );
+      }
+    }
+    Ok(())
+  }
+
+  async fn pull_explicit(
+    &self,
+    up: &ProjectUp,
+    mode: wharf_api_types::spec::ImagePullMode,
+    ctx: &Ctx,
+    warnings: &mut Vec<String>,
+  ) -> Result<Vec<String>, ApiError> {
+    use wharf_api_types::spec::ImagePullMode;
+    let doc = wharf_api_types::compose::parse_compose(&up.compose)?;
+    let images =
+      wharf_api_types::compose::static_project_images(&doc)?;
+    self.verify_local_images(up, ctx).await?;
+    for image in &images {
+      if up.local_images.contains_key(image) {
+        continue;
+      }
+      let digest = up
+        .pins
+        .get(image)
+        .filter(|_| mode != ImagePullMode::Never)
+        .ok_or_else(|| {
+          ApiError::new(
+            ErrorCode::PlanStale,
+            format!("镜像 {image} 缺少计划版本"),
+          )
+          .suggest("wharf plan")
+        })?;
+      if mode == ImagePullMode::IfMissing
+        && self.docker.has_digest(image, digest, ctx).await
+      {
+        continue;
+      }
+      if image.contains('@') {
+        self.docker.pull(image, &up.pull, ctx, warnings).await?;
+      } else {
+        self
+          .docker
+          .pull_pinned(image, digest, &up.pull, ctx)
+          .await?;
+      }
+    }
+    Ok(images)
+  }
+
   async fn up_with_crash_logs(
     &self,
     project: &str,
@@ -1043,6 +1116,10 @@ impl Ops {
     up: &ProjectUp,
     ctx: &Ctx,
   ) -> Result<ProjectUpResult, ApiError> {
+    let mut warnings = Vec::new();
+    if up.image_pull_mode.is_some() {
+      self.verify_local_images(up, ctx).await?;
+    }
     if up.trial.is_some()
       && let Err(e) = self
         .docker
@@ -1054,7 +1131,6 @@ impl Ops {
     {
       ctx.say(format!("清理上次试跑失败：{}", e.message));
     }
-    let mut warnings = Vec::new();
     let mut previous = if up.rollback {
       self
         .previous_for_rollback(&up.project, ctx, &mut warnings)
@@ -1090,7 +1166,12 @@ impl Ops {
       BTreeMap::new()
     };
     let prepared = async {
-      let images = self.pull_all(up, ctx, &mut warnings).await?;
+      let images = match up.image_pull_mode {
+        Some(mode) => {
+          self.pull_explicit(up, mode, ctx, &mut warnings).await?
+        }
+        None => self.pull_all(up, ctx, &mut warnings).await?,
+      };
       if up.trial.is_some() {
         self.trial_run(up, &mut warnings, ctx).await?;
       }

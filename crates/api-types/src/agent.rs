@@ -158,6 +158,10 @@ pub enum AgentMsg {
     #[serde(default)]
     safe_delete: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    service_runtime_opts: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    task_resource_limits: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     data_cleanup: bool,
     #[serde(default)]
     exec_v2: bool,
@@ -422,6 +426,9 @@ pub enum AgentOp {
   Report,
   /// 结果是 `Vec<ResolvedImage>`。
   ResolveImages(ResolveImages),
+  InspectLocalImages {
+    images: Vec<String>,
+  },
   /// 查 git 分支或标签现在指向的 commit（`git ls-remote`，不下载代码），结果是 40 位 commit。
   ResolveCommit(ResolveCommit),
   /// 读取若干 compose project 的现状，结果是 `Vec<ProjectState>`。

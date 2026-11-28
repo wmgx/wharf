@@ -30,6 +30,8 @@ pub enum Region {
 )]
 pub struct ServerSettings {
   #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub task_limits: Option<Limits>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
   pub region: Option<Region>,
   /// 覆盖 agent 探测到的公网 IP。caddy 网关的 DNS 记录指向它。
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -392,6 +394,30 @@ pub struct ServiceSpec {
   /// 初始化超时秒数（10 到 1800），缺省 300 秒。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub init_timeout_secs: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub command: Option<Vec<String>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub shm_size: Option<u64>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub cap_add: Vec<String>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub ulimits: BTreeMap<String, Ulimit>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub init: Option<bool>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub group_add: Vec<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub hostname: Option<String>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub tmpfs: BTreeMap<String, u64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub timezone: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub pull_policy: Option<ImagePullMode>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub log_max: Option<LogMax>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub container_limits: BTreeMap<String, Limits>,
 }
 
 #[derive(
@@ -456,6 +482,35 @@ pub struct FileSpec {
 }
 
 impl ServiceSpec {
+  pub fn image_runtime_fields(
+    &self,
+  ) -> impl Iterator<Item = &'static str> {
+    [
+      ("command", self.command.is_some()),
+      ("shm_size", self.shm_size.is_some()),
+      ("cap_add", !self.cap_add.is_empty()),
+      ("ulimits", !self.ulimits.is_empty()),
+      ("init", self.init.is_some()),
+      ("group_add", !self.group_add.is_empty()),
+      ("hostname", self.hostname.is_some()),
+      ("tmpfs", !self.tmpfs.is_empty()),
+      ("timezone", self.timezone.is_some()),
+      ("log_max", self.log_max.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(name, enabled)| enabled.then_some(name))
+  }
+
+  pub fn uses_runtime_options(&self) -> bool {
+    self.image_runtime_fields().next().is_some()
+      || self.pull_policy.is_some()
+      || !self.container_limits.is_empty()
+      || self
+        .limits
+        .as_ref()
+        .is_some_and(|limits| limits.pids.is_some())
+  }
+
   /// 按端口名、容器端口或宿主机端口找声明过的端口。`arg` 为空时只有一个端口就用它。
   pub fn find_port(&self, arg: Option<&str>) -> Option<&PortSpec> {
     let Some(arg) = arg else {
@@ -514,6 +569,69 @@ pub struct Limits {
   /// CPU 上限，单位是千分之一核，500 表示 0.5 核。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub cpu_milli: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub pids: Option<u32>,
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+pub struct Ulimit {
+  pub soft: i64,
+  pub hard: i64,
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+pub struct LogMax {
+  pub max_bytes: u64,
+  pub max_files: u32,
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ImagePullMode {
+  IfMissing,
+  Never,
+  Always,
+}
+
+impl Limits {
+  pub fn is_empty(&self) -> bool {
+    self.memory_mb.is_none()
+      && self.cpu_milli.is_none()
+      && self.pids.is_none()
+  }
+
+  pub fn normalize(&mut self) {
+    self.memory_mb = self.memory_mb.filter(|n| *n != 0);
+    self.cpu_milli = self.cpu_milli.filter(|n| *n != 0);
+    self.pids = self.pids.filter(|n| *n != 0);
+  }
 }
 
 impl Default for MonitorSpec {

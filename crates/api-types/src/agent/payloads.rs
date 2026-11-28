@@ -592,6 +592,10 @@ pub struct InitRun {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectUp {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub image_pull_mode: Option<crate::spec::ImagePullMode>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub local_images: BTreeMap<String, String>,
   pub project: String,
   /// 已经替换过密钥的 compose 内容，agent 以 0600 写入磁盘。
   pub compose: String,
@@ -925,6 +929,8 @@ pub const TASK_DATA_PREFIX: &str = "wharf-task-";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRunJob {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub limits: Option<crate::spec::Limits>,
   /// 任务名，一次性容器叫 `wharf-task-<任务名>`。
   pub name: String,
   pub how: TaskHow,

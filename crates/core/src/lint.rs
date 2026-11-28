@@ -337,23 +337,39 @@ fn memory_warning<'a>(
 }
 
 fn service_memory(spec: &ServiceSpec) -> f64 {
-  let limit = spec.limits.as_ref().and_then(|l| l.memory_mb);
-  let mut sum = f64::from(limit.unwrap_or_default());
-  if let Some(containers) = compose_services(spec) {
-    for (name, container) in &containers {
-      if limit.is_some()
-        && (containers.len() == 1
-          || spec
-            .container
-            .as_deref()
-            .is_some_and(|target| name.as_str() == Some(target)))
-      {
-        continue;
-      }
-      sum += container_memory_mb(container).unwrap_or_default();
-    }
+  if let Some((bytes, _)) = compose_memory_limits(spec) {
+    return bytes as f64 / (1 << 20) as f64;
   }
-  sum
+  f64::from(
+    spec
+      .limits
+      .as_ref()
+      .and_then(|l| l.memory_mb)
+      .unwrap_or_default(),
+  )
+}
+
+fn effective_component_memory(
+  spec: &ServiceSpec,
+  name: &Value,
+  container: &Value,
+  single: bool,
+) -> Option<f64> {
+  let name = name.as_str()?;
+  spec
+    .container_limits
+    .get(name)
+    .and_then(|limits| limits.memory_mb)
+    .or_else(|| {
+      (spec.container.as_deref() == Some(name)
+        || (single && spec.container.is_none()))
+      .then(|| {
+        spec.limits.as_ref().and_then(|limits| limits.memory_mb)
+      })
+      .flatten()
+    })
+    .map(f64::from)
+    .or_else(|| container_memory_mb(container))
 }
 
 fn container_memory_mb(container: &Value) -> Option<f64> {
@@ -372,9 +388,14 @@ pub(crate) fn compose_memory_limits(
   let containers = compose_services(spec)?;
   let mut all_limited = !containers.is_empty();
   let mut bytes = 0_u64;
-  for (_, container) in &containers {
-    if let Some(mb) =
-      container_memory_mb(container).filter(|&mb| mb > 0.0)
+  for (name, container) in &containers {
+    if let Some(mb) = effective_component_memory(
+      spec,
+      name,
+      container,
+      containers.len() == 1,
+    )
+    .filter(|&mb| mb > 0.0)
     {
       bytes = bytes.saturating_add((mb * (1 << 20) as f64) as u64);
     } else {
