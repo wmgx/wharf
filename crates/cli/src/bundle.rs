@@ -173,7 +173,29 @@ pub(crate) async fn import(
   if dry_run {
     let preview: BundleImportPreview =
       c.post_timeout("/api/import/bundle", &req, timeout).await?;
-    print::json(&preview);
+    commands::out(j, &preview, |preview| {
+      println!(
+        "服务 {} 个，路由 {} 条",
+        preview.services.len(),
+        preview.routes.len()
+      );
+      for (label, names) in [
+        ("新建密钥", &preview.secrets.create),
+        ("覆盖密钥", &preview.secrets.update),
+        ("跳过密钥", &preview.secrets.skip),
+        ("冲突密钥", &preview.secrets.conflicts),
+        ("缺少服务器", &preview.missing_servers),
+        ("缺少网关", &preview.missing_gateways),
+      ] {
+        if !names.is_empty() {
+          println!("{label}  {}", names.join("、"));
+        }
+      }
+      for warning in &preview.warnings {
+        println!("{warning}");
+      }
+      println!("{}", preview.hint);
+    });
     return Ok(());
   }
   let result: BundleImportResponse =

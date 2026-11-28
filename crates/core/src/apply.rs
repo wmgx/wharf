@@ -593,7 +593,7 @@ pub(crate) async fn start_with_actor(
   Ok(ApplyResponse { run_id })
 }
 
-fn require_fresh(
+pub(crate) fn require_fresh(
   c: &rusqlite::Connection,
   key: &db::CredentialsKey,
   plan: &Plan,

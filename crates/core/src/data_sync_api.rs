@@ -146,6 +146,7 @@ pub(crate) async fn pull(
     }
   }
   let tx = Transfer::open(state, name).await?;
+  let packets = req.error_packets;
   let cancel = tx.cancel.clone();
   let guard = cancel.clone().drop_guard();
   let (send, rx) = mpsc::channel::<Result<Bytes, io::Error>>(1);
@@ -162,8 +163,8 @@ pub(crate) async fn pull(
       Err(ApiError::new(ErrorCode::Cancelled, "拉取超时"))
     });
     let status = if result.is_ok() { 200 } else { 500 };
-    if let Err(e) = result {
-      let _ = send.try_send(Err(io::Error::other(e.message)));
+    if result.is_err() {
+      tx.cancel.cancel();
     }
     let _ = crate::audit::insert(&tx.state, AuditEntry {
       id: 0, at: crate::db::now_ms(), kind: "api".into(), actor: auth.name,
@@ -173,20 +174,76 @@ pub(crate) async fn pull(
         tx.service, req.subpath, summary.files, summary.bytes, req.sqlite_safe)),
       source: None,
     }).await;
+    if let Err(e) = result {
+      send_pull_error(&send, e).await;
+    }
   });
   let stream = futures_util::stream::unfold(
     (rx, guard),
-    |(mut rx, guard)| async move {
-      rx.recv().await.map(|bytes| (bytes, (rx, guard)))
+    move |(mut rx, guard)| async move {
+      rx.recv().await.map(|bytes| {
+        let bytes = if packets {
+          Ok(pull_packet(bytes))
+        } else {
+          bytes
+        };
+        (bytes, (rx, guard))
+      })
     },
   );
-  Ok(
-    (
-      [("content-type", "application/octet-stream")],
-      Body::from_stream(stream),
-    )
-      .into_response(),
+  let mut response = (
+    [("content-type", "application/octet-stream")],
+    Body::from_stream(stream),
   )
+    .into_response();
+  if packets {
+    response.headers_mut().insert(
+      PULL_PACKETS_HEADER,
+      axum::http::HeaderValue::from_static("1"),
+    );
+  }
+  Ok(response)
+}
+
+fn pull_packet(chunk: Result<Bytes, io::Error>) -> Bytes {
+  let (bytes, flag) = match chunk {
+    Ok(bytes) => (bytes, 0),
+    Err(error) => (
+      Bytes::from(
+        error.to_string().chars().take(MAX_PATH).collect::<String>(),
+      ),
+      PULL_PACKET_ERROR,
+    ),
+  };
+  let mut packet = Vec::with_capacity(4 + bytes.len());
+  packet.extend((flag | bytes.len() as u32).to_be_bytes());
+  packet.extend_from_slice(&bytes);
+  packet.into()
+}
+
+async fn send_pull_error(
+  send: &mpsc::Sender<Result<Bytes, io::Error>>,
+  error: ApiError,
+) {
+  let _ = send.send(Err(io::Error::other(error.message))).await;
+}
+
+#[tokio::test]
+async fn pull_delivers_error_after_buffered_chunk() {
+  let (send, mut recv) = mpsc::channel(1);
+  emit(&send, Bytes::from_static(MAGIC)).await.unwrap();
+  let error = ApiError::invalid("文件已变化");
+  let receive = async {
+    assert_eq!(
+      recv.recv().await.unwrap().unwrap(),
+      Bytes::from_static(MAGIC)
+    );
+    assert_eq!(
+      recv.recv().await.unwrap().unwrap_err().to_string(),
+      "文件已变化"
+    );
+  };
+  tokio::join!(send_pull_error(&send, error), receive);
 }
 
 fn timeout(seconds: Option<u64>) -> Duration {
@@ -499,6 +556,7 @@ async fn data_pull_push_security_scope_and_limits() {
     subpath: String::new(),
     paths: vec![],
     sqlite_safe: false,
+    error_packets: false,
     max_bytes: None,
     timeout_secs: None,
   };

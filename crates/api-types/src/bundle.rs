@@ -69,7 +69,9 @@ fn preview() -> bool {
   true
 }
 
-#[derive(Default, Serialize, Deserialize, JsonSchema)]
+#[derive(
+  Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema,
+)]
 pub struct SecretChanges {
   pub create: Vec<String>,
   pub update: Vec<String>,
@@ -89,8 +91,15 @@ pub struct BundleImportPreview {
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SecretImportResponse {
+  pub created: Vec<String>,
+  pub updated: Vec<String>,
+  pub skipped: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct BundleImportResponse {
-  pub secrets: SecretChanges,
+  pub secrets: SecretImportResponse,
   pub plan: Plan,
   pub warnings: Vec<String>,
 }

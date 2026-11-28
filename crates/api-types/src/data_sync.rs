@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use crate::ApiError;
 
 pub const MAGIC: &[u8; 10] = b"WHARFDATA1";
+pub const PULL_PACKETS_HEADER: &str = "x-wharf-pull-packets";
+pub const PULL_PACKET_ERROR: u32 = 1 << 31;
 pub const CHUNK: usize = 256 * 1024;
 pub const MAX_PATH: usize = 4096;
 pub const MAX_MANIFEST: usize = 20_000;
@@ -133,6 +135,8 @@ pub struct DataManifestResult {
   pub total_bytes: u64,
   pub truncated: bool,
   pub skipped_special: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub excluded: Vec<String>,
   pub sqlite_wal_files: Vec<String>,
 }
 
@@ -143,6 +147,8 @@ pub struct PullRequest {
   pub paths: Vec<String>,
   #[serde(default)]
   pub sqlite_safe: bool,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub error_packets: bool,
   #[serde(default)]
   pub max_bytes: Option<u64>,
   #[serde(default)]

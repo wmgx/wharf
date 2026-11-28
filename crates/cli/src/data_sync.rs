@@ -18,7 +18,10 @@ use std::{
   time::Duration,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio_util::io::{ReaderStream, StreamReader};
+use tokio_util::{
+  bytes::Bytes,
+  io::{ReaderStream, StreamReader},
+};
 use wharf_api_types::{ApiError, ErrorCode, data_sync::*};
 #[derive(Subcommand)]
 pub enum DataCmd {
@@ -205,7 +208,11 @@ fn local_manifest(
   budget: &mut u64,
 ) -> io::Result<()> {
   for name in read_names(dir)? {
-    if out.entries.len() + out.skipped_special.len() >= MAX_MANIFEST {
+    if out.entries.len()
+      + out.skipped_special.len()
+      + out.excluded.len()
+      >= MAX_MANIFEST
+    {
       return Err(io::Error::other("本地文件数超过上限"));
     }
     let Ok(part) = name.to_str() else {
@@ -216,6 +223,7 @@ fn local_manifest(
     };
     let path = format!("{prefix}{part}");
     if excluded(&path, excludes) {
+      out.excluded.push(path);
       continue;
     }
     let mode = stat(dir, &name)?.st_mode;
@@ -349,14 +357,18 @@ fn transfer_plan(
       result.total_bytes.saturating_add(entry.size);
   }
   if delete {
+    let protected_parents: BTreeSet<_> = skipped
+      .iter()
+      .chain(&target.excluded)
+      .flat_map(|path| {
+        path.match_indices('/').map(|(i, _)| &path[..i])
+      })
+      .collect();
     for entry in &target.entries {
       path_parts(&entry.path)?;
       if !src.contains(entry.path.as_str())
         && !obstructed(&entry.path)
-        && !skipped.iter().any(|p| {
-          p.strip_prefix(&entry.path)
-            .is_some_and(|tail| tail.starts_with('/'))
-        })
+        && !protected_parents.contains(entry.path.as_str())
       {
         result.deleted.push(diff(entry));
       }
@@ -569,14 +581,32 @@ async fn sync(
           subpath: subpath.into(),
           paths: paths.clone(),
           sqlite_safe: sqlite,
+          error_packets: true,
           max_bytes: args.max_size,
           timeout_secs: args.timeout,
         },
         timeout,
       )
       .await?;
+    let packets =
+      response.headers().contains_key(PULL_PACKETS_HEADER);
     let stream = response.bytes_stream().map_err(io::Error::other);
-    let mut response = StreamReader::new(stream.boxed());
+    let stream = if packets {
+      futures_util::stream::try_unfold(
+        StreamReader::new(stream.boxed()),
+        |mut reader| async {
+          Ok(
+            read_pull_packet(&mut reader)
+              .await?
+              .map(|bytes| (bytes, reader)),
+          )
+        },
+      )
+      .boxed()
+    } else {
+      stream.boxed()
+    };
+    let mut response = StreamReader::new(stream);
     let mut result =
       receive_frames(&root, &mut response, paths, limit)
         .await
@@ -694,6 +724,46 @@ impl Drop for Temp<'_> {
     let _ = unlink(self.0, &self.1, false);
   }
 }
+async fn read_pull_packet(
+  reader: &mut (impl AsyncRead + Unpin),
+) -> io::Result<Option<Bytes>> {
+  let mut header = [0; 4];
+  if reader.read(&mut header[..1]).await? == 0 {
+    return Ok(None);
+  }
+  reader.read_exact(&mut header[1..]).await?;
+  let header = u32::from_be_bytes(header);
+  let len = (header & !PULL_PACKET_ERROR) as usize;
+  if !(1..=CHUNK).contains(&len) {
+    return Err(io::Error::other("拉取数据块大小不对"));
+  }
+  let mut bytes = vec![0; len];
+  reader.read_exact(&mut bytes).await?;
+  if header & PULL_PACKET_ERROR != 0 {
+    return Err(io::Error::other(
+      String::from_utf8_lossy(&bytes).into_owned(),
+    ));
+  }
+  Ok(Some(bytes.into()))
+}
+
+#[tokio::test]
+async fn pull_shows_agent_error_instead_of_truncated_frame() {
+  let message = "拉取期间文件已变化";
+  let stream = [
+    &(PULL_PACKET_ERROR | message.len() as u32).to_be_bytes()[..],
+    message.as_bytes(),
+  ]
+  .concat();
+  assert_eq!(
+    read_pull_packet(&mut stream.as_slice())
+      .await
+      .unwrap_err()
+      .to_string(),
+    message
+  );
+}
+
 async fn receive_frames(
   root: &File,
   reader: &mut (impl AsyncRead + Unpin),
@@ -782,4 +852,27 @@ async fn receive_frames(
     return Err(invalid());
   }
   Ok(summary)
+}
+
+#[test]
+fn delete_keeps_directories_with_excluded_files() {
+  let tmp = tempfile::tempdir().unwrap();
+  std::fs::create_dir(tmp.path().join("sub")).unwrap();
+  std::fs::write(tmp.path().join("sub/app.log"), "log").unwrap();
+  std::fs::write(tmp.path().join("sub/old.txt"), "old").unwrap();
+  let root = local_root(tmp.path(), false).unwrap();
+  let mut target = DataManifestResult::default();
+  local_manifest(&root, "", &["*.log".into()], &mut target, &mut 0)
+    .unwrap();
+  let plan =
+    transfer_plan(&DataManifestResult::default(), &target, true)
+      .unwrap();
+  assert_eq!(
+    plan
+      .deleted
+      .iter()
+      .map(|entry| entry.path.as_str())
+      .collect::<Vec<_>>(),
+    ["sub/old.txt"]
+  );
 }

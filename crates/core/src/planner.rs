@@ -346,6 +346,7 @@ pub struct StepPlan {
 }
 
 /// 存进数据库的完整计划。
+#[derive(Clone)]
 pub struct Planned {
   pub plan: Plan,
   pub base_instances: BTreeMap<String, String>,
@@ -959,7 +960,7 @@ pub(crate) async fn make_plan_inner(
   for (name, svc) in &desired.services {
     let to = &svc.spec.server;
     let explicit = explicit_limits.get(name.as_str()).copied();
-    if explicit.is_some()
+    if crate::migrate::requires_limit_support(explicit)
       && let Some(from) = moved_from(&snap, &current, name, to)
     {
       state.hub.require_migrate_v2(from)?;
@@ -984,8 +985,14 @@ pub(crate) async fn make_plan_inner(
       if new_agents {
         let cancel = tokio_util::sync::CancellationToken::new();
         let _guard = cancel.clone().drop_guard();
-        crate::migrate::check_space(state, name, from, to, &cancel)
-          .await?;
+        crate::migrate::check_space(
+          state,
+          name,
+          (from, to),
+          snap.pending.migrations.get(name),
+          &cancel,
+        )
+        .await?;
       } else {
         b.warnings.push(format!("迁移 {name} 的磁盘预检使用历史数据；升级两端 agent 可查实际余量"));
         crate::migrate::check_space_from_report(
@@ -4063,7 +4070,15 @@ pub async fn save(
   state: &AppState,
   planned: &Planned,
 ) -> Result<(), ApiError> {
-  let id = planned.plan.plan_id.clone();
+  let planned = planned.clone();
+  state.db.call(move |c| save_in(c, &planned)).await
+}
+
+pub(crate) fn save_in(
+  c: &rusqlite::Connection,
+  planned: &Planned,
+) -> Result<(), ApiError> {
+  let id = &planned.plan.plan_id;
   let mut body =
     serde_json::to_value(&planned.plan).map_err(db::json_err)?;
   body["base_instances"] = json!(&planned.base_instances);
@@ -4093,24 +4108,19 @@ pub async fn save(
     serde_json::to_string(&planned.writes).map_err(db::json_err)?;
   let created = planned.plan.created_at.timestamp_millis();
   let expires = planned.plan.expires_at.timestamp_millis();
-  state
-    .db
-    .call(move |c| {
-      // 只保留最近的计划。
-      c.execute(
-        "DELETE FROM plans WHERE created_at < ?1",
-        rusqlite::params![db::now_ms() - 7 * 24 * 3600 * 1000],
-      )
-      .map_err(db::sql_err)?;
-      c.execute(
+  // 只保留最近的计划。
+  c.execute(
+    "DELETE FROM plans WHERE created_at < ?1",
+    rusqlite::params![db::now_ms() - 7 * 24 * 3600 * 1000],
+  )
+  .map_err(db::sql_err)?;
+  c.execute(
         "INSERT INTO plans (id, status, body, steps, writes, created_at, expires_at)
          VALUES (?1, 'pending', ?2, ?3, ?4, ?5, ?6)",
         rusqlite::params![id, body, steps, writes, created, expires],
       )
       .map_err(db::sql_err)?;
-      Ok(())
-    })
-    .await
+  Ok(())
 }
 
 /// 网关跨机器访问服务、而服务所在机器的内网地址不加密时，返回提醒。

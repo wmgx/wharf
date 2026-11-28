@@ -327,9 +327,9 @@ impl Ops {
         })??;
         to_value(result)
       }
-      AgentOp::ProjectMounts { projects } => {
-        to_value(self.docker.project_mounts(&projects, ctx).await?)
-      }
+      AgentOp::ProjectMounts { projects } => to_value(
+        self.docker.project_mounts(&projects, false, ctx).await?,
+      ),
       AgentOp::SyncServe(s) => {
         check_project(&s.service)?;
         let _guard = self.lock_data(&s.service, ctx).await?;
@@ -337,12 +337,24 @@ impl Ops {
       }
       AgentOp::SyncPush(p) => crate::sync::push(&p, ctx).await,
       AgentOp::AdoptDataInspect(job) => to_value(
-        crate::adopt_data::inspect(&self.docker, &job, true, ctx)
-          .await?,
+        crate::adopt_data::inspect(
+          &self.docker,
+          &self.data_dir,
+          &job,
+          true,
+          ctx,
+        )
+        .await?,
       ),
       AgentOp::AdoptDataCopy(job) => {
         let _guard = self.lock_data(&job.service, ctx).await?;
-        crate::adopt_data::copy(&self.docker, &job, ctx).await?;
+        crate::adopt_data::copy(
+          &self.docker,
+          &self.data_dir,
+          &job,
+          ctx,
+        )
+        .await?;
         Ok(Value::Null)
       }
       AgentOp::DataManifest { service, request } => {
@@ -377,7 +389,12 @@ impl Ops {
         let cancel = ctx.cancel.clone();
         to_value(
           tokio::task::spawn_blocking(move || {
-            crate::sync::dir_space(&service, measure_data, &cancel)
+            crate::sync::dir_space(
+              Path::new("/srv"),
+              &service,
+              measure_data,
+              &cancel,
+            )
           })
           .await
           .map_err(|_| ApiError::internal("磁盘预检任务失败"))??,

@@ -1392,6 +1392,12 @@ pub struct ImportPreview {
   pub secrets_committed: bool,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ServiceImportPreview {
+  pub import: ImportPreview,
+  pub hint: String,
+}
+
 /// `POST /api/convert/docker-run` 的请求：一条 `docker run` 命令。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DockerRunRequest {

@@ -207,7 +207,17 @@ fn complete_migration_steps(
           from: from.clone(),
           to: to.clone(),
           instance_id: m.payload.instance_id.clone(),
-          bwlimit_kbps: None,
+          bwlimit_kbps:
+            wharf_api_types::resources::effective_bwlimit_kbps(
+              None,
+              &[from, to].map(|server| {
+                snap
+                  .world
+                  .servers
+                  .get(server)
+                  .and_then(|row| row.settings.bg_bwlimit_kbps())
+              }),
+            ),
           explicit_bwlimit: false,
           shared_data: crate::shared_volumes::consumers_on(
             &snap.world,
@@ -816,7 +826,21 @@ async fn retry_reinserts_volume_sync_after_source_restarts() {
   let state = crate::migrate::tests::seed_service(false).await;
   crate::migrate::tests::seed_migration(&state, "pending", false)
     .await;
-  let snap = snapshot::load(&state.db).await.unwrap();
+  let mut snap = snapshot::load(&state.db).await.unwrap();
+  snap
+    .world
+    .servers
+    .get_mut("s1")
+    .unwrap()
+    .settings
+    .bg_bwlimit = Some("3M".into());
+  snap
+    .world
+    .servers
+    .get_mut("s2")
+    .unwrap()
+    .settings
+    .bg_bwlimit = Some("10M".into());
   let up = StepPlan {
     items: vec![1],
     title: "部署".into(),
@@ -828,7 +852,7 @@ async fn retry_reinserts_volume_sync_after_source_restarts() {
   };
   let steps = complete_migration_steps(vec![up], &snap);
   assert!(
-    matches!(&steps[0].step, Step::VolumeSync { from, to, .. } if from == "s1" && to == "s2")
+    matches!(&steps[0].step, Step::VolumeSync { from, to, bwlimit_kbps: Some(3072), .. } if from == "s1" && to == "s2")
   );
   assert!(matches!(steps[1].step, Step::ServiceUp { .. }));
 }

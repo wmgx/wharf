@@ -14,6 +14,8 @@ pub struct AdoptMountSpec {
   pub source: Option<String>,
   #[serde(default)]
   pub volume_name: Option<String>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub rename_only: bool,
 }
 
 #[derive(
@@ -122,4 +124,14 @@ pub struct AdoptInspectEntry {
   #[serde(default)]
   pub is_dir: Option<bool>,
   pub in_use_by: Vec<String>,
+  #[serde(default)]
+  pub size_bytes: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AdoptDataInspectResult {
+  pub entries: Vec<AdoptInspectEntry>,
+  pub srv_avail_bytes: u64,
+  #[serde(default)]
+  pub mounts: Vec<crate::agent::ContainerMount>,
 }

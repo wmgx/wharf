@@ -96,7 +96,11 @@ fn scan(
   names.sort_unstable();
   for name in names {
     cancelled(cancel)?;
-    if out.entries.len() + out.skipped_special.len() >= limit {
+    if out.entries.len()
+      + out.skipped_special.len()
+      + out.excluded.len()
+      >= limit
+    {
       out.truncated = true;
       return Ok(());
     }
@@ -108,6 +112,7 @@ fn scan(
     };
     let path = format!("{prefix}{segment}");
     if excluded(&path, &req.excludes) {
+      out.excluded.push(path);
       continue;
     }
     if join(&req.subpath, &path).is_err() {

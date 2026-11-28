@@ -103,8 +103,8 @@ async fn check_writers(
 pub(crate) async fn check_space(
   state: &AppState,
   service: &str,
-  from: &str,
-  to: &str,
+  (from, to): (&str, &str),
+  existing: Option<&pending::Migration>,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
   let query = |server, measure_data| {
@@ -127,9 +127,31 @@ pub(crate) async fn check_space(
   check_migration_disk(
     to,
     bytes,
+    reusable_bytes(existing, (from, to), target.existing_bytes),
     target.fs_avail_bytes,
     target.fs_total_bytes,
   )
+}
+
+fn reusable_bytes(
+  existing: Option<&pending::Migration>,
+  (from, to): (&str, &str),
+  bytes: u64,
+) -> u64 {
+  if existing.is_some_and(|m| {
+    m.payload.from == from
+      && m.payload.to == to
+      && (m.payload.target_prepared
+        || m.payload.target_backup.is_some())
+  }) {
+    bytes
+  } else {
+    0
+  }
+}
+
+pub(crate) fn requires_limit_support(limit: Option<u32>) -> bool {
+  limit.is_some_and(|limit| limit > 0)
 }
 
 pub(crate) async fn check_space_from_report(
@@ -152,7 +174,13 @@ pub(crate) async fn check_space_from_report(
     ).optional().map_err(crate::db::sql_err)
   }).await?;
   if let Some(source) = source_bytes {
-    check_migration_disk(to, source as u64, disk.free, disk.total)?;
+    check_migration_disk(
+      to,
+      source as u64,
+      0,
+      disk.free,
+      disk.total,
+    )?;
   }
   Ok(())
 }
@@ -160,11 +188,13 @@ pub(crate) async fn check_space_from_report(
 fn check_migration_disk(
   to: &str,
   source_bytes: u64,
+  existing_bytes: u64,
   available: u64,
   total: u64,
 ) -> Result<(), ApiError> {
   const MIB: u64 = 1024 * 1024;
   let required = source_bytes
+    .saturating_sub(existing_bytes)
     .saturating_add((source_bytes / 10).max(100 * MIB))
     .saturating_add((total / 20).min(512 * MIB));
   if available < required {
@@ -172,7 +202,7 @@ fn check_migration_disk(
       "目标服务器 {to} 磁盘空间不足：源数据 {source_bytes} 字节，含余量需 {required} 字节，目标仅剩 {available} 字节"
     )).with_hint(format!("先清理目标机空间（wharf server prune {to}）或更换目标服务器"))
       .with_details(serde_json::json!({
-        "source_bytes": source_bytes, "required_bytes": required,
+        "source_bytes": source_bytes, "required_bytes": required, "target_existing_bytes": existing_bytes,
         "target_avail_bytes": available, "target_total_bytes": total,
       })));
   }
@@ -183,13 +213,45 @@ fn check_migration_disk(
 fn migration_plan_blocks_when_target_disk_insufficient() {
   const GIB: u64 = 1 << 30;
   let error =
-    check_migration_disk("s2", 2 * GIB, 3 * GIB / 2, 20 * GIB)
+    check_migration_disk("s2", 2 * GIB, 0, 3 * GIB / 2, 20 * GIB)
       .unwrap_err();
   assert_eq!(error.code, ErrorCode::InvalidInput);
   assert_eq!(error.details.unwrap()["source_bytes"], 2 * GIB);
   assert!(
-    check_migration_disk("s2", 2 * GIB, 3 * GIB, 20 * GIB).is_ok()
+    check_migration_disk("s2", 2 * GIB, 0, 3 * GIB, 20 * GIB).is_ok()
   );
+}
+
+#[test]
+fn migration_disk_credits_only_prepared_target() {
+  let mut pending = pending::Migration {
+    phase: MigratePhase::Pending,
+    payload: serde_json::from_value(serde_json::json!({
+      "service": "app", "from": "s1", "to": "s2"
+    }))
+    .unwrap(),
+  };
+  const GIB: u64 = 1 << 30;
+  let check = |migration: &pending::Migration| {
+    check_migration_disk(
+      "s2",
+      10 * GIB,
+      reusable_bytes(Some(migration), ("s1", "s2"), 19 * GIB / 2),
+      9 * GIB / 2,
+      40 * GIB,
+    )
+  };
+  assert!(check(&pending).is_err());
+  pending.payload.target_prepared = true;
+  assert!(check(&pending).is_ok());
+}
+
+#[test]
+fn only_positive_explicit_migration_limit_requires_new_agent() {
+  assert!(!requires_limit_support(Some(
+    wharf_api_types::resources::parse_bwlimit_kbps("none").unwrap()
+  )));
+  assert!(requires_limit_support(Some(3072)));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -221,14 +283,21 @@ pub async fn volume_sync(
   }) {
     return Ok(());
   }
-  if explicit {
+  if explicit && requires_limit_support(bwlimit_kbps) {
     state.hub.require_migrate_v2(from)?;
     state.hub.require_migrate_v2(to)?;
   }
   if state.hub.supports_migrate_v2(from)
     && state.hub.supports_migrate_v2(to)
   {
-    check_space(state, service, from, to, cancel).await?;
+    check_space(
+      state,
+      service,
+      (from, to),
+      existing.as_ref(),
+      cancel,
+    )
+    .await?;
   }
   let bwlimit_kbps = if bwlimit_kbps.is_some()
     && !state.hub.supports_migrate_v2(from)

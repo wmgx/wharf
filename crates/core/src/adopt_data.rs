@@ -56,6 +56,7 @@ pub(crate) fn select_candidates(
   let mut selected =
     BTreeMap::<(AdoptSourceKind, String), AdoptSourceItem>::new();
   let mut matched = BTreeSet::new();
+  let has_explicit = overrides.iter().any(|m| !m.rename_only);
   let mut warnings = Vec::new();
   let mut top_keys = BTreeSet::new();
   let Some(services) =
@@ -77,11 +78,6 @@ pub(crate) fn select_candidates(
       let Some((raw_source, target, ro)) = mount_parts(mount) else {
         continue;
       };
-      let override_entry =
-        overrides.iter().enumerate().find(|(_, select)| {
-          select.target.as_deref() == Some(target.as_str())
-            || select.source.as_deref() == Some(raw_source.as_str())
-        });
       let actual = declared.iter().find(|m| {
         m.container.as_deref() == Some(component)
           && m.target == target
@@ -103,49 +99,53 @@ pub(crate) fn select_candidates(
       let Some(actual) = actual else {
         continue;
       };
-      let override_entry = override_entry.or_else(|| {
-        overrides.iter().enumerate().find(|(_, select)| {
-          select.source.as_deref() == Some(actual.source.as_str())
-        })
-      });
-      if let Some((index, _)) = override_entry {
-        matched.insert(index);
+      let mut source =
+        actual.source.trim_end_matches('/').to_string();
+      if kind == AdoptSourceKind::NamedVolume
+        && source == raw_source
+        && top
+          .as_ref()
+          .and_then(|top| top.get(raw_source.as_str()))
+          .is_none_or(|def| {
+            def.get("name").is_none()
+              && def.get("external").is_none_or(|external| {
+                external.as_bool() == Some(false)
+              })
+          })
+      {
+        source = format!("{name}_{raw_source}");
       }
-      if override_entry.is_none() && (ro || !overrides.is_empty()) {
+      if kind == AdoptSourceKind::ExternalDir && source.is_empty() {
+        source.push('/');
+      }
+      let mut explicit = false;
+      let mut rename = None;
+      for (index, selector) in overrides.iter().enumerate() {
+        if selector.target.as_deref() == Some(target.as_str())
+          || selector.source.as_deref().is_some_and(|s| {
+            [raw_source.as_str(), source.as_str()].contains(&s)
+          })
+        {
+          matched.insert(index);
+          explicit |= !selector.rename_only;
+          if let Some(requested) = selector.volume_name.as_deref()
+            && rename
+              .replace(requested)
+              .is_some_and(|previous| previous != requested)
+          {
+            return Err(ApiError::invalid(
+              "同一挂载不能指定多个目标卷名",
+            ));
+          }
+        }
+      }
+      if !explicit && (ro || has_explicit) {
         if ro {
           warnings.push(format!("跳过只读挂载 {component}:{target}"));
         }
         if kind == AdoptSourceKind::NamedVolume {
           still_used.insert(raw_source);
         }
-        continue;
-      }
-      let rename = override_entry
-        .and_then(|(_, opt)| opt.volume_name.as_deref());
-      let mut source =
-        actual.source.trim_end_matches('/').to_string();
-      if kind == AdoptSourceKind::NamedVolume {
-        let def =
-          top.as_ref().and_then(|top| top.get(raw_source.as_str()));
-        if let Some(named) =
-          def.and_then(|def| def.get("name")).and_then(Value::as_str)
-        {
-          source = named.into();
-        } else if !def
-          .and_then(|def| def.get("external"))
-          .and_then(Value::as_bool)
-          .unwrap_or(false)
-        {
-          source = format!("{name}_{raw_source}");
-        }
-      }
-      if kind == AdoptSourceKind::ExternalDir && source.is_empty() {
-        source.push('/');
-      }
-      if kind == AdoptSourceKind::ExternalDir
-        && ignored.contains(&source)
-      {
-        warnings.push(format!("跳过单文件挂载 {component}:{target}"));
         continue;
       }
       let key = (kind, source.clone());
@@ -186,7 +186,6 @@ pub(crate) fn select_candidates(
           volume = format!("{stem}-{index}");
           index += 1;
         }
-        used.insert(volume.clone());
         volume
       };
       let item = AdoptSourceItem {
@@ -196,7 +195,30 @@ pub(crate) fn select_candidates(
         volume_name,
         read_only: ro,
       };
-      item.validate()?;
+      if let Err(error) = item.validate() {
+        if explicit {
+          return Err(error);
+        }
+        warnings.push(format!(
+          "跳过挂载 {component}:{target}：{}",
+          error.message
+        ));
+        if kind == AdoptSourceKind::NamedVolume {
+          still_used.insert(raw_source);
+        }
+        continue;
+      }
+      used.insert(item.volume_name.clone());
+      if ignored.contains(&item.source) {
+        if explicit {
+          return Err(ApiError::invalid(
+            "单文件挂载无法收编，请用 wharf service upload/download 处理",
+          ));
+        }
+        warnings.push(format!("跳过单文件挂载 {component}:{target}，请用 wharf service upload/download"));
+        selected.entry(key).or_insert(item);
+        continue;
+      }
       let path = format!("/srv/{name}/{}", item.volume_name);
       if let Some(raw) = mount.as_str() {
         let options = raw
@@ -240,7 +262,14 @@ pub(crate) fn select_candidates(
   }
   let yaml = serde_yaml_ng::to_string(&doc)
     .map_err(|_| ApiError::invalid("无法改写 compose 挂载"))?;
-  Ok((selected.into_values().collect(), warnings, yaml))
+  Ok((
+    selected
+      .into_values()
+      .filter(|item| !ignored.contains(&item.source))
+      .collect(),
+    warnings,
+    yaml,
+  ))
 }
 
 fn mount_parts(mount: &Value) -> Option<(String, String, bool)> {
@@ -322,17 +351,6 @@ pub(crate) async fn prepare(
   }
   let (items, mut warnings, mut content) =
     select_candidates(name, &row.spec, overrides, &BTreeSet::new())?;
-  if items.is_empty() {
-    warnings.push(format!("服务 {name} 没有符合条件的外部数据卷"));
-    return Ok((
-      AdoptDataJob {
-        service: name.into(),
-        items,
-        nonce: String::new(),
-      },
-      warnings,
-    ));
-  }
   let mut nonce = [0; 16];
   getrandom::fill(&mut nonce)
     .map_err(|_| ApiError::internal("随机数不可用"))?;
@@ -344,7 +362,7 @@ pub(crate) async fn prepare(
   let conn = state.hub.require_data_ops(&row.spec.server)?;
   let cancel = CancellationToken::new();
   let _guard = cancel.clone().drop_guard();
-  let inspected: Vec<AdoptInspectEntry> = state
+  let inspected: AdoptDataInspectResult = state
     .hub
     .call_bound(
       (&row.spec.server, conn),
@@ -355,16 +373,12 @@ pub(crate) async fn prepare(
     )
     .await?;
   let single_file = inspected
+    .entries
     .iter()
     .filter(|e| e.is_dir == Some(false))
     .map(|e| e.volume_name.as_str())
     .collect::<BTreeSet<_>>();
   if !single_file.is_empty() {
-    if !overrides.is_empty() {
-      return Err(ApiError::invalid(
-        "单文件挂载无法收编，请用 wharf service upload/download 处理",
-      ));
-    }
     let ignored = job
       .items
       .iter()
@@ -377,13 +391,14 @@ pub(crate) async fn prepare(
     warnings = fresh_warnings;
     content = yaml;
   }
-  check_inspect(
-    &inspected
-      .into_iter()
-      .filter(|e| e.is_dir != Some(false))
-      .collect::<Vec<_>>(),
-  )?;
+  warnings.extend(anonymous_warnings(
+    name,
+    &row.spec,
+    &inspected.mounts,
+  ));
+  check_inspect(&inspected)?;
   if job.items.is_empty() {
+    warnings.push(format!("服务 {name} 没有符合条件的外部数据卷"));
     return Ok((job, warnings));
   }
   row.spec.source = Source::Compose {
@@ -394,10 +409,39 @@ pub(crate) async fn prepare(
   Ok((job, warnings))
 }
 
-pub(crate) fn check_inspect(
-  entries: &[AdoptInspectEntry],
+fn anonymous_warnings(
+  service: &str,
+  spec: &ServiceSpec,
+  actual: &[wharf_api_types::agent::ContainerMount],
+) -> Vec<String> {
+  crate::data::undeclared_mounts(
+    service,
+    &crate::data::mounts(service, spec),
+    actual,
+  )
+  .into_iter()
+  .filter(|mount| {
+    mount.kind == DataKind::NamedVolume && mount.source.is_empty()
+  })
+  .map(|mount| {
+    format!(
+      "跳过镜像自带的匿名卷 {}:{}，请先在 compose 声明",
+      mount.container.as_deref().unwrap_or(service),
+      mount.target
+    )
+  })
+  .collect()
+}
+
+fn check_inspect(
+  inspected: &AdoptDataInspectResult,
 ) -> Result<(), ApiError> {
-  for entry in entries {
+  let mut size = 0_u64;
+  for entry in &inspected.entries {
+    if entry.is_dir == Some(false) {
+      continue;
+    }
+    size = size.saturating_add(entry.size_bytes);
     if !entry.in_use_by.is_empty() {
       return Err(ApiError::new(
         ErrorCode::Conflict,
@@ -417,6 +461,21 @@ pub(crate) fn check_inspect(
         .with_hint("用 --rename 选择其他卷名"),
       );
     }
+  }
+  const MIB: u64 = 1 << 20;
+  let required =
+    size.saturating_add(size / 10).saturating_add(100 * MIB);
+  if size > 0 && inspected.srv_avail_bytes < required {
+    return Err(
+      ApiError::invalid(format!(
+        "收编数据需 {required} 字节，目标盘仅剩 {} 字节",
+        inspected.srv_avail_bytes
+      ))
+      .with_details(serde_json::json!({
+        "source_bytes": size, "required_bytes": required,
+        "target_avail_bytes": inspected.srv_avail_bytes,
+      })),
+    );
   }
   Ok(())
 }
@@ -454,7 +513,7 @@ pub(crate) async fn execute(
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
   let conn = state.hub.require_data_ops(server)?;
-  let inspection: Vec<AdoptInspectEntry> = state
+  let inspection: AdoptDataInspectResult = state
     .hub
     .call_bound(
       (server, conn),
@@ -464,6 +523,11 @@ pub(crate) async fn execute(
       cancel,
     )
     .await?;
+  if inspection.entries.iter().any(|e| e.is_dir == Some(false)) {
+    return Err(ApiError::invalid(
+      "收编源已变成单文件，请重新生成计划",
+    ));
+  }
   check_inspect(&inspection)?;
   let service = &job.service;
   let result = async {
@@ -500,26 +564,107 @@ pub(crate) async fn execute(
   result
 }
 
+#[cfg(test)]
+fn fixture_spec(content: &str) -> ServiceSpec {
+  serde_json::from_value(serde_json::json!({
+    "server": "s1", "source": { "compose": { "content": content }}
+  }))
+  .unwrap()
+}
+
 #[test]
-fn adopt_data_rewrites_short_and_long_mounts_and_rejects_system_path()
-{
-  let mut spec: ServiceSpec = serde_json::from_value(serde_json::json!({
-    "server": "s1", "source": { "compose": { "content":
-      "services: {app: {volumes: ['/opt/data:/data:z', {type: volume, source: old_vol, target: /db}]}}\nvolumes: {old_vol: {name: external-vol}}"
-    }}
-  })).unwrap();
+fn adopt_data_skips_unsafe_mounts_unless_explicit() {
+  let spec = fixture_spec(
+    "services: {app: {volumes: ['/opt/app:/data:z', '/var/run/docker.sock:/docker.sock', './conf:/conf', '/srv/other/data:/shared']}}",
+  );
+  let (items, warnings, yaml) =
+    select_candidates("app", &spec, &[], &BTreeSet::new()).unwrap();
+  assert_eq!(items.len(), 1);
+  assert_eq!(warnings.len(), 3);
+  assert!(yaml.contains("/srv/app/data:/data:z"));
+  let explicit = AdoptMountSpec {
+    target: Some("/docker.sock".into()),
+    source: None,
+    volume_name: None,
+    rename_only: false,
+  };
+  assert!(
+    select_candidates("app", &spec, &[explicit], &BTreeSet::new())
+      .is_err()
+  );
+}
+
+#[test]
+fn adopt_data_rename_preserves_selection_and_combines_aliases() {
+  let spec = fixture_spec(
+    "services: {app: {volumes: ['/opt/a:/data', '/opt/b:/logs', '/opt/config:/config']}}",
+  );
+  let rename = AdoptMountSpec {
+    target: Some("/data".into()),
+    source: None,
+    volume_name: Some("data2".into()),
+    rename_only: true,
+  };
+  let ignored = BTreeSet::from(["/opt/config".into()]);
+  let (items, warnings, _) = select_candidates(
+    "app",
+    &spec,
+    std::slice::from_ref(&rename),
+    &ignored,
+  )
+  .unwrap();
+  assert_eq!(
+    items
+      .iter()
+      .map(|item| item.volume_name.as_str())
+      .collect::<Vec<_>>(),
+    ["data2", "logs"]
+  );
+  assert!(warnings.iter().any(|w| w.contains("单文件")));
+  let select = AdoptMountSpec {
+    target: None,
+    source: Some("/opt/a".into()),
+    volume_name: None,
+    rename_only: false,
+  };
+  let (items, _, _) =
+    select_candidates("app", &spec, &[select, rename], &ignored)
+      .unwrap();
+  assert_eq!(items.len(), 1);
+  assert_eq!(items[0].volume_name, "data2");
+}
+
+#[test]
+fn adopt_data_resolves_legacy_external_volume_name() {
+  let spec = fixture_spec(
+    "services: {app: {volumes: [{type: volume, source: old_vol, target: /db}]}}\nvolumes: {old_vol: {external: {name: real-vol}}}",
+  );
   let (items, _, yaml) =
     select_candidates("app", &spec, &[], &BTreeSet::new()).unwrap();
-  assert_eq!(items.len(), 2);
-  assert!(
-    yaml.contains("/srv/app/data:/data:z")
-      && yaml.contains("/srv/app/old-vol")
+  assert_eq!(items[0].source, "real-vol");
+  assert!(yaml.contains("/srv/app/old-vol"));
+}
+
+#[test]
+fn adopt_data_checks_total_space_and_reports_undeclared_anonymous_volumes()
+ {
+  use serde_json::json;
+  const MIB: u64 = 1 << 20;
+  let inspected: AdoptDataInspectResult = serde_json::from_value(json!({
+    "srv_avail_bytes": 300 * MIB,
+    "entries": ["data", "logs"].map(|volume_name| json!({
+      "volume_name": volume_name, "size_bytes": 100 * MIB, "is_dir": true,
+      "target_exists_nonempty": false, "in_use_by": []
+    })),
+    "mounts": [{"container": "app-db-1", "service": "db", "kind": "volume",
+      "source": "a".repeat(64), "target": "/var/lib/db"}]
+  })).unwrap();
+  assert_eq!(
+    check_inspect(&inspected).unwrap_err().details.unwrap()["required_bytes"],
+    320 * MIB
   );
-  if let Source::Compose { content, .. } = &mut spec.source {
-    *content =
-      Some("services: {app: {volumes: ['/etc:/config']}}".into());
-  }
-  assert!(
-    select_candidates("app", &spec, &[], &BTreeSet::new()).is_err()
-  );
+  let spec = fixture_spec("services: {db: {image: fixture:1}}");
+  let warnings = anonymous_warnings("app", &spec, &inspected.mounts);
+  assert_eq!(warnings.len(), 1);
+  assert!(warnings[0].contains("db:/var/lib/db"));
 }

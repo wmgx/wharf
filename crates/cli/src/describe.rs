@@ -89,6 +89,25 @@ fn walk(
         json!(["apply"])
       };
     }
+    match command.as_str() {
+      "data push" => {
+        entry["flag_variants"] = json!({
+          "--delete": {"apply_perms": ["exec", "confirm"]},
+          "--apply": {"returns": "data-push-summary"}
+        });
+      }
+      "export" => {
+        entry["flag_variants"] = json!({
+          "--with-secrets": {"perms": ["admin"], "returns": "bundle-export-summary"}
+        });
+      }
+      "service import" => {
+        entry["flag_variants"] = json!({
+          "--extract-secrets": {"returns": "service-import-preview", "when": "无 --apply 且提取到密钥"}
+        });
+      }
+      _ => {}
+    }
     out.push(entry);
   }
   for s in subs {
@@ -274,8 +293,8 @@ fn returns(command: &str) -> Option<&'static str> {
     "data pull" => "data-pull-summary",
     "data push" => "data-push-plan",
     "import" => "bundle-import-preview",
-    "service adopt-data" | "service move" | "server set" => "plan",
-    "service import" => "import-preview",
+    "service adopt-data" | "service move" | "server set"
+    | "service import" => "plan",
     "status" => "status",
     "plan" | "plan show" => "plan",
     "plan list" => "plan_summary",
@@ -381,6 +400,36 @@ pub fn commands(prefix: &[String]) -> Value {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn commands_describe_data_and_import_flag_variants() {
+    use serde_json::json;
+    let index = super::commands(&[]);
+    let command = |name: &str| {
+      index["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["command"] == name)
+        .unwrap()
+    };
+    let push = command("wharf data push");
+    assert_eq!(
+      push["flag_variants"]["--delete"]["apply_perms"],
+      json!(["exec", "confirm"])
+    );
+    let export = command("wharf export");
+    assert_eq!(
+      export["flag_variants"]["--with-secrets"],
+      json!({"perms": ["admin"], "returns": "bundle-export-summary"})
+    );
+    let import = command("wharf service import");
+    assert_eq!(import["returns"], "plan");
+    assert_eq!(
+      import["flag_variants"]["--extract-secrets"]["returns"],
+      "service-import-preview"
+    );
+  }
+
   #[test]
   fn usable_keeps_ping_task_edits_with_apply_permission() {
     use serde_json::json;

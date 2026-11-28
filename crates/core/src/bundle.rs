@@ -297,7 +297,7 @@ pub(crate) async fn import(
   let payload =
     crate::login::run_argon2(move || decrypt(&passphrase, &bundle))
       .await??;
-  let snap = crate::snapshot::load(&state.db).await?;
+  let mut snap = crate::snapshot::load(&state.db).await?;
   let mut fleet = payload.fleet;
   fleet.servers.clear();
   fleet.gateways.clear();
@@ -305,7 +305,8 @@ pub(crate) async fn import(
   fleet.edge_apps.clear();
   let mut missing_servers = BTreeSet::new();
   let mut missing_gateways = BTreeSet::new();
-  for svc in fleet.services.values_mut() {
+  let mut backup_warnings = Vec::new();
+  for (name, svc) in &mut fleet.services {
     if let Some(server) =
       server_map.get(&svc.server).or(default_server.as_ref())
     {
@@ -313,6 +314,20 @@ pub(crate) async fn import(
     }
     if !snap.world.servers.contains_key(&svc.server) {
       missing_servers.insert(svc.server.clone());
+    }
+    if let Some(backup) = &mut svc.backup {
+      if let Some(server) = server_map.get(&backup.to) {
+        backup.to.clone_from(server);
+      }
+      if !snap.world.servers.contains_key(&backup.to) {
+        missing_servers.insert(backup.to.clone());
+      }
+      if backup.to == svc.server {
+        backup_warnings.push(format!(
+          "服务 {name} 的部署和备份服务器均为 {}",
+          svc.server
+        ));
+      }
     }
     if let Some(heartbeat) = &mut svc.heartbeat {
       heartbeat.token.clear();
@@ -351,13 +366,18 @@ pub(crate) async fn import(
     }
     values.insert(name, secret.value);
   }
-  let (_, warnings) =
+  let (_, mut warnings) =
     crate::secret_policy::fleet_secret_refs(&fleet, &values);
+  let secrets = crate::secret_import::write(
+    &state,
+    values.clone(),
+    mode,
+    keep_days,
+    true,
+  )
+  .await?;
   if dry_run {
-    let secrets = crate::secret_import::write(
-      &state, values, mode, keep_days, true,
-    )
-    .await?;
+    warnings.extend(backup_warnings);
     return Ok(Json(
       serde_json::to_value(BundleImportPreview {
         services: fleet.services.keys().cloned().collect(),
@@ -380,29 +400,63 @@ pub(crate) async fn import(
     return Err(ApiError::invalid("便携包引用目标集群没有的服务器或网关")
       .with_details(serde_json::json!({ "missing_servers": missing_servers, "missing_gateways": missing_gateways })).into());
   }
-  let secrets = crate::secret_import::write(
-    &state, values, mode, keep_days, false,
-  )
-  .await?;
-  audit.set_detail(format!("bundle_import {}", secrets.audit()));
-  let planned = crate::planner::make_plan(
+  crate::secret_import::require_no_conflicts(&secrets)?;
+  for name in secrets.create.iter().chain(&secrets.update) {
+    snap.secrets.insert(name.clone(), values[name].clone());
+    snap
+      .service_values
+      .insert(name.clone(), values[name].clone());
+  }
+  let planned = crate::planner::make_plan_inner(
     &state,
     PlanRequest {
       partial: Some(fleet),
       ..Default::default()
     },
+    snap,
+    true,
+    true,
   )
   .await?;
-  crate::planner::save(&state, &planned).await?;
+  let plan = planned.plan.clone();
+  let expected = secrets;
+  let secrets = crate::secret_import::write_with(
+    &state,
+    values,
+    mode,
+    keep_days,
+    false,
+    move |c, key, actual| {
+      if actual != &expected {
+        return Err(ApiError::new(
+          ErrorCode::PlanStale,
+          "导入期间密钥状态变了，请重新预览",
+        ));
+      }
+      crate::apply::require_fresh(
+        c,
+        key,
+        &planned.plan,
+        Some(&planned.account_refs),
+        Some(&planned.base_instances),
+      )?;
+      crate::planner::save_in(c, &planned)
+    },
+  )
+  .await?;
   audit.set_detail(format!(
     "bundle_import {} plan_id={}",
     secrets.audit(),
-    planned.plan.plan_id
+    plan.plan_id
   ));
   Ok(Json(
     serde_json::to_value(BundleImportResponse {
-      secrets,
-      plan: planned.plan,
+      secrets: SecretImportResponse {
+        created: secrets.create,
+        updated: secrets.update,
+        skipped: secrets.skip,
+      },
+      plan,
       warnings,
     })
     .map_err(crate::db::json_err)?,
@@ -446,4 +500,86 @@ fn bundle_envelope_roundtrip_and_rejects_wrong_passphrase() {
     ErrorCode::Forbidden
   );
   assert_eq!(decrypt("fixture-passphrase", &bundle).unwrap().secrets["DB_PASS"].value, "fixture-sensitive-value");
+}
+
+#[tokio::test]
+async fn bundle_import_maps_backup_and_commits_secrets_with_plan() {
+  use serde_json::json;
+  let state = crate::migrate::tests::seed_service(false).await;
+  let payload = BundlePayload {
+    version: 1,
+    exported_at: 0,
+    partial: true,
+    fleet: serde_json::from_value(json!({
+      "services": {"blog": {"server": "old-app", "source": {"image": "fixture:1"},
+        "env": {"PASS": "[[BLOG_PASS]]"},
+        "backup": {"to": "old-backup"}, "volumes": [{"name": "data", "target": "/data"}]}}
+    })).unwrap(),
+    secrets: BTreeMap::from([("BLOG_PASS".into(), BundleSecret {
+      value: "fixture-secret".into(), pre_hashed: false,
+    })]),
+  };
+  let encoded = serde_json::to_string(
+    &encrypt("fixture-passphrase", &payload).unwrap(),
+  )
+  .unwrap();
+  let request = |dry_run, backup: Option<&str>| {
+    let mut server_map =
+      BTreeMap::from([("old-app".into(), "s1".into())]);
+    if let Some(backup) = backup {
+      server_map.insert("old-backup".into(), backup.into());
+    }
+    import(
+      State(state.clone()),
+      crate::host_access::tests::auth(
+        [Perm::Admin, Perm::Plan],
+        false,
+      ),
+      Extension(AuditSlot::default()),
+      Json(ImportBundleRequest {
+        bundle: serde_json::from_str(&encoded).unwrap(),
+        passphrase: "fixture-passphrase".into(),
+        mode: Default::default(),
+        keep_days: None,
+        server_map,
+        default_server: None,
+        gateway_map: BTreeMap::new(),
+        no_routes: false,
+        dry_run,
+      }),
+    )
+  };
+  let state_counts = || {
+    state.db.call(|c| {
+    c.query_row("SELECT (SELECT COUNT(*) FROM secrets WHERE name = 'BLOG_PASS'), (SELECT COUNT(*) FROM plans)", [],
+      |row| Ok((row.get::<_, usize>(0)?, row.get::<_, usize>(1)?))).map_err(crate::db::sql_err)
+  })
+  };
+  assert_eq!(
+    request(true, None).await.unwrap().0["missing_servers"],
+    json!(["old-backup"])
+  );
+  assert!(request(false, Some("s1")).await.is_err());
+  assert_eq!(state_counts().await.unwrap(), (0, 0));
+  state.db.call(|c| {
+    c.execute_batch("CREATE TRIGGER reject_plan BEFORE INSERT ON plans BEGIN SELECT RAISE(ABORT, 'fixture'); END;")
+      .map_err(crate::db::sql_err)
+  }).await.unwrap();
+  assert!(request(false, Some("s2")).await.is_err());
+  assert_eq!(state_counts().await.unwrap(), (0, 0));
+  state
+    .db
+    .call(|c| {
+      c.execute_batch("DROP TRIGGER reject_plan")
+        .map_err(crate::db::sql_err)
+    })
+    .await
+    .unwrap();
+  let result = request(false, Some("s2")).await.unwrap().0;
+  assert_eq!(
+    result["secrets"],
+    json!({"created": ["BLOG_PASS"], "updated": [], "skipped": []})
+  );
+  assert!(result["plan"]["plan_id"].is_string());
+  assert_eq!(state_counts().await.unwrap(), (1, 1));
 }

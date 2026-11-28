@@ -422,7 +422,9 @@ fn classify_dir(name: &str, source: &str) -> DataKind {
 fn volume_name(top: Option<&Value>, key: String) -> String {
   top
     .and_then(|t| t.get(key.as_str()))
-    .and_then(|d| d.get("name"))
+    .and_then(|d| {
+      d.get("name").or_else(|| d.get("external")?.get("name"))
+    })
     .and_then(Value::as_str)
     .map_or(key, str::to_string)
 }

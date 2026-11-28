@@ -49,6 +49,18 @@ async fn fixture_requests(
   args: &[&str],
   replies: Vec<(&'static str, Value)>,
 ) -> (i32, Value, Vec<Value>) {
+  let (code, stdout, requests) = fixture_stdout(args, replies).await;
+  let json =
+    &stdout[stdout.find(['{', '[']).unwrap_or(stdout.len())..];
+  let value = serde_json::from_str(json)
+    .unwrap_or_else(|e| panic!("{e}: {stdout:?}"));
+  (code, value, requests)
+}
+
+async fn fixture_stdout(
+  args: &[&str],
+  replies: Vec<(&'static str, Value)>,
+) -> (i32, String, Vec<Value>) {
   let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
   let endpoint = format!("http://{}", listener.local_addr().unwrap());
   let server = async move {
@@ -124,15 +136,7 @@ async fn fixture_requests(
     .unwrap();
   let output = output.unwrap();
   let stdout = String::from_utf8(output.stdout).unwrap();
-  let json =
-    &stdout[stdout.find(['{', '[']).unwrap_or(stdout.len())..];
-  let value = serde_json::from_str(json).unwrap_or_else(|error| {
-    panic!(
-      "{error}: {stdout:?}, stderr={:?}",
-      String::from_utf8_lossy(&output.stderr)
-    )
-  });
-  (output.status.code().unwrap(), value, requests)
+  (output.status.code().unwrap(), stdout, requests)
 }
 
 fn service_view() -> Value {
@@ -458,4 +462,45 @@ async fn task_set_dry_run_without_edits_rejects_before_fetching() {
   .await;
   assert_eq!(code, 1);
   assert_eq!(value["code"], "InvalidInput");
+}
+
+#[tokio::test]
+async fn bundle_import_preview_uses_text_unless_json_is_requested() {
+  let dir = tempfile::tempdir().unwrap();
+  let bundle = dir.path().join("bundle.enc");
+  let passphrase = dir.path().join("passphrase");
+  std::fs::write(
+    &bundle,
+    json!({
+      "format": "wharf-bundle", "version": 1, "cipher": "fixture",
+      "kdf": {"m_kib": 0, "t": 0, "p": 0, "salt": ""},
+      "nonce": "", "ciphertext": ""
+    })
+    .to_string(),
+  )
+  .unwrap();
+  std::fs::write(&passphrase, "fixture-passphrase").unwrap();
+  let preview = json!({
+    "services": ["app"], "routes": [], "secrets": {"create": ["APP_PASS"], "conflicts": [], "update": [], "skip": []},
+    "missing_servers": ["s2"], "missing_gateways": [], "warnings": [], "hint": "加 --plan-only"
+  });
+  let replies =
+    || vec![("POST /api/import/bundle ", preview.clone())];
+  let mut args = vec![
+    "import",
+    bundle.to_str().unwrap(),
+    "--passphrase-file",
+    passphrase.to_str().unwrap(),
+  ];
+  let (code, output, _) = fixture_stdout(&args, replies()).await;
+  assert_eq!(code, 0);
+  assert!(output.starts_with("服务 1 个"));
+  assert!(output.contains("APP_PASS") && output.contains("s2"));
+  args.push("--json");
+  let (code, output, _) = fixture_stdout(&args, replies()).await;
+  assert_eq!(code, 0);
+  assert_eq!(
+    serde_json::from_str::<Value>(&output).unwrap(),
+    preview
+  );
 }

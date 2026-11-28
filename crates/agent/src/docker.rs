@@ -381,6 +381,7 @@ impl Docker {
   pub async fn project_mounts(
     &self,
     projects: &[String],
+    running_only: bool,
     ctx: &Ctx,
   ) -> Result<
     std::collections::BTreeMap<
@@ -393,11 +394,12 @@ impl Docker {
     if projects.is_empty() {
       return Ok(mounts);
     }
-    let listed = self
-      .cmd()
+    let mut command = self.cmd().arg("ps");
+    if !running_only {
+      command = command.arg("-a");
+    }
+    let listed = command
       .args([
-        "ps",
-        "-a",
         "--no-trunc",
         "--filter",
         "label=com.docker.compose.project",

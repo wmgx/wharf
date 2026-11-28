@@ -332,12 +332,12 @@ fn rsync_args(
 }
 
 pub(crate) fn dir_space(
+  srv: &Path,
   service: &str,
   measure_data: bool,
   cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<wharf_api_types::agent::DirSpaceInfo, ApiError> {
   use crate::dirfd::DirFd;
-  let srv = Path::new("/srv");
   let root = match DirFd::open_service_root(srv, service) {
     Ok(root) => Some(root),
     Err(err) if !measure_data && err.code == ErrorCode::NotFound => {
@@ -352,16 +352,16 @@ pub(crate) fn dir_space(
     crate::report::disk_stat(&path).ok_or_else(|| {
       ApiError::internal("无法读取 /srv 文件系统的可用空间")
     })?;
-  let data_bytes = if measure_data {
-    Some(tree_bytes(root.as_ref().expect("已打开源目录"), cancel)?)
-  } else {
-    None
-  };
+  let bytes = root
+    .as_ref()
+    .map(|root| tree_bytes(root, cancel))
+    .transpose()?;
+  let data_bytes = bytes.filter(|_| measure_data);
   Ok(wharf_api_types::agent::DirSpaceInfo {
     fs_avail_bytes: disk.free,
     fs_total_bytes: disk.total,
     data_bytes,
-    existing_bytes: 0,
+    existing_bytes: bytes.filter(|_| !measure_data).unwrap_or(0),
   })
 }
 
@@ -504,6 +504,21 @@ mod tests {
       classify_rsync_exit(Some(24), SyncPass::Final),
       RsyncOutcome::Fatal
     );
+  }
+
+  #[test]
+  fn dir_space_measures_existing_target_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let target =
+      || dir_space(temp.path(), "app", false, &cancel).unwrap();
+    assert_eq!(target().existing_bytes, 0);
+    std::fs::create_dir(temp.path().join("app")).unwrap();
+    std::fs::write(temp.path().join("app/received"), b"1234")
+      .unwrap();
+    let measured = target();
+    assert_eq!(measured.existing_bytes, 4);
+    assert_eq!(measured.data_bytes, None);
   }
 
   #[test]

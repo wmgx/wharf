@@ -91,6 +91,16 @@ fn handle_in(base: &Path, op: FilesOp) -> Result<Value, ApiError> {
     | FilesOp::Write { service, path, .. }
     | FilesOp::DataWrite { service, path, .. } => (service, path),
   };
+  if let FilesOp::DataWrite {
+    offset: 0, upload, ..
+  } = &op
+  {
+    wharf_api_types::data_sync::path_parts(path)?;
+    validate_upload_id(upload)?;
+    let parent =
+      path.rsplit_once('/').map_or("", |(parent, _)| parent);
+    crate::data_sync::mkdir(base, service, parent)?;
+  }
   let root = DirFd::open_service_root(base, service)?;
   let segs = parse_rel(path)?;
   if matches!(op, FilesOp::List { .. }) {
@@ -102,8 +112,12 @@ fn handle_in(base: &Path, op: FilesOp) -> Result<Value, ApiError> {
   let (name, dirs) = segs
     .split_last()
     .ok_or_else(|| ApiError::invalid("路径不对"))?;
-  let parent =
-    walk(root, dirs, path, matches!(op, FilesOp::Write { .. }))?;
+  let parent = walk(
+    root,
+    dirs,
+    path,
+    matches!(op, FilesOp::Write { .. } | FilesOp::DataWrite { .. }),
+  )?;
   match op {
     FilesOp::Read {
       path,
@@ -239,14 +253,19 @@ fn regular_target(
   }
 }
 
+fn validate_upload_id(id: &str) -> Result<(), ApiError> {
+  if id.len() != 32 || !id.bytes().all(|c| c.is_ascii_hexdigit()) {
+    return Err(ApiError::invalid("上传标识不合法"));
+  }
+  Ok(())
+}
+
 pub(crate) fn upload_name(
   name: &CStr,
   upload: Option<&str>,
 ) -> Result<CString, ApiError> {
   if let Some(id) = upload {
-    if id.len() != 32 || !id.bytes().all(|c| c.is_ascii_hexdigit()) {
-      return Err(ApiError::invalid("上传标识不合法"));
-    }
+    validate_upload_id(id)?;
     return CString::new(format!(".wharf-data-{id}.wharf-upload"))
       .map_err(|_| ApiError::invalid("上传标识无效"));
   }
@@ -376,6 +395,34 @@ mod tests {
       read(4, first.version).unwrap_err().code,
       ErrorCode::Conflict
     );
+  }
+
+  #[test]
+  fn data_write_creates_missing_service_and_subpath() {
+    let tmp = tempfile::tempdir().unwrap();
+    let push = |path: &str| {
+      handle_in(
+        tmp.path(),
+        FilesOp::DataWrite {
+          service: "app".into(),
+          path: path.into(),
+          upload: "f".repeat(32),
+          offset: 0,
+          data: STANDARD.encode("hello"),
+          last: true,
+          mode: 0o644,
+        },
+      )
+    };
+    push("newsub/a.txt").unwrap();
+    assert_eq!(
+      fs::read_to_string(tmp.path().join("app/newsub/a.txt"))
+        .unwrap(),
+      "hello"
+    );
+    symlink(tmp.path(), tmp.path().join("app/link")).unwrap();
+    assert!(push("link/escape.txt").is_err());
+    assert!(!tmp.path().join("escape.txt").exists());
   }
 
   #[test]

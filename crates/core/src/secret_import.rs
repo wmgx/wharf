@@ -49,6 +49,42 @@ pub(crate) async fn write(
   keep_days: Option<u16>,
   preview: bool,
 ) -> Result<SecretChanges, ApiError> {
+  write_with(
+    state,
+    values,
+    mode,
+    keep_days,
+    preview,
+    |_, _, _| Ok(()),
+  )
+  .await
+}
+
+pub(crate) fn require_no_conflicts(
+  summary: &SecretChanges,
+) -> Result<(), ApiError> {
+  if !summary.conflicts.is_empty() {
+    return Err(ApiError::new(ErrorCode::Conflict, format!("已有同名密钥：{}", summary.conflicts.join("、")))
+      .with_hint("加 --only-missing 保留已有密钥，或加 --overwrite 覆盖（默认保留旧值 7 天）")
+      .with_details(serde_json::json!({"conflicts": summary.conflicts})));
+  }
+  Ok(())
+}
+
+pub(crate) async fn write_with(
+  state: &AppState,
+  values: BTreeMap<String, String>,
+  mode: SecretImportMode,
+  keep_days: Option<u16>,
+  preview: bool,
+  finish: impl FnOnce(
+    &rusqlite::Connection,
+    &db::CredentialsKey,
+    &SecretChanges,
+  ) -> Result<(), ApiError>
+  + Send
+  + 'static,
+) -> Result<SecretChanges, ApiError> {
   let keep_days = keep_days.unwrap_or(db::DEFAULT_SECRET_KEEP_DAYS);
   if keep_days > 30 || values.len() > 200 {
     return Err(ApiError::invalid(
@@ -68,42 +104,56 @@ pub(crate) async fn write(
       )));
     }
   }
-  if values.is_empty() {
-    return Ok(SecretChanges::default());
-  }
-  let changes = state.db.call_credentials(move |c, key| {
-    let tx = c.unchecked_transaction().map_err(db::sql_err)?;
-    let mut summary = SecretChanges::default();
-    for name in values.keys() {
-      let exists = tx.query_row("SELECT 1 FROM secrets WHERE name=?1", [name], |_| Ok(()))
-        .optional().map_err(db::sql_err)?.is_some();
-      let list = if !exists {
-        &mut summary.create
-      } else {
-        match mode {
-          SecretImportMode::FailOnConflict => &mut summary.conflicts,
-          SecretImportMode::OnlyMissing => &mut summary.skip,
-          SecretImportMode::Overwrite => &mut summary.update,
-        }
-      };
-      list.push(name.clone());
-    }
-    if preview {
-      return Ok(summary);
-    }
-    if !summary.conflicts.is_empty() {
-      return Err(ApiError::new(ErrorCode::Conflict, format!("已有同名密钥：{}", summary.conflicts.join("、")))
-        .with_hint("加 --only-missing 保留已有密钥，或加 --overwrite 覆盖（默认保留旧值 7 天）")
-        .with_details(serde_json::json!({"conflicts": summary.conflicts})));
-    }
-    let now = db::now_ms();
-    let until = (keep_days > 0).then(|| now + i64::from(keep_days) * 86_400_000);
-    for name in summary.create.iter().chain(&summary.update) {
-      key.rotate_secret_in(&tx, name, &values[name], now, until, true)?;
-    }
-    tx.commit().map_err(db::sql_err)?;
-    Ok(summary)
-  }).await?;
+  let changes = state
+    .db
+    .call_credentials(move |c, key| {
+      let tx = c.unchecked_transaction().map_err(db::sql_err)?;
+      let mut summary = SecretChanges::default();
+      for name in values.keys() {
+        let exists = tx
+          .query_row(
+            "SELECT 1 FROM secrets WHERE name=?1",
+            [name],
+            |_| Ok(()),
+          )
+          .optional()
+          .map_err(db::sql_err)?
+          .is_some();
+        let list = if !exists {
+          &mut summary.create
+        } else {
+          match mode {
+            SecretImportMode::FailOnConflict => {
+              &mut summary.conflicts
+            }
+            SecretImportMode::OnlyMissing => &mut summary.skip,
+            SecretImportMode::Overwrite => &mut summary.update,
+          }
+        };
+        list.push(name.clone());
+      }
+      if preview {
+        return Ok(summary);
+      }
+      require_no_conflicts(&summary)?;
+      let now = db::now_ms();
+      let until = (keep_days > 0)
+        .then(|| now + i64::from(keep_days) * 86_400_000);
+      for name in summary.create.iter().chain(&summary.update) {
+        key.rotate_secret_in(
+          &tx,
+          name,
+          &values[name],
+          now,
+          until,
+          true,
+        )?;
+      }
+      finish(&tx, key, &summary)?;
+      tx.commit().map_err(db::sql_err)?;
+      Ok(summary)
+    })
+    .await?;
   if !preview {
     crate::log_redact::refresh(&state.db).await;
   }

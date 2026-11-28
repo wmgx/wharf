@@ -55,6 +55,7 @@ export type Action = "create" | "update" | "delete" | "adopt";
 export type Actual = "running" | "restarting" | "stopped" | "partial" | "missing" | "offline" | "unknown";
 
 export interface AdoptMountSpec {
+  rename_only?: boolean;
   source: string | null;
   target: string | null;
   volume_name: string | null;

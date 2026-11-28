@@ -1,6 +1,9 @@
 //! 各子命令的实现。
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+  collections::{BTreeMap, BTreeSet},
+  time::Duration,
+};
 
 use serde_json::{Value, json};
 use wharf_api_types::{
@@ -2850,12 +2853,15 @@ async fn service(
       if !apply.apply && !v.extracted_secrets.is_empty() {
         out(
           j,
-          &json!({"import": &v, "hint": "确认后加 --apply 写入密钥并生成计划"}),
-          |_| {
-            for item in &v.extracted_secrets {
+          &wharf_api_types::view::ServiceImportPreview {
+            import: v,
+            hint: "确认后加 --apply 写入密钥并生成计划".into(),
+          },
+          |preview| {
+            for item in &preview.import.extracted_secrets {
               println!("{}  {}", item.secret_name, item.action);
             }
-            println!("确认后加 --apply 写入密钥并生成计划");
+            println!("{}", preview.hint);
           },
         );
         return Ok(());
@@ -3507,31 +3513,25 @@ async fn service(
       apply,
     } => {
       use wharf_api_types::adopt_data::AdoptMountSpec;
-      let mut mounts = BTreeMap::new();
-      for p in mount {
-        mounts.insert(p, None);
-      }
-      for (p, volume) in rename {
-        if mounts.insert(p, Some(volume)).flatten().is_some() {
+      let mut renames = BTreeSet::new();
+      for (path, _) in &rename {
+        if !renames.insert(path) {
           return Err(ApiError::invalid("重复的 --rename").into());
         }
       }
-      let mounts = mounts
+      let mounts = mount
         .into_iter()
-        .map(|(path, volume_name)| {
-          if path.starts_with('/') {
-            AdoptMountSpec {
-              target: Some(path.clone()),
-              source: Some(path),
-              volume_name,
-            }
-          } else {
-            AdoptMountSpec {
-              target: None,
-              source: Some(path),
-              volume_name,
-            }
-          }
+        .map(|path| (path, None))
+        .chain(
+          rename
+            .into_iter()
+            .map(|(path, volume)| (path, Some(volume))),
+        )
+        .map(|(path, volume_name)| AdoptMountSpec {
+          target: path.starts_with('/').then(|| path.clone()),
+          source: Some(path),
+          rename_only: volume_name.is_some(),
+          volume_name,
         })
         .collect();
       changes(

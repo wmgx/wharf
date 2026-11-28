@@ -80,6 +80,10 @@ fn entries() -> BTreeMap<&'static str, Schema> {
       schema_for!(wharf_api_types::view::ImportPreview),
     ),
     (
+      "service-import-preview",
+      schema_for!(view::ServiceImportPreview),
+    ),
+    (
       "import-request",
       schema_for!(wharf_api_types::view::ImportRequest),
     ),
