@@ -432,6 +432,7 @@ pub(crate) async fn deploy_server(
       &w.target,
       AgentOp::ProjectStatus {
         projects: vec![project.into()],
+        include_links: false,
       },
       LIST_TIMEOUT,
       None,

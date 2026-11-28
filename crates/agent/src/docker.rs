@@ -15,7 +15,8 @@ use serde::Deserialize;
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::{
-    ContainerInfo, ImageInfo, InitRun, ProjectState, PullPolicy,
+    ContainerInfo, ImageInfo, InitRun, ProjectState, ProjectUpResult,
+    PullPolicy,
   },
   compose::parse_compose_max_grace_secs,
 };
@@ -37,8 +38,51 @@ const FOLLOW_MAX: Duration = Duration::from_secs(30 * 60);
 pub struct Previous {
   pub compose: String,
   pub hash: String,
-  /// 旧容器用的镜像：(compose 里写的镜像名, 镜像 ID)。只有一个镜像、一个容器时才有。
-  pub image: Option<(String, String)>,
+  /// 旧容器用的镜像：compose 里写的镜像名和当时的镜像 ID。
+  pub images: BTreeMap<String, String>,
+}
+
+struct TempCompose(PathBuf);
+
+impl Drop for TempCompose {
+  fn drop(&mut self) {
+    let _ = std::fs::remove_file(&self.0);
+  }
+}
+
+fn parse_running_images(
+  lines: &str,
+  known: &[String],
+) -> BTreeMap<String, String> {
+  fn with_implicit_tag(image: &str) -> &str {
+    image.strip_suffix(":latest").unwrap_or(image)
+  }
+  lines
+    .lines()
+    .filter_map(|line| {
+      let (image, id) = line.split_once('|')?;
+      let (image, id) = (image.trim(), id.trim());
+      if image.is_empty()
+        || id.is_empty()
+        || image.contains('@')
+        || image.starts_with("sha256:")
+      {
+        return None;
+      }
+      let name =
+        known.iter().find(|i| i.as_str() == image).or_else(|| {
+          known.iter().find(|i| {
+            with_implicit_tag(i) == with_implicit_tag(image)
+          })
+        });
+      let image = match name {
+        Some(name) => name.as_str(),
+        None if known.is_empty() => image,
+        None => return None,
+      };
+      Some((image.to_string(), id.to_string()))
+    })
+    .collect()
 }
 
 #[derive(Clone)]
@@ -122,6 +166,7 @@ impl Docker {
   pub async fn status(
     &self,
     projects: &[String],
+    include_links: bool,
     ctx: &Ctx,
   ) -> Result<Vec<ProjectState>, ApiError> {
     let out = self
@@ -140,6 +185,24 @@ impl Docker {
       .await?
       .check("docker ps")?;
     let mut by_project = parse_ps(&out.stdout);
+    let mut projects = projects.to_vec();
+    if include_links {
+      let discovered: Vec<_> = by_project
+        .iter()
+        .filter(|&(name, containers)| {
+          (name == "wharf-link" || name.starts_with("wharf-link-"))
+            && wharf_api_types::validate_name("project", name).is_ok()
+            && !projects.contains(name)
+            && containers.iter().any(|c| {
+              c.working_dir.as_deref().is_some_and(|dir| {
+                Path::new(dir) == self.project_dir(name)
+              })
+            })
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+      projects.extend(discovered);
+    }
     let stopped: Vec<_> = projects
       .iter()
       .filter_map(|p| by_project.get(p))
@@ -161,6 +224,17 @@ impl Docker {
             config_hash: read_trimmed(
               &dir.join("conf").join(CONFIG_HASH_FILE),
             ),
+            acme_dns_url_hash: project
+              .starts_with("wharf-gw-")
+              .then(|| {
+                std::fs::read_to_string(
+                  dir.join("conf").join("Caddyfile"),
+                )
+                .ok()
+              })
+              .flatten()
+              .as_deref()
+              .and_then(acme_dns_url_hash),
             containers: by_project
               .remove(project)
               .unwrap_or_default()
@@ -193,7 +267,8 @@ impl Docker {
     project: &str,
     ctx: &Ctx,
   ) -> Result<ProjectState, ApiError> {
-    let mut all = self.status(&[project.to_string()], ctx).await?;
+    let mut all =
+      self.status(&[project.to_string()], false, ctx).await?;
     Ok(all.remove(0))
   }
 
@@ -223,8 +298,33 @@ impl Docker {
     project: &str,
     ctx: &Ctx,
   ) -> Result<Vec<String>, ApiError> {
-    let out = self
-      .compose(project)
+    self.compose_images(self.compose(project), ctx).await
+  }
+
+  pub async fn images_for_compose(
+    &self,
+    project: &str,
+    compose: &str,
+    ctx: &Ctx,
+  ) -> Result<Vec<String>, ApiError> {
+    let dir = self.project_dir(project);
+    std::fs::create_dir_all(&dir).map_err(io_err(&dir))?;
+    let pending = TempCompose(dir.join("compose.yaml.next"));
+    write_private(&pending.0, compose)?;
+    let cmd = self
+      .cmd()
+      .args(["compose", "-p", project, "-f"])
+      .arg(pending.0.display().to_string())
+      .cwd(&dir);
+    self.compose_images(cmd, ctx).await
+  }
+
+  async fn compose_images(
+    &self,
+    cmd: Cmd,
+    ctx: &Ctx,
+  ) -> Result<Vec<String>, ApiError> {
+    let out = cmd
       .args(["config", "--images"])
       .timeout(Duration::from_secs(30))
       .run(ctx)
@@ -344,32 +444,38 @@ impl Docker {
       .is_ok_and(|o| o.success)
   }
 
-  /// 这个项目现在唯一的容器用的镜像 ID；容器不是正好一个、或查不到时返回 None。
-  pub async fn running_image(
+  pub async fn running_images(
     &self,
     project: &str,
+    known: &[String],
     ctx: &Ctx,
-  ) -> Option<String> {
+  ) -> Result<BTreeMap<String, String>, ApiError> {
     let out = self
       .cmd()
       .args(["ps", "-aq", "--no-trunc", "--filter"])
       .arg(format!("label=com.docker.compose.project={project}"))
       .timeout(Duration::from_secs(15))
       .run(ctx)
-      .await
-      .ok()
-      .filter(|o| o.success)?;
-    let ids: Vec<_> = out.stdout.split_whitespace().collect();
-    let [id] = ids.as_slice() else { return None };
-    self
+      .await?
+      .check("docker ps")?;
+    let mut ids = out.stdout.split_whitespace().peekable();
+    if ids.peek().is_none() {
+      return Ok(BTreeMap::new());
+    }
+    let out = self
       .cmd()
-      .args(["inspect", "--format", "{{.Image}}", *id])
+      .args([
+        "inspect",
+        "--format",
+        "{{.Config.Image}}|{{.Image}}",
+        "--",
+      ])
+      .args(ids)
       .timeout(Duration::from_secs(15))
       .run(ctx)
-      .await
-      .ok()
-      .filter(|o| o.success)
-      .map(|o| o.stdout.trim().to_string())
+      .await?
+      .check("docker inspect")?;
+    Ok(parse_running_images(&out.stdout, known))
   }
 
   /// 本地的 `image` 是不是这个 digest（`sha256:…`）。
@@ -471,14 +577,16 @@ impl Docker {
         self.pull_once(&candidate, policy, timeout, ctx).await;
       match result {
         Ok(_) => {
-          self
-            .cmd()
-            .args(["tag", &candidate, image])
-            .timeout(Duration::from_secs(15))
-            .run(ctx)
-            .await
-            .and_then(|out| out.check("docker tag"))
-            .map_err(|error| redact_pull_error(policy, error))?;
+          if candidate != image && !image.contains('@') {
+            self
+              .cmd()
+              .args(["tag", &candidate, image])
+              .timeout(Duration::from_secs(15))
+              .run(ctx)
+              .await
+              .and_then(|out| out.check("docker tag"))
+              .map_err(|error| redact_pull_error(policy, error))?;
+          }
           if candidate != format!("{name}@{digest}") {
             let _ = self
               .cmd()
@@ -870,7 +978,7 @@ impl Docker {
         .ok()?
         .trim()
         .to_string(),
-      image: None,
+      images: BTreeMap::new(),
     })
   }
 
@@ -1040,6 +1148,34 @@ impl Docker {
       ));
     }
     Ok(())
+  }
+
+  pub async fn restart(
+    &self,
+    project: &str,
+    ctx: &Ctx,
+  ) -> Result<ProjectUpResult, ApiError> {
+    self
+      .compose(project)
+      .arg("restart")
+      .timeout(Duration::from_secs(180))
+      .stream(true)
+      .run(ctx)
+      .await?
+      .check("docker compose restart")?;
+    let containers = self.one_status(project, ctx).await?.containers;
+    let images = containers
+      .iter()
+      .map(|c| c.image.clone())
+      .collect::<std::collections::BTreeSet<_>>()
+      .into_iter()
+      .collect::<Vec<_>>();
+    Ok(ProjectUpResult {
+      images: self.image_info(&images, ctx).await,
+      containers,
+      warnings: vec![],
+      retired: vec![],
+    })
   }
 
   /// `stop` 或 `start`。project 没部署过时什么也不做。
@@ -1303,6 +1439,7 @@ pub(crate) fn clean_project_dir(
     &[
       "compose.yaml",
       "compose.yaml.tmp",
+      "compose.yaml.next",
       HASH_FILE,
       ".wharf-hash.tmp",
       "compose.tmp",
@@ -1528,6 +1665,16 @@ pub fn write_private(
   file.write_all(content.as_bytes()).map_err(io_err(&tmp))?;
   file.sync_all().map_err(io_err(&tmp))?;
   std::fs::rename(&tmp, path).map_err(io_err(path))
+}
+
+fn acme_dns_url_hash(config: &str) -> Option<String> {
+  use sha2::{Digest, Sha256};
+  config.lines().find_map(|line| {
+    line
+      .strip_prefix("\t\t\tserver_url ")
+      .filter(|url| url.ends_with("/agent/acme-dns"))
+      .map(|url| hex::encode(Sha256::digest(url.as_bytes())))
+  })
 }
 
 fn read_trimmed(path: &Path) -> Option<String> {
@@ -2197,5 +2344,22 @@ fn parse_compose_max_grace_scales_timeout() {
   assert_eq!(
     stop_timeout(parse_compose_max_grace_secs(yaml)).as_secs(),
     360
+  );
+}
+
+#[cfg(test)]
+#[test]
+fn parse_running_images_maps_multiple_containers() {
+  let known = ["web".into(), "worker:2".into(), "db:latest".into()];
+  assert_eq!(
+    parse_running_images(
+      "web:latest|id1\nworker:2|id2\ndb|id3\nold@sha256:x|id4\nother:1|id5\n",
+      &known
+    ),
+    BTreeMap::from([
+      ("web".into(), "id1".into()),
+      ("worker:2".into(), "id2".into()),
+      ("db:latest".into(), "id3".into())
+    ])
   );
 }

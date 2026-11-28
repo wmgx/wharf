@@ -53,6 +53,8 @@ pub fn hash(content: &str) -> String {
 #[derive(Debug, Clone, Default)]
 pub struct Net {
   pub core_server: Option<String>,
+  pub core_listener: Option<(u16, bool)>,
+  pub acme_dns_url: Option<String>,
   pub gate_public: Option<String>,
   pub gate_login: Option<String>,
   pub heartbeat_url: Option<String>,
@@ -1830,7 +1832,7 @@ pub fn upstream(
     ))
   })?;
   use crate::link::{Choice, choose, tunnel_upstream};
-  Ok(match choose(world, net, gateway, service, mode)? {
+  Ok(match choose(world, net, gateway, service, port, mode)? {
     Choice::Local => host_port("127.0.0.1", *host),
     Choice::Direct(ip) => host_port(&ip, *host),
     Choice::Tunnel => {
@@ -1922,6 +1924,7 @@ pub struct AcmeDnsFill<'a> {
 
 #[derive(Clone, Copy, Default)]
 pub struct CaddyFill<'a> {
+  pub acme_dns_url: Option<&'a str>,
   pub acme_dns: Option<AcmeDnsFill<'a>>,
   pub gate_revocation_key: Option<&'a str>,
 }
@@ -1929,13 +1932,18 @@ pub struct CaddyFill<'a> {
 fn dns_tls(
   gateway: &str,
   subdomain: &str,
-  fill: Option<AcmeDnsFill<'_>>,
+  fill: CaddyFill<'_>,
 ) -> String {
-  let url = fill.map(|f| {
-    format!("{}/agent/acme-dns", f.url.trim_end_matches('/'))
-  });
+  let url =
+    fill
+      .acme_dns
+      .map(|f| f.url)
+      .or(fill.acme_dns_url)
+      .map(|url| {
+        format!("{}/agent/acme-dns", url.trim_end_matches('/'))
+      });
   let url = url.as_deref().unwrap_or(ACME_DNS_URL);
-  let key = fill.map_or(ACME_DNS_KEY, |f| f.key);
+  let key = fill.acme_dns.map_or(ACME_DNS_KEY, |f| f.key);
   format!(
     "\ttls {{\n\t\tdns acmedns {{\n\t\t\tusername {gateway}\n\t\t\tpassword {key}\n\t\t\tsubdomain {subdomain}\n\t\t\tserver_url {url}\n\t\t}}\n\t}}\n"
   )
@@ -2094,7 +2102,7 @@ pub fn caddyfile_with_fill(
     site.protection.render_matchers(&mut out);
     if site.wildcard {
       if let Some(subdomain) = &site.dns {
-        out.push_str(&dns_tls(name, subdomain, fill.acme_dns));
+        out.push_str(&dns_tls(name, subdomain, fill));
       }
       out.push_str("\tabort\n}\n");
       continue;
@@ -2119,7 +2127,7 @@ pub fn caddyfile_with_fill(
       ));
     }
     if let Some(subdomain) = &site.dns {
-      out.push_str(&dns_tls(name, subdomain, fill.acme_dns));
+      out.push_str(&dns_tls(name, subdomain, fill));
     }
     if site.internal {
       let ranges = if site.internal_ranges.is_empty() {

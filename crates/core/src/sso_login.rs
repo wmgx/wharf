@@ -735,11 +735,10 @@ async fn execute(
       "域名 {hostname} 没有指向服务，不能代登录"
     )));
   }
-  let gateway = snap
-    .world
-    .route_gateways(&route.spec)
-    .first()
-    .copied()
+  let gateway =
+    login_gateway(&snap.world, hostname, &route.spec, |server| {
+      state.hub.is_online(server)
+    })
     .ok_or_else(|| ApiError::invalid("域名没有入口"))?;
   let server = &snap.world.gateways[gateway].spec.server;
   if !state.hub.is_online(server) {
@@ -982,13 +981,32 @@ async fn execute(
   Ok(outcome)
 }
 
-pub async fn cleanup(state: &AppState) -> Result<(), ApiError> {
-  let snap = snapshot::load(&state.db).await?;
-  let mut wanted: BTreeMap<
-    &str,
-    (BTreeSet<String>, BTreeSet<String>),
-  > = BTreeMap::new();
-  for (host, route) in &snap.world.routes {
+fn login_gateway<'a>(
+  world: &'a crate::world::World,
+  host: &str,
+  route: &'a wharf_api_types::spec::RouteSpec,
+  online: impl Fn(&str) -> bool,
+) -> Option<&'a str> {
+  let live = world.live_gateway(host, route)?;
+  std::iter::once(live)
+    .chain(world.route_gateways(route))
+    .find(|name| {
+      world
+        .gateways
+        .get(*name)
+        .is_some_and(|g| online(&g.spec.server))
+    })
+    .or(Some(live))
+}
+
+type CleanupTargets<'a> =
+  BTreeMap<&'a str, (BTreeSet<String>, BTreeSet<String>)>;
+
+fn script_cleanup_targets(
+  world: &crate::world::World,
+) -> CleanupTargets<'_> {
+  let mut wanted = CleanupTargets::new();
+  for (host, route) in &world.routes {
     let Some(script) = route
       .spec
       .sso
@@ -1002,17 +1020,22 @@ pub async fn cleanup(state: &AppState) -> Result<(), ApiError> {
       .image
       .as_deref()
       .unwrap_or_else(|| tasks::script_image(script.runtime));
-    let Some(gateway) = snap.world.route_gateway(&route.spec) else {
-      continue;
-    };
-    let Some(gateway) = snap.world.gateways.get(gateway) else {
-      continue;
-    };
-    let (domains, runners) =
-      wanted.entry(&gateway.spec.server).or_default();
-    domains.insert(config::hash(host)[..32].into());
-    runners.insert(sso_runner_name(script.runtime, image));
+    for gateway in world.route_gateways(&route.spec) {
+      let Some(gateway) = world.gateways.get(gateway) else {
+        continue;
+      };
+      let (domains, runners) =
+        wanted.entry(&gateway.spec.server).or_default();
+      domains.insert(config::hash(host)[..32].into());
+      runners.insert(sso_runner_name(script.runtime, image));
+    }
   }
+  wanted
+}
+
+pub async fn cleanup(state: &AppState) -> Result<(), ApiError> {
+  let snap = snapshot::load(&state.db).await?;
+  let mut wanted = script_cleanup_targets(&snap.world);
   let cancel = CancellationToken::new();
   for server in snap.world.servers.keys() {
     if !state.hub.is_online(server)
@@ -1234,6 +1257,44 @@ pub async fn test(
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn offline_primary_uses_backup_and_cleanup_keeps_both_scripts() {
+    let mut world = crate::world::World::default();
+    for (name, server) in [("edge", "s1"), ("backup", "s2")] {
+      world.gateways.insert(
+        name.into(),
+        crate::world::GatewayRow {
+          spec: serde_json::from_value(
+            serde_json::json!({"kind":"caddy","server":server}),
+          )
+          .unwrap(),
+          version: 1,
+        },
+      );
+    }
+    let host = "ssologin.example.test";
+    let spec = serde_json::from_value(serde_json::json!({
+      "hostname": host, "gateway": "edge", "backup_gateway": "backup", "service":"app",
+      "sso": {"mode":"login", "login":{"script":{"runtime":"python","code":"print(0)"}}}
+    })).unwrap();
+    assert_eq!(
+      login_gateway(&world, host, &spec, |s| s == "s2"),
+      Some("backup")
+    );
+    world.routes.insert(
+      host.into(),
+      crate::world::RouteRow {
+        id: "rt_sso".into(),
+        version: 1,
+        spec,
+      },
+    );
+    let wanted = script_cleanup_targets(&world);
+    assert_eq!(wanted["s1"], wanted["s2"]);
+    assert_eq!(wanted["s2"].0.len(), 1);
+    assert_eq!(wanted["s2"].1.len(), 1);
+  }
+
   use super::*;
   use serde_json::json;
 

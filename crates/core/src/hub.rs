@@ -79,11 +79,13 @@ struct Conn {
   backup_isolation: bool,
   safe_delete: bool,
   shared_volumes: bool,
+  safe_gateway: bool,
   safe_adopt: bool,
   safe_migrate: bool,
   safe_backup: bool,
   build_v2: bool,
   deploy_v2: bool,
+  safe_rollback: bool,
   /// 协议版本不一致：连接放行，但只接受升级相关的请求，好让它升上来。
   upgrade_only: bool,
 }
@@ -382,6 +384,18 @@ impl Hub {
         !c.closed.is_cancelled() && !c.upgrade_only && c.build_v2
       })
       .map(|c| c.conn_id)
+  }
+
+  pub fn supports_safe_rollback(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|c| !c.upgrade_only && c.safe_rollback)
+  }
+
+  pub fn supports_safe_gateway(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|c| !c.upgrade_only && c.safe_gateway)
   }
 
   pub fn supports_safe_delete(&self, server: &str) -> bool {
@@ -1062,11 +1076,13 @@ async fn handle_socket(
     backup_isolation,
     safe_delete,
     shared_volumes,
+    safe_gateway,
     safe_adopt,
     safe_migrate,
     safe_backup,
     build_v2,
     deploy_v2,
+    safe_rollback,
     key_rotation,
   } = hello
   else {
@@ -1229,11 +1245,13 @@ async fn handle_socket(
     backup_isolation,
     safe_delete,
     shared_volumes,
+    safe_gateway,
     safe_adopt,
     safe_migrate,
     safe_backup,
     build_v2,
     deploy_v2,
+    safe_rollback,
     upgrade_only,
   };
   let state_on_db = state.clone();

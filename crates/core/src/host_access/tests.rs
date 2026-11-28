@@ -30,6 +30,8 @@ fn service(content: &str, adopt: Option<AdoptSpec>) -> Change {
     )
     .unwrap(),
     adopt,
+    pins: None,
+    commit: None,
   }
 }
 
@@ -807,6 +809,8 @@ fn explicit_from_service_does_not_require_host_docker() {
     name: "reader".into(),
     spec,
     adopt: None,
+    pins: None,
+    commit: None,
   }])
   .unwrap();
   assert!(

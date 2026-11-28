@@ -560,8 +560,10 @@ export type Change = {
    * 导入时接管的现有容器：第一次部署前停掉它们，失败时恢复。部署成功后记进导入记录，不再起作用。
    */
   adopt?: AdoptSpec | null;
+  commit?: string | null;
   name: string;
   op: "upsert_service";
+  pins?: Record<string, string> | null;
   spec: ServiceSpec;
 } | {
   name: string;
@@ -1015,6 +1017,7 @@ export interface EdgeVersionView {
   active: boolean;
   created_at: string;
   id: string;
+  last_deployed_at?: string | null;
   message?: string | null;
   /**
    * `wrangler`、`dashboard`、`api` 等。
@@ -1101,6 +1104,12 @@ export type Extract = {
   from: "cookie";
   name: string;
 };
+
+export interface FailoverPendingView {
+  attempts: number;
+  last_error?: string | null;
+  target_backup: boolean;
+}
 
 /**
  * 配置里改动的一个字段。
@@ -1274,6 +1283,7 @@ export interface GatewaySpec {
 export type GatewayTls = "auto" | "internal" | "off";
 
 export interface GatewayView {
+  gate_core?: string | null;
   live?: LiveState | null;
   name: string;
   /**
@@ -2196,13 +2206,16 @@ export interface RiskRow {
 }
 
 /**
- * 回滚到某次部署时要提交的服务配置。image 来源会固定到当时的镜像 digest。
+ * 回滚到某次部署时要提交的服务配置和版本。
  */
 export interface RollbackTarget {
+  commit?: string | null;
   deployed_at: string;
   deployment_id: number;
+  pins?: Record<string, string> | null;
   service: string;
   spec: ServiceSpec;
+  warnings?: string[];
 }
 
 export interface RouteDiagnosis {
@@ -2249,6 +2262,7 @@ export interface RouteSpec {
    * 仅向组网内来源开放控制面页面。
    */
   core_mesh_only?: boolean;
+  dns_ttl?: number | null;
   /**
    * 临时分享：到这个时间（毫秒时间戳）以后，网关直接断开这个域名的请求；路由和 DNS 记录留着，等人删除。
    */
@@ -2302,6 +2316,7 @@ export interface RouteSpec {
 
 export interface RouteView {
   core?: boolean;
+  failover_pending?: FailoverPendingView | null;
   /**
    * 实际使用的网关（spec 里没填时是默认网关）。
    */

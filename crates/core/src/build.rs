@@ -312,7 +312,9 @@ pub async fn ensure_image(
     .or_else(|| if force { None } else { last.clone() });
   // 镜像名只看构建配置，换了 commit 名字不变，要强制重新构建。
   let force = force
-    || (row.commit.is_some() && row.commit != last)
+    || row.commit.as_deref().is_some_and(|expected| {
+      last.as_deref().is_none_or(|sha| !sha.starts_with(expected))
+    })
     || (build.git.is_some()
       && pinned.is_some()
       && !state.hub.supports_safe_migrate(server));
@@ -476,6 +478,77 @@ pub async fn restart_now(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn short_rollback_commit_reuses_matching_built_image() {
+    let state = crate::rules::tests::test_state();
+    let sha = "0123456789012345678901234567890123456789";
+    let short = &sha[..7];
+    let mut snap = Snapshot::default();
+    snap.world.servers.insert(
+      "s1".into(),
+      crate::world::ServerRow {
+        settings: Default::default(),
+        version: 1,
+      },
+    );
+    let spec: ServiceSpec = serde_json::from_value(serde_json::json!({
+      "server": "s1",
+      "source": {"build": {"git": {"repo": "https://example.test/app", "ref": "main"}}}
+    })).unwrap();
+    let recorded_spec = serde_json::to_string(&spec).unwrap();
+    state.db.call(move |c| {
+      c.execute(
+        "INSERT INTO deployments (service, server, run_id, hash, compose, images, created_at, spec, commit_sha, instance_id, started)
+         VALUES ('app', 's1', 'r1', 'h', '', '[]', 1, ?1, ?2, 'svc_fixture', 1)",
+        params![recorded_spec, sha],
+      ).map_err(sql_err)?;
+      Ok(())
+    }).await.unwrap();
+    snap.world.services.insert(
+      "app".into(),
+      crate::world::ServiceRow {
+        spec,
+        instance_id: "svc_fixture".into(),
+        host_ports: Default::default(),
+        import: None,
+        pins: Default::default(),
+        commit: Some(short.into()),
+        version: 1,
+      },
+    );
+    snap
+      .world
+      .services
+      .get_mut("app")
+      .unwrap()
+      .spec
+      .env
+      .insert("MODE".into(), "updated".into());
+    state.hub.mock_safe_migrate_agent("s1", move |op, _| {
+      let AgentOp::Build(job) = op else {
+        panic!("意外的 agent 请求");
+      };
+      assert_eq!(job.expected_commit.as_deref(), Some(short));
+      assert!(!job.force);
+      Some(Ok(serde_json::json!({"skipped": true, "commit": sha})))
+    });
+    let progress: ProgressFn = std::sync::Arc::new(|_| {});
+    assert_eq!(
+      ensure_image(
+        &state,
+        &snap,
+        "app",
+        false,
+        &progress,
+        &CancellationToken::new()
+      )
+      .await
+      .unwrap()
+      .as_deref(),
+      Some(sha)
+    );
+  }
 
   #[tokio::test]
   async fn legacy_plan_ignores_target_loopback_proxy_even_when_reachable()

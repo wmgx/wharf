@@ -317,6 +317,7 @@ export interface EdgeProjectView {
 }
 
 export interface EdgeVersionView {
+  last_deployed_at?: string;
   id: string;
   created_at: string;
   source?: string;
@@ -402,7 +403,7 @@ export type Change =
   | { op: "upsert_bookmark"; id?: string; spec: BookmarkSpec }
   | { op: "remove_bookmark"; id: string }
   | { op: "update_server"; name: string; settings: Record<string, unknown> }
-  | { op: "upsert_service"; name: string; spec: ServiceSpec; adopt?: AdoptSpec }
+  | { op: "upsert_service"; name: string; spec: ServiceSpec; adopt?: AdoptSpec; pins?: Record<string, string>; commit?: string }
   | { op: "remove_service"; name: string; purge_data?: boolean }
   | { op: "refresh_images"; name: string; image?: string }
   | { op: "retag_image"; name: string; image: string; tag: string }
@@ -487,6 +488,7 @@ export interface ImageInfo {
 }
 
 export interface DeploymentView {
+  started?: boolean;
   id: number;
   server: string;
   run_id: string;
@@ -499,6 +501,9 @@ export interface DeploymentView {
 }
 
 export interface RollbackTarget {
+  pins?: Record<string, string>;
+  commit?: string;
+  warnings?: string[];
   deployment_id: number;
   deployed_at: string;
   spec: ServiceSpec;

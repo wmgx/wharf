@@ -325,6 +325,8 @@ mod tests {
         name: name.into(),
         spec: serde_json::from_value(json!({"server":"s1","source":{"image":"fixture:1"},"volumes":[volume]})).unwrap(),
         adopt: None,
+        pins: None,
+        commit: None,
       }]).unwrap();
     }
     world

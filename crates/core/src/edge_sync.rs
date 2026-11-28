@@ -176,10 +176,7 @@ pub async fn sync_app(
   let cache = read(snap, name, spec).await;
   let data = serde_json::to_string(&cache).map_err(db::json_err)?;
   let fresh = cache.live.exists && cache.live.error.is_none();
-  let expected = snap.edge_expected.get(name);
-  let record = fresh
-    && !cache.active().is_empty()
-    && (adopt || expected.is_none_or(|e| e.target != cache.target));
+  let record = fresh && !cache.active().is_empty();
   let app = name.to_string();
   let row = EdgeExpected {
     target: cache.target.clone(),
@@ -189,7 +186,10 @@ pub async fn sync_app(
     .db
     .call(move |c| {
       db::put_edge_cache(c, &format!("app:{app}"), &data)?;
-      if record {
+      if record && (adopt || !c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM edge_expected WHERE app = ?1 AND target = ?2)",
+        rusqlite::params![app, row.target], |r| r.get::<_, bool>(0),
+      ).map_err(db::sql_err)?) {
         db::put_edge_expected(c, &app, &row)?;
       }
       Ok(())
@@ -269,7 +269,37 @@ pub async fn sync_all(state: &AppState) -> Result<(), ApiError> {
   Ok(())
 }
 
-/// Wharf 发布、回滚之后：同步并把新的线上版本记为期望版本。
+/// 回滚已记录期望版本，只更新实况缓存。
+pub async fn refresh_after_rollback(
+  state: &AppState,
+  name: &str,
+) -> Result<(), ApiError> {
+  let snap = snapshot::load(&state.db).await?;
+  let spec = &snap
+    .world
+    .edge_apps
+    .get(name)
+    .ok_or_else(|| edge::edge_not_found(name))?
+    .spec;
+  let cache = read(&snap, name, spec).await;
+  let data = serde_json::to_string(&cache).map_err(db::json_err)?;
+  let key = format!("app:{name}");
+  state
+    .db
+    .call(move |c| db::put_edge_cache(c, &key, &data))
+    .await?;
+  if let Some(error) = cache.live.error {
+    return Err(ApiError::internal(error));
+  }
+  if !cache.live.exists {
+    return Err(ApiError::not_found(format!(
+      "远端暂时读不到项目 {name}"
+    )));
+  }
+  Ok(())
+}
+
+/// Wharf 发布之后：同步并把新的线上版本记为期望版本。
 pub async fn after_change(state: &AppState, name: &str) {
   let result = match snapshot::load(&state.db).await {
     Ok(snap) => sync_app(state, &snap, name, true).await,
@@ -344,6 +374,7 @@ mod tests {
         .map(|id| EdgeVersionView {
           id: id.to_string(),
           created_at: String::new(),
+          last_deployed_at: None,
           source: None,
           message: None,
           active: active.contains(id),

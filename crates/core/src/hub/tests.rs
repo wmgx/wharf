@@ -31,10 +31,12 @@ fn old_hello_has_no_host_shell_capability() {
     backup_isolation,
     safe_delete,
     shared_volumes,
+    safe_gateway,
     safe_adopt,
     safe_migrate,
     safe_backup,
     build_v2,
+    safe_rollback,
     key_rotation,
     ..
   } = hello
@@ -49,10 +51,12 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!backup_isolation);
   assert!(!safe_delete);
   assert!(!shared_volumes);
+  assert!(!safe_gateway);
   assert!(!safe_adopt);
   assert!(!safe_migrate);
   assert!(!safe_backup);
   assert!(!build_v2);
+  assert!(!safe_rollback);
   assert!(!key_rotation);
 }
 
@@ -94,12 +98,14 @@ fn old_core_ignores_new_hello_capability() {
     core_probe: true,
     backup_isolation: true,
     safe_delete: true,
-    shared_volumes: false,
+    shared_volumes: true,
+    safe_gateway: true,
     safe_adopt: false,
     safe_migrate: true,
     safe_backup: true,
     build_v2: true,
     deploy_v2: false,
+    safe_rollback: true,
     key_rotation: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
@@ -135,6 +141,17 @@ impl Hub {
 
   pub(crate) fn mock_shared_volumes_agent(&self, server: &str) {
     lock(&self.conns).get_mut(server).unwrap().shared_volumes = true;
+  }
+
+  pub(crate) fn mock_safe_gateway_agent(
+    &self,
+    server: &str,
+    handle: impl FnMut(AgentOp) -> Result<Value, ApiError>
+    + Send
+    + 'static,
+  ) {
+    self.mock_agent(server, false, handle);
+    lock(&self.conns).get_mut(server).unwrap().safe_gateway = true;
   }
 
   pub(crate) fn mock_safe_delete_agent(
@@ -250,11 +267,13 @@ impl Hub {
         backup_isolation,
         safe_delete: false,
         shared_volumes: false,
+        safe_gateway: false,
         safe_adopt: false,
         safe_migrate: false,
         safe_backup: false,
         build_v2: false,
         deploy_v2: false,
+        safe_rollback: false,
         upgrade_only: false,
       },
     );
@@ -389,11 +408,13 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     backup_isolation: false,
     safe_delete: false,
     shared_volumes: false,
+    safe_gateway: false,
     safe_adopt: false,
     safe_migrate: false,
     safe_backup: false,
     build_v2: false,
     deploy_v2: false,
+    safe_rollback: false,
     upgrade_only: true,
   };
   state.hub.register("s1", conn.clone());
@@ -454,11 +475,13 @@ fn probe_connection(
     backup_isolation: false,
     safe_delete: false,
     shared_volumes: false,
+    safe_gateway: false,
     safe_adopt: false,
     safe_migrate: false,
     safe_backup: false,
     build_v2: false,
     deploy_v2: false,
+    safe_rollback: false,
     upgrade_only: false,
   };
   (conn, rx)

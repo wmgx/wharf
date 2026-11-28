@@ -497,6 +497,7 @@ pub async fn versions(
       .map(|v| EdgeVersionView {
         id: v.id,
         created_at: v.created_at,
+        last_deployed_at: v.last_deployed_at,
         source: v.source,
         message: v.message,
         active: v.active,
@@ -506,26 +507,62 @@ pub async fn versions(
   )
 }
 
-/// 回滚目标：指定的版本，或线上版本之后（更旧）的第一个。
+/// 默认选最近一次承载过流量、现在已下线的版本。
 pub fn rollback_target(
+  name: &str,
   versions: &[EdgeVersionView],
   to: Option<&str>,
 ) -> Result<String, ApiError> {
-  if let Some(to) = to {
-    let found = versions
-      .iter()
-      .find(|v| v.id == to || v.id.starts_with(to))
-      .ok_or_else(|| {
-        ApiError::not_found(format!("没有版本 {to}"))
-          .suggest("wharf edge versions <名字>")
-      })?;
-    return Ok(found.id.clone());
+  let list = format!("wharf edge versions {name}");
+  if let Some(raw) = to {
+    let to = raw.trim();
+    if to.is_empty() {
+      return Err(ApiError::invalid("版本号不能为空").suggest(list));
+    }
+    if let Some(exact) = versions.iter().find(|v| v.id == to) {
+      return Ok(exact.id.clone());
+    }
+    let matches: Vec<_> =
+      versions.iter().filter(|v| v.id.starts_with(to)).collect();
+    return match matches.as_slice() {
+      [] => Err(
+        ApiError::not_found(format!("没有版本 {to}")).suggest(list),
+      ),
+      [v] => Ok(v.id.clone()),
+      _ => Err(
+        ApiError::invalid(format!(
+          "前缀 {to} 匹配到多个版本（{}），请多写几位",
+          matches.len()
+        ))
+        .suggest(list),
+      ),
+    };
   }
-  let active = versions.iter().position(|v| v.active).unwrap_or(0);
-  versions
-    .get(active + 1)
-    .map(|v| v.id.clone())
-    .ok_or_else(|| ApiError::invalid("没有更早的版本可以回滚"))
+  if let Some(version) = versions
+    .iter()
+    .rev()
+    .filter(|v| !v.active)
+    .filter_map(|v| v.last_deployed_at.as_ref().map(|time| (time, v)))
+    .max_by_key(|(time, _)| *time)
+    .map(|(_, v)| v)
+  {
+    return Ok(version.id.clone());
+  }
+  let error = if versions.iter().filter(|v| v.active).count() > 1 {
+    ApiError::invalid(
+      "当前有多个线上灰度版本，没有更早的已上线版本可自动回滚",
+    )
+    .with_hint(format!("用 --to 指定目标版本，先运行 {list}"))
+  } else if versions.iter().any(|v| !v.active) {
+    ApiError::invalid("没有曾经上线过的旧版本可以自动回滚").with_hint(
+      format!(
+        "如需切换到未上线版本，请用 --to 明确指定；查看列表：{list}"
+      ),
+    )
+  } else {
+    ApiError::invalid("没有更早的版本可以回滚")
+  };
+  Err(error.suggest(list))
 }
 
 pub async fn rollback(
@@ -538,11 +575,9 @@ pub async fn rollback(
   let spec = app(snap, name)?;
   let provider =
     snapshot::edge_provider(account(snap, &spec.account)?)?;
-  progress(format!(
-    "切换到版本 {}",
-    &version[..8.min(version.len())]
-  ));
-  with_timeout(
+  let short: String = version.chars().take(8).collect();
+  progress(format!("切换到版本 {short}"));
+  let confirmed = with_timeout(
     &format!("回滚 {name}"),
     provider.rollback(
       provider_kind(spec.kind),
@@ -551,7 +586,35 @@ pub async fn rollback(
     ),
   )
   .await?;
-  crate::edge_sync::after_change(state, name).await;
+  complete_rollback(state, name, spec, confirmed, progress).await
+}
+
+async fn complete_rollback(
+  state: &AppState,
+  name: &str,
+  spec: &EdgeAppSpec,
+  confirmed: String,
+  progress: &ProgressFn,
+) -> Result<(), ApiError> {
+  let short: String = confirmed.chars().take(8).collect();
+  let expected = db::EdgeExpected {
+    target: crate::edge_sync::target(name, spec),
+    versions: confirmed,
+  };
+  let app = name.to_string();
+  state.db.call(move |c| db::put_edge_expected(c, &app, &expected)).await.map_err(|e| {
+    let accept = format!("wharf edge accept {name}");
+    ApiError::internal(format!("远端 {name} 已切换到版本 {short}，但写入本地期望版本失败：{}", e.message))
+      .with_hint(format!("运行 {accept} 将线上版本同步为期望版本")).suggest(accept)
+  })?;
+  if let Err(e) =
+    crate::edge_sync::refresh_after_rollback(state, name).await
+  {
+    progress(format!(
+      "提醒：远端回滚已生效并已记录期望版本，刷新线上状态失败（{}），稍后会自动同步",
+      e.message
+    ));
+  }
   Ok(())
 }
 
@@ -559,10 +622,15 @@ pub async fn rollback(
 mod tests {
   use super::*;
 
-  fn v(id: &str, active: bool) -> EdgeVersionView {
+  fn v(
+    id: &str,
+    active: bool,
+    deployed: Option<&str>,
+  ) -> EdgeVersionView {
     EdgeVersionView {
       id: id.into(),
       created_at: String::new(),
+      last_deployed_at: deployed.map(str::to_string),
       source: None,
       message: None,
       active,
@@ -571,11 +639,68 @@ mod tests {
   }
 
   #[test]
-  fn rollback_goes_to_the_version_before_active() {
-    let list = [v("c", false), v("b", true), v("a", false)];
-    assert_eq!(rollback_target(&list, None).unwrap(), "a");
-    assert_eq!(rollback_target(&list, Some("c")).unwrap(), "c");
-    assert!(rollback_target(&[v("a", true)], None).is_err());
+  fn rollback_target_picks_last_deployed_and_validates_prefix() {
+    let list = [
+      v("ab11", true, Some("t3")),
+      v("ab22", true, Some("t3")),
+      v("uploaded", false, None),
+      v("earlier", false, Some("t1")),
+      v("latest", false, Some("t2")),
+    ];
+    assert_eq!(rollback_target("w", &list, None).unwrap(), "latest");
+    assert_eq!(
+      rollback_target("w", &list, Some(" up ")).unwrap(),
+      "uploaded"
+    );
+    assert_eq!(
+      rollback_target("w", &list, Some("ab11")).unwrap(),
+      "ab11"
+    );
+    for bad in [" ", "ab"] {
+      assert_eq!(
+        rollback_target("w", &list, Some(bad)).unwrap_err().code,
+        wharf_api_types::ErrorCode::InvalidInput
+      );
+    }
+    assert!(rollback_target("w", &list[..3], None).is_err());
+  }
+
+  #[tokio::test]
+  async fn rollback_persists_expected_before_sync_readback() {
+    let state = crate::rules::tests::test_state();
+    let spec: EdgeAppSpec =
+      serde_json::from_value(serde_json::json!({
+        "kind":"worker", "account":"cf"
+      }))
+      .unwrap();
+    let lines =
+      std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let output = lines.clone();
+    let progress: ProgressFn = std::sync::Arc::new(move |line| {
+      output.lock().unwrap().push(line)
+    });
+    complete_rollback(
+      &state,
+      "w",
+      &spec,
+      "confirmed".into(),
+      &progress,
+    )
+    .await
+    .unwrap();
+    assert!(lines.lock().unwrap()[0].contains("刷新线上状态失败"));
+    let expected =
+      state.db.call(|c| db::edge_expected(c)).await.unwrap();
+    assert_eq!(expected["w"].versions, "confirmed");
+    state.db.call(|c| c.execute_batch(
+      "CREATE TRIGGER reject_version BEFORE INSERT ON edge_expected BEGIN SELECT RAISE(ABORT, 'test'); END;"
+    ).map_err(db::sql_err)).await.unwrap();
+    let err =
+      complete_rollback(&state, "w", &spec, "next".into(), &progress)
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("远端 w 已切换"));
+    assert_eq!(err.suggest, ["wharf edge accept w"]);
   }
 
   #[test]

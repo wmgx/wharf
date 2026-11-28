@@ -152,6 +152,8 @@ pub enum AgentMsg {
     #[serde(default)]
     shared_volumes: bool,
     #[serde(default)]
+    safe_gateway: bool,
+    #[serde(default)]
     safe_adopt: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     deploy_v2: bool,
@@ -161,6 +163,8 @@ pub enum AgentMsg {
     safe_backup: bool,
     #[serde(default)]
     build_v2: bool,
+    #[serde(default)]
+    safe_rollback: bool,
     #[serde(default)]
     key_rotation: bool,
   },
@@ -387,6 +391,8 @@ pub enum AgentOp {
   /// 读取若干 compose project 的现状，结果是 `Vec<ProjectState>`。
   ProjectStatus {
     projects: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    include_links: bool,
   },
   /// 只读诊断指定宿主机端口，结果是 Vec<ContainerDiagnosis>。
   DiagnoseContainer {
@@ -440,6 +446,9 @@ pub enum AgentOp {
     project: String,
   },
   /// `docker compose stop`：停止容器但不删除。project 不存在时什么也不做。
+  ProjectRestart {
+    project: String,
+  },
   ProjectStop {
     project: String,
   },

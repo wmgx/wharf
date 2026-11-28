@@ -5,7 +5,10 @@
 //! - 回滚用 Cloudflare 自己的版本：Workers 部署旧 version，Pages 回滚到旧 deployment；
 //! - Workers 的自定义域名由 Cloudflare 连同 DNS 一起管；Pages 的自定义域名要另外写 CNAME。
 
-use std::sync::{Arc, Mutex};
+use std::{
+  collections::BTreeMap,
+  sync::{Arc, Mutex},
+};
 
 use reqwest::Method;
 use serde_json::{Value, json};
@@ -145,30 +148,15 @@ impl CloudflareEdge {
       segment(account)?,
       segment(name)?
     );
-    let active: Vec<String> = self
-      .get_opt(&format!("{base}/deployments"))
-      .await?
-      .and_then(|d| {
-        d["result"]["deployments"].as_array().and_then(|list| {
-          list
-            .iter()
-            .max_by_key(|x| {
-              x["created_on"].as_str().unwrap_or_default().to_string()
-            })
-            .cloned()
-        })
-      })
-      .map(|latest| {
-        latest["versions"]
-          .as_array()
-          .map(|vs| {
-            vs.iter()
-              .filter_map(|v| str_of(&v["version_id"]))
-              .collect()
-          })
-          .unwrap_or_default()
-      })
-      .unwrap_or_default();
+    let deployments =
+      self.get_opt(&format!("{base}/deployments")).await?;
+    let (active, last) = worker_deployment_index(
+      deployments
+        .as_ref()
+        .and_then(|d| d["result"]["deployments"].as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default(),
+    );
     let data = self.get(&format!("{base}/versions")).await?;
     let mut items: Vec<Value> = data["result"]["items"]
       .as_array()
@@ -184,6 +172,7 @@ impl CloudflareEdge {
           let id = str_of(&v["id"])?;
           Some(EdgeVersion {
             active: active.contains(&id),
+            last_deployed_at: last.get(&id).cloned(),
             id,
             created_at: str_of(&v["metadata"]["created_on"])
               .unwrap_or_default(),
@@ -279,27 +268,68 @@ impl CloudflareEdge {
     Ok(
       data["result"]
         .as_array()
-        .map(|list| {
-          list
-            .iter()
-            .filter_map(|d| {
-              let id = str_of(&d["id"])?;
-              Some(EdgeVersion {
-                active: canonical.as_deref() == Some(id.as_str()),
-                id,
-                created_at: str_of(&d["created_on"]).unwrap_or_default(),
-                source: str_of(&d["deployment_trigger"]["type"]),
-                message: str_of(
-                  &d["deployment_trigger"]["metadata"]["commit_message"],
-                ),
-                url: str_of(&d["url"]),
-              })
-            })
-            .collect()
-        })
-        .unwrap_or_default(),
+        .into_iter()
+        .flatten()
+        .filter_map(|d| pages_version(d, canonical.as_deref()))
+        .collect(),
     )
   }
+}
+
+fn pages_version(
+  d: &Value,
+  canonical: Option<&str>,
+) -> Option<EdgeVersion> {
+  let id = str_of(&d["id"])?;
+  let active = canonical == Some(id.as_str());
+  let created_at = str_of(&d["created_on"]);
+  let deployed = active
+    || (d["latest_stage"]["status"] == "success"
+      && d["is_skipped"] != true);
+  Some(EdgeVersion {
+    active,
+    id,
+    last_deployed_at: created_at.clone().filter(|_| deployed),
+    created_at: created_at.unwrap_or_default(),
+    source: str_of(&d["deployment_trigger"]["type"]),
+    message: str_of(
+      &d["deployment_trigger"]["metadata"]["commit_message"],
+    ),
+    url: str_of(&d["url"]),
+  })
+}
+
+fn worker_deployment_index(
+  deployments: &[Value],
+) -> (Vec<String>, BTreeMap<String, String>) {
+  let mut deployments: Vec<_> = deployments.iter().collect();
+  deployments.sort_by_key(|d| {
+    std::cmp::Reverse(d["created_on"].as_str().unwrap_or_default())
+  });
+  let mut active = Vec::new();
+  let mut last = BTreeMap::new();
+  for (index, deployment) in deployments.into_iter().enumerate() {
+    for version in
+      deployment["versions"].as_array().into_iter().flatten()
+    {
+      if version["percentage"].as_f64().is_some_and(|p| p <= 0.0) {
+        continue;
+      }
+      let Some(id) = str_of(&version["version_id"]) else {
+        continue;
+      };
+      if index == 0 {
+        active.push(id.clone());
+      }
+      if let Some(time) = deployment["created_on"]
+        .as_str()
+        .filter(|time| !time.is_empty())
+      {
+        last.entry(id).or_insert_with(|| time.to_string());
+      }
+    }
+  }
+  (active, last)
 }
 
 fn str_of(v: &Value) -> Option<String> {
@@ -603,7 +633,7 @@ impl EdgeProvider for CloudflareEdge {
     kind: EdgeKind,
     name: &'a str,
     version: &'a str,
-  ) -> BoxFut<'a, ()> {
+  ) -> BoxFut<'a, String> {
     Box::pin(async move {
       let account = self.account().await?;
       match kind {
@@ -624,9 +654,10 @@ impl EdgeProvider for CloudflareEdge {
               })),
             )
             .await?;
+          Ok(version.to_string())
         }
         EdgeKind::Pages => {
-          self
+          let response = self
             .client
             .call(
               Method::POST,
@@ -639,9 +670,12 @@ impl EdgeProvider for CloudflareEdge {
               None,
             )
             .await?;
+          Ok(
+            str_of(&response["result"]["id"])
+              .unwrap_or_else(|| version.to_string()),
+          )
         }
       }
-      Ok(())
     })
   }
 
@@ -855,4 +889,53 @@ mod tests {
       json!({ "body_part": "script", "compatibility_date": DEFAULT_COMPAT_DATE })
     );
   }
+}
+
+#[cfg(test)]
+#[test]
+fn worker_deployment_index_tracks_all_traffic_history() {
+  let d = json!([
+    {"created_on":"t1", "versions":[{"version_id":"v1"}]},
+    {"created_on":"t3", "versions":[{"version_id":"v3", "percentage":50}, {"version_id":"v4", "percentage":50}, {"version_id":"v2", "percentage":0}]},
+    {"created_on":"t2", "versions":[{"version_id":"v3", "percentage":100}]}
+  ]);
+  let (active, last) = worker_deployment_index(d.as_array().unwrap());
+  assert_eq!(active, ["v3", "v4"]);
+  assert_eq!(last["v1"], "t1");
+  assert_eq!(last["v3"], "t3");
+  assert!(!last.contains_key("v2"));
+}
+
+#[cfg(test)]
+#[test]
+fn pages_history_counts_only_served_production_deployments() {
+  let mut deployment = json!({
+    "id":"p1","created_on":"t1","latest_stage":{"status":"failure"}
+  });
+  assert!(
+    pages_version(&deployment, None)
+      .unwrap()
+      .last_deployed_at
+      .is_none()
+  );
+  assert!(
+    pages_version(&deployment, Some("p1"))
+      .unwrap()
+      .last_deployed_at
+      .is_some()
+  );
+  deployment["latest_stage"]["status"] = json!("success");
+  assert!(
+    pages_version(&deployment, None)
+      .unwrap()
+      .last_deployed_at
+      .is_some()
+  );
+  deployment["is_skipped"] = json!(true);
+  assert!(
+    pages_version(&deployment, None)
+      .unwrap()
+      .last_deployed_at
+      .is_none()
+  );
 }

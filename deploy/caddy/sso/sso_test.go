@@ -1,6 +1,7 @@
 package sso
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
@@ -577,5 +578,62 @@ func TestRejectsNoncanonicalRequestPath(t *testing.T) {
 	}
 	if matchesPath("/catalog", []string{"/"}, "") {
 		t.Fatal("全站排除配置生效")
+	}
+}
+
+func TestRefreshSurvivesFirstClientCancellation(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		select {
+		case <-release:
+			w.WriteHeader(http.StatusOK)
+		case <-r.Context().Done():
+		}
+	}))
+	defer core.Close()
+	var releaseOnce sync.Once
+	open := func() { releaseOnce.Do(func() { close(release) }) }
+	defer open()
+	s := plugin(t, core.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := httptest.NewRequest("GET", "https://a.example.test/", nil)
+	first := make(chan int, 1)
+	go func() { first <- s.refresh(r.WithContext(ctx), "sample").status }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("未收到刷新请求")
+	}
+	cancel()
+	select {
+	case status := <-first:
+		if status != http.StatusBadGateway {
+			t.Fatalf("首个请求状态 = %d", status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("首个请求没有退出")
+	}
+	second := make(chan int, 1)
+	go func() { second <- s.refresh(r, "sample").status }()
+	// 后台刷新只能由控制面响应或超时结束。
+	select {
+	case status := <-second:
+		t.Fatalf("刷新提前结束，状态 = %d", status)
+	default:
+	}
+	open()
+	select {
+	case status := <-second:
+		if status != http.StatusOK || calls.Load() != 1 {
+			t.Fatalf("第二个请求状态 = %d，刷新次数 = %d", status, calls.Load())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("第二个请求没有收到刷新结果")
 	}
 }
