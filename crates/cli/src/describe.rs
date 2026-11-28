@@ -68,6 +68,9 @@ fn walk(
     entry["effect"] = json!(effect);
     entry["perms"] = json!(perms);
     entry["returns"] = json!(returns(&command));
+    if matches!(command.as_str(), "exec" | "service exec") {
+      entry["exit_code"] = json!("remote");
+    }
     if perms.is_empty() {
       entry["offline"] = json!(true);
     }
@@ -136,6 +139,8 @@ fn read_when_no_args(command: &str) -> bool {
       | "backup core"
       | "data cleanup"
       | "data cleanup policy"
+      | "backup set"
+      | "task set"
   )
 }
 
@@ -192,7 +197,10 @@ fn effect(
     return ("plan", &["plan"]);
   }
   let leaf = cmd.get_name();
-  if command == "connect" {
+  if matches!(command, "task run" | "task cancel") {
+    return ("direct", &["apply", "exec"]);
+  }
+  if matches!(command, "connect" | "service exec") {
     return ("direct", &["exec"]);
   }
   if matches!(
@@ -218,6 +226,7 @@ fn effect(
       | "route dns-check"
       | "gateway config"
       | "service origin"
+      | "service render"
       | "service history"
       | "service timeline"
       | "server exposure"
@@ -233,6 +242,8 @@ fn effect(
       | "network acl"
       | "service files"
       | "alert firing"
+      | "backup diff"
+      | "backup extract"
   ) || command.starts_with("wait ")
     || matches!(
       leaf,
@@ -277,7 +288,17 @@ fn returns(command: &str) -> Option<&'static str> {
     "alert list" => "alerts",
     "task ls" | "task show" => "task",
     "task logs" => "task_run",
+    "exec" => "host_exec",
+    "service exec" => "service_exec",
+    "service render" => "service_render",
     "backup list" => "backup",
+    "backup ls" => "backup_ls",
+    "backup extract" => "backup_extract",
+    "backup diff" => "backup_diff",
+    "backup keep" => "backup_keep",
+    "backup set" => "backup_policy",
+    "backup unlock" => "backup_unlock",
+    "core resume" => "core_safe_mode",
     "service history" => "deployment",
     "edge list" | "edge show" => "edge",
     "account list" => "account",
@@ -364,6 +385,32 @@ pub fn commands(prefix: &[String]) -> Value {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn usable_keeps_ping_task_edits_with_apply_permission() {
+    use serde_json::json;
+    let prefix = ["task".into()];
+    let apply =
+      super::usable(&prefix, &json!({"perms": ["read", "apply"]}));
+    let read = super::usable(&prefix, &json!({"perms": ["read"]}));
+    let task = |result: &serde_json::Value, name: &str| {
+      result["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["command"] == name)
+        .cloned()
+    };
+    for name in
+      ["wharf task enable", "wharf task disable", "wharf task set"]
+    {
+      assert!(task(&apply, name).is_some(), "{name}");
+    }
+    assert_eq!(
+      task(&read, "wharf task set").unwrap()["usable_mode"],
+      "read_only"
+    );
+  }
+
   #[test]
   fn usable_respects_host_and_baseline_permissions() {
     use serde_json::json;

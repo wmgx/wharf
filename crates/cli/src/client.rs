@@ -563,13 +563,11 @@ impl Client {
     &self.base
   }
 
-  /// 边收边交给 `on_chunk`（下载文件），总共最多 `timeout`。
-  pub async fn download(
+  pub(crate) async fn download_response(
     &self,
     path: &str,
     timeout: Duration,
-    mut on_chunk: impl FnMut(&[u8]) -> std::io::Result<()>,
-  ) -> CliResult<()> {
+  ) -> CliResult<reqwest::Response> {
     let req = self
       .http
       .get(format!("{}{path}", self.endpoint))
@@ -578,8 +576,7 @@ impl Client {
       Some(token) => req.bearer_auth(token),
       None => req,
     };
-    let mut resp =
-      req.send().await.map_err(|e| self.conn_error(e))?;
+    let resp = req.send().await.map_err(|e| self.conn_error(e))?;
     if !resp.status().is_success() {
       let status = resp.status().as_u16();
       let bytes = resp.bytes().await.unwrap_or_default();
@@ -591,6 +588,17 @@ impl Client {
           .into(),
       );
     }
+    Ok(resp)
+  }
+
+  /// 边收边交给 `on_chunk`（下载文件），总共最多 `timeout`。
+  pub async fn download(
+    &self,
+    path: &str,
+    timeout: Duration,
+    mut on_chunk: impl FnMut(&[u8]) -> std::io::Result<()>,
+  ) -> CliResult<()> {
+    let mut resp = self.download_response(path, timeout).await?;
     let expected = resp.content_length();
     let mut received = 0;
     while let Some(chunk) = resp.chunk().await.map_err(|e| {
@@ -612,12 +620,42 @@ impl Client {
     Ok(())
   }
 
+  pub(crate) async fn require_exec_v2_core(&self) -> CliResult<()> {
+    let identity: serde_json::Value = self.get("/api/whoami").await?;
+    if identity["exec_v2"] != true {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          "控制面版本旧，可能忽略新增的操作参数",
+        )
+        .with_hint("升级控制面和 agent 后重试：wharf upgrade")
+        .into(),
+      );
+    }
+    Ok(())
+  }
+
   pub async fn get<T: DeserializeOwned>(
     &self,
     path: &str,
   ) -> CliResult<T> {
     self
       .send(self.http.get(format!("{}{path}", self.endpoint)))
+      .await
+  }
+
+  pub async fn get_timeout<T: DeserializeOwned>(
+    &self,
+    path: &str,
+    timeout: Duration,
+  ) -> CliResult<T> {
+    self
+      .send(
+        self
+          .http
+          .get(format!("{}{path}", self.endpoint))
+          .timeout(timeout),
+      )
       .await
   }
 
@@ -648,6 +686,75 @@ impl Client {
         &serde_json::json!({"token": token, "cert": cert}),
       )
       .await
+  }
+
+  /// POST 执行流。旧控制面可能返回非流式 JSON，交给调用方处理。
+  pub async fn post_stream<B: Serialize>(
+    &self,
+    path: &str,
+    body: &B,
+    timeout: Duration,
+    mut on_line: impl FnMut(&str) -> CliResult<()>,
+  ) -> CliResult<Option<Vec<u8>>> {
+    let req = self
+      .http
+      .post(format!("{}{path}", self.endpoint))
+      .timeout(timeout)
+      .json(body);
+    let req = match &self.token {
+      Some(token) => req.bearer_auth(token),
+      None => req,
+    };
+    let mut resp =
+      req.send().await.map_err(|e| self.conn_error(e))?;
+    self.check_build(resp.headers());
+    if !resp.status().is_success() {
+      let status = resp.status();
+      let bytes = resp.bytes().await.unwrap_or_default();
+      return Err(
+        serde_json::from_slice::<ApiError>(&bytes)
+          .unwrap_or_else(|_| {
+            ApiError::internal(format!("执行请求失败：HTTP {status}"))
+          })
+          .into(),
+      );
+    }
+    if !resp
+      .headers()
+      .get("content-type")
+      .and_then(|v| v.to_str().ok())
+      .is_some_and(|v| v.starts_with("application/x-ndjson"))
+    {
+      return Ok(Some(
+        resp.bytes().await.map_err(|e| self.conn_error(e))?.to_vec(),
+      ));
+    }
+    let mut pending = Vec::new();
+    while let Some(chunk) =
+      resp.chunk().await.map_err(|e| self.conn_error(e))?
+    {
+      for part in chunk.split_inclusive(|&b| b == b'\n') {
+        if pending.len() + part.len() > 256 * 1024 {
+          return Err(
+            ApiError::internal("执行流事件超过大小上限").into(),
+          );
+        }
+        pending.extend_from_slice(part);
+        if part.last() == Some(&b'\n') {
+          let line =
+            std::str::from_utf8(&pending[..pending.len() - 1])
+              .map_err(|_| {
+                ApiError::internal("执行流事件不是 UTF-8")
+              })?;
+          on_line(line)?;
+          pending.clear();
+        }
+      }
+    }
+    if !pending.is_empty() {
+      return Err(ApiError::internal("执行流在事件中间断开").into());
+    }
+    Ok(None)
   }
 
   pub async fn post_timeout<B: Serialize, T: DeserializeOwned>(

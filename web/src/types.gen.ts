@@ -382,7 +382,15 @@ export interface BackupRecord {
   target: string;
 }
 
+export interface BackupRetention {
+  daily: number;
+  monthly: number;
+  weekly: number;
+}
+
 export interface BackupSpec {
+  exclude?: string[];
+  retention?: BackupRetention | null;
   /**
    * 备份存到哪台服务器，不能是服务所在的服务器。
    */
@@ -404,10 +412,12 @@ export interface BackupSummary {
  * `GET /api/services/{name}/backups`
  */
 export interface BackupsView {
+  exclude?: string[];
   /**
    * 最近的备份记录，新的在前。
    */
   records: BackupRecord[];
+  retention?: BackupRetention | null;
   service: string;
   /**
    * 列出快照时使用的备份服务器，关闭自动备份后可来自历史记录。
@@ -2948,6 +2958,27 @@ export interface ServiceDraft {
   warnings?: string[];
 }
 
+export interface ServiceExecResponse {
+  container: string;
+  duration_ms: number;
+  exit_code: number;
+  server: string;
+  service: string;
+  stderr: string;
+  stdout: string;
+  truncated: boolean;
+}
+
+export interface ServiceRenderView {
+  compose: string;
+  init_cmd?: string | null;
+  secrets_masked?: string[];
+  server: string;
+  service: string;
+  source: string;
+  warnings?: string[];
+}
+
 /**
  * 单个服务的周期指标。
  */
@@ -3195,8 +3226,11 @@ export interface ShellLog {
 export interface Snapshot {
   hostname: string;
   id: string;
+  keep?: boolean;
+  note?: string | null;
   paths: string[];
   short_id: string;
+  tags?: string[];
   time: string;
 }
 
@@ -3292,6 +3326,7 @@ export interface Status {
    */
   problems?: string[];
   routes: RouteView[];
+  safe_mode: boolean;
   servers: ServerView[];
   services: ServiceView[];
   /**
@@ -3426,7 +3461,7 @@ export type TaskSpec = ({
   timeout_secs: number;
 };
 
-export type TaskStatus = "running" | "succeeded" | "failed" | "timed_out" | "skipped";
+export type TaskStatus = "running" | "succeeded" | "failed" | "timed_out" | "skipped" | "cancelled";
 
 export interface TaskView {
   data_bytes?: number | null;

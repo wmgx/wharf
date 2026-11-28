@@ -789,6 +789,7 @@ pub async fn status(
   issues.extend(crate::totp::issues(&state.db).await?);
   issues.extend(crate::core_backup::issues(&state.db).await?);
   issues.extend(crate::data_cleanup::issues(state, &snap).await?);
+  issues.extend(crate::backup::spike_issues(&snap.world));
   issues.extend(crate::tasks::issues(state).await);
   issues.extend(crate::probe::issues(&snap.world));
   issues.extend(crate::exposure::issues(state).await?);
@@ -929,6 +930,7 @@ pub async fn status(
       .then_with(|| a.spec.title.cmp(&b.spec.title))
   });
   let mut status = Status {
+    safe_mode: state.is_safe_mode(),
     bookmarks,
     servers,
     services,
@@ -946,6 +948,22 @@ pub async fn status(
       allowed,
       &snap.world,
       &mut status,
+    );
+  }
+  if status.safe_mode {
+    status.issues.insert(
+      0,
+      Issue {
+        code: "core_safe_mode".into(),
+        level: IssueLevel::Warn,
+        subject: None,
+        title: "控制面处于安全接管模式（后台自动操作已暂停）".into(),
+        hint: Some(
+          "核对节点和备份目标后执行：wharf core resume".into(),
+        ),
+        ack: None,
+        alert: None,
+      },
     );
   }
   Ok(status)

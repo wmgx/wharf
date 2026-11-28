@@ -143,6 +143,7 @@ pub fn check_service_scope(
       | ["", "api", "routes", _, "cert" | "dns-check" | "failover"]
       | ["", "api", "tasks", _]
       | ["", "api", "tasks", _, "runs"]
+      | ["", "api", "tasks", _, "runs", _]
       | ["", "api", "runs", _, "logs"]
       | ["", "api", "plans" | "runs", _] => true,
       _ => false,

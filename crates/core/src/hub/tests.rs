@@ -34,11 +34,13 @@ fn old_hello_has_no_host_shell_capability() {
     backup_isolation,
     safe_delete,
     data_cleanup,
+    exec_v2,
     shared_volumes,
     safe_gateway,
     safe_adopt,
     safe_migrate,
     safe_backup,
+    backup_v2,
     build_v2,
     safe_rollback,
     key_rotation,
@@ -60,11 +62,13 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!backup_isolation);
   assert!(!safe_delete);
   assert!(!data_cleanup);
+  assert!(!exec_v2);
   assert!(!shared_volumes);
   assert!(!safe_gateway);
   assert!(!safe_adopt);
   assert!(!safe_migrate);
   assert!(!safe_backup);
+  assert!(!backup_v2);
   assert!(!build_v2);
   assert!(!safe_rollback);
   assert!(!key_rotation);
@@ -112,6 +116,7 @@ fn old_core_ignores_new_hello_capability() {
     backup_isolation: true,
     safe_delete: true,
     data_cleanup: false,
+    exec_v2: true,
     shared_volumes: true,
     safe_gateway: true,
     gateway_probe: false,
@@ -119,6 +124,7 @@ fn old_core_ignores_new_hello_capability() {
     safe_adopt: false,
     safe_migrate: true,
     safe_backup: true,
+    backup_v2: false,
     build_v2: true,
     deploy_v2: false,
     safe_rollback: true,
@@ -158,8 +164,16 @@ impl Hub {
     lock(&self.conns).get_mut(server).unwrap().host_shell = true;
   }
 
+  pub(crate) fn enable_mock_backup_v2(&self, server: &str) {
+    lock(&self.conns).get_mut(server).unwrap().backup_v2 = true;
+  }
+
   pub(crate) fn mock_safe_backup_agent(&self, server: &str) {
     lock(&self.conns).get_mut(server).unwrap().safe_backup = true;
+  }
+
+  pub(crate) fn enable_mock_exec_v2(&self, server: &str) {
+    lock(&self.conns).get_mut(server).unwrap().exec_v2 = true;
   }
 
   pub(crate) fn enable_mock_monitor_v2(&self, server: &str) {
@@ -318,6 +332,7 @@ impl Hub {
         backup_isolation,
         safe_delete: false,
         data_cleanup: false,
+        exec_v2: false,
         shared_volumes: false,
         safe_gateway: false,
         gateway_probe: false,
@@ -325,6 +340,7 @@ impl Hub {
         safe_adopt: false,
         safe_migrate: false,
         safe_backup: false,
+        backup_v2: false,
         build_v2: false,
         deploy_v2: false,
         safe_rollback: false,
@@ -464,6 +480,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     backup_isolation: false,
     safe_delete: false,
     data_cleanup: false,
+    exec_v2: false,
     shared_volumes: false,
     safe_gateway: false,
     gateway_probe: false,
@@ -471,6 +488,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     safe_adopt: false,
     safe_migrate: false,
     safe_backup: false,
+    backup_v2: false,
     build_v2: false,
     deploy_v2: false,
     safe_rollback: false,
@@ -536,6 +554,7 @@ fn probe_connection(
     backup_isolation: false,
     safe_delete: false,
     data_cleanup: false,
+    exec_v2: false,
     shared_volumes: false,
     safe_gateway: false,
     gateway_probe: false,
@@ -543,6 +562,7 @@ fn probe_connection(
     safe_adopt: false,
     safe_migrate: false,
     safe_backup: false,
+    backup_v2: false,
     build_v2: false,
     deploy_v2: false,
     safe_rollback: false,

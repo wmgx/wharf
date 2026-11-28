@@ -280,6 +280,11 @@ pub async fn patch(
         .into(),
       );
     }
+    if id == "backup_spike"
+      && p.threshold.is_some_and(|value| value <= 0.0)
+    {
+      return Err(ApiError::invalid("备份暴涨倍数必须大于 0").into());
+    }
     if p.threshold.is_some_and(|t| !t.is_finite()) {
       return Err(ApiError::invalid("阈值要是数字").into());
     }

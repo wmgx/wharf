@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use schemars::{Schema, schema_for};
 use serde_json::{Value, json};
-use wharf_api_types::{ApiError, plan, spec, view};
+use wharf_api_types::{ApiError, backup, plan, spec, view};
 
 use crate::{client::CliResult, commands::out, print};
 
@@ -20,6 +20,10 @@ fn entries() -> BTreeMap<&'static str, Schema> {
     ("status", schema_for!(view::Status)),
     ("error", schema_for!(ApiError)),
     ("server_view", schema_for!(view::ServerView)),
+    ("service_render", schema_for!(view::ServiceRenderView)),
+    ("service_exec", schema_for!(view::ServiceExecResponse)),
+    ("host_exec", schema_for!(view::HostExecResponse)),
+    ("exec_stream_event", schema_for!(view::ExecStreamEvent)),
     ("service_view", schema_for!(view::ServiceView)),
     ("gateway_view", schema_for!(view::GatewayView)),
     ("route_view", schema_for!(view::RouteView)),
@@ -34,6 +38,13 @@ fn entries() -> BTreeMap<&'static str, Schema> {
     ("task", schema_for!(view::TaskView)),
     ("task_run", schema_for!(view::TaskRunView)),
     ("backup", schema_for!(view::BackupsView)),
+    ("backup_ls", schema_for!(backup::BackupLsView)),
+    ("backup_extract", schema_for!(backup::BackupExtractResult)),
+    ("backup_diff", schema_for!(backup::BackupDiffView)),
+    ("backup_keep", schema_for!(backup::BackupKeepResult)),
+    ("backup_policy", schema_for!(backup::BackupPolicy)),
+    ("backup_unlock", schema_for!(view::BackupUnlockResult)),
+    ("core_safe_mode", schema_for!(view::CoreSafeModeView)),
     ("deployment", schema_for!(view::DeploymentView)),
     ("edge", schema_for!(view::EdgeAppView)),
     ("account", schema_for!(view::AccountView)),

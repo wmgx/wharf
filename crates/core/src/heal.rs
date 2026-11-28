@@ -131,6 +131,9 @@ async fn tick(
   state: &Arc<AppState>,
   records: &mut HashMap<String, Record>,
 ) -> Result<(), wharf_api_types::ApiError> {
+  if state.is_safe_mode() {
+    return Ok(());
+  }
   let snap = snapshot::load(&state.db).await?;
   let mut notices = state
     .db
@@ -237,6 +240,7 @@ async fn tick(
       format!("{AUTO_RESTART_TITLE}{name}（{why}）"),
       Step::ServiceRestart {
         service: name.clone(),
+        container: None,
       },
       Some("自动自愈".into()),
     )
@@ -334,6 +338,7 @@ mod tests {
       AUTO_RESTART_TITLE.into(),
       Step::ServiceRestart {
         service: service.clone(),
+        container: None,
       },
     )
     .await;
@@ -349,7 +354,10 @@ mod tests {
     let result = apply::start_task(
       state.clone(),
       "备份".into(),
-      Step::Backup { service },
+      Step::Backup {
+        service,
+        options: Default::default(),
+      },
     )
     .await;
     assert_eq!(result.err().unwrap().code, ErrorCode::Busy);

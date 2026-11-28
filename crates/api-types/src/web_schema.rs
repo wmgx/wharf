@@ -130,6 +130,8 @@ pub fn web_schema() -> Value {
   let _ = generator.subschema_for::<view::ServiceStatus>();
   let _ = generator.subschema_for::<view::TaskKind>();
   let _ = generator.subschema_for::<view::TaskSpec>();
+  let _ = generator.subschema_for::<view::ServiceRenderView>();
+  let _ = generator.subschema_for::<view::ServiceExecResponse>();
   let _ = generator.subschema_for::<view::TaskStatus>();
   let _ = generator.subschema_for::<view::TaskRunView>();
   let _ = generator.subschema_for::<view::TaskView>();

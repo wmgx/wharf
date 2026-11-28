@@ -11,7 +11,7 @@ use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use axum::{
   Json,
-  extract::{Path, State},
+  extract::{Path, Query, State},
 };
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -24,8 +24,12 @@ use wharf_api_types::{
     ResticKeyInfo, ResticPreflight, ResticPreflightMode,
     ResticPreflightResult, ResticRepo, Snapshot, StoppedContainers,
   },
+  backup::{BackupRetention, BackupRunRequest, KEEP_TAG},
   plan::ApplyResponse,
-  view::{BackupRecord, BackupsView, Perm, RestoreRequest},
+  view::{
+    BackupRecord, BackupUnlockResult, BackupsView, Perm,
+    RestoreRequest,
+  },
 };
 
 use crate::{
@@ -43,6 +47,8 @@ use crate::{
 const LEGACY_KEY_SECRET: &str = "WHARF_BACKUP_KEY";
 const LEGACY_HTTP_SECRET: &str = "WHARF_BACKUP_HTTP";
 const LEGACY_HTTP_HASH_SECRET: &str = "WHARF_BACKUP_HTTP_HASH";
+pub(crate) mod browse;
+
 pub const SECRET_PREFIX: &str = "WHARF_BACKUP_";
 const KEY_PREFIX: &str = "WHARF_BACKUP_KEY_";
 pub const HTTP_PREFIX: &str = "WHARF_BACKUP_HTTP_";
@@ -254,6 +260,7 @@ async fn check_location(
   snap: &Snap,
   w: &Where,
   service: &str,
+  mode: crate::link::ProbeMode,
 ) -> Result<(), ApiError> {
   if !snap.world.servers.contains_key(&w.target) {
     return Err(crate::world::server_not_found(&w.target));
@@ -284,7 +291,7 @@ async fn check_location(
     &w.server,
     &w.target,
     "连接备份服务器",
-    crate::link::ProbeMode::Persist,
+    mode,
   )
   .await
 }
@@ -654,18 +661,139 @@ async fn preflight(
   Ok((result, conn))
 }
 
-pub async fn backup(
+pub(crate) fn old_backup_v2(server: &str) -> ApiError {
+  ApiError::new(ErrorCode::Conflict, format!("服务器 {server} 的 agent 版本旧，不支持备份浏览、差异预览、留底、排除与自定义保留策略"))
+    .with_hint("先运行 wharf upgrade 升级 agent 后重试")
+    .suggest("wharf upgrade")
+}
+
+fn prune_key(service: &str, target: &str) -> String {
+  format!("backup.retention_v2.{service}.{target}")
+}
+
+pub(crate) async fn guard_kept(
+  state: &AppState,
+  service: &str,
+) -> Result<(), ApiError> {
+  let key = format!("backup.has_kept.{service}");
+  state
+    .db
+    .call(move |c| db::set_setting(c, &key, Some("1")))
+    .await
+}
+
+pub(crate) async fn prune_action(
+  state: &AppState,
+  service: &str,
+  target: &str,
+  executor: &str,
+  retention: Option<BackupRetention>,
+  progress: &ProgressFn,
+) -> Result<Option<ResticAction>, ApiError> {
+  let transition = prune_key(service, target);
+  let kept = format!("backup.has_kept.{service}");
+  let supported = state.hub.supports_backup_v2(executor);
+  let cutoff = state
+    .db
+    .call(move |c| {
+      let cutoff = db::setting(c, &transition)?;
+      if !supported {
+        if retention.is_some()
+          || cutoff.is_some()
+          || db::setting(c, &kept)?.is_some()
+        {
+          return Err(old_backup_v2("备份执行机"));
+        }
+      } else if cutoff.is_none() {
+        db::set_setting(c, &transition, Some(&now_ms().to_string()))?;
+      }
+      Ok(cutoff)
+    })
+    .await?;
+  if !supported {
+    progress(
+      "备份机 agent 版本旧，建议升级以启用快照留底保护".into(),
+    );
+    return Ok(Some(ResticAction::Prune));
+  }
+  let Some(cutoff) = cutoff else {
+    progress("保留策略开始过渡，本次保留现有快照".into());
+    return Ok(None);
+  };
+  let protect_before = cutoff
+    .parse()
+    .ok()
+    .and_then(chrono::DateTime::from_timestamp_millis)
+    .ok_or_else(|| ApiError::internal("备份保留策略过渡时间无效"))?;
+  let BackupRetention {
+    daily,
+    weekly,
+    monthly,
+  } = retention.unwrap_or_default();
+  Ok(Some(ResticAction::PruneV2 {
+    daily,
+    weekly,
+    monthly,
+    keep_tag: Some(KEEP_TAG.into()),
+    protect_before: Some(protect_before),
+  }))
+}
+
+#[cfg(test)]
+async fn backup(
   state: &AppState,
   run_id: &str,
   service: &str,
   progress: ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
+  backup_with_options(
+    state,
+    run_id,
+    service,
+    &BackupRunRequest::default(),
+    progress,
+    cancel,
+  )
+  .await
+}
+
+pub async fn backup_with_options(
+  state: &AppState,
+  run_id: &str,
+  service: &str,
+  options: &BackupRunRequest,
+  progress: ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
   let snap = snapshot::load(&state.db).await?;
   let w = location(&snap, service, service_target(&snap, service)?);
+  let policy =
+    snap.world.services[service].spec.backup.as_ref().unwrap();
+  options.validate()?;
+  if (!policy.exclude.is_empty() || options.needs_backup_v2())
+    && !state.hub.supports_backup_v2(&w.server)
+  {
+    return Err(old_backup_v2(&w.server));
+  }
+  if (policy.retention.is_some() || options.keep)
+    && !state.hub.supports_backup_v2(&w.target)
+  {
+    return Err(old_backup_v2(&w.target));
+  }
+  if options.keep {
+    guard_kept(state, service).await?;
+  }
   let mut started = Ok(());
   let result: Result<_, ApiError> = async {
-    check_location(state, &snap, &w, service).await?;
+    check_location(
+      state,
+      &snap,
+      &w,
+      service,
+      crate::link::ProbeMode::Persist,
+    )
+    .await?;
     let creds = ensure_service_creds(state, service).await?;
     ensure_server(state, &snap, &w, None, &progress, cancel).await?;
     ensure_repo_has_service_key(
@@ -704,6 +832,9 @@ pub async fn backup(
         &creds.key,
         ResticAction::Backup {
           host: w.server.clone(),
+          excludes: policy.exclude.clone(),
+          keep: options.keep,
+          note: options.note.clone(),
         },
       ),
       RESTIC_TIMEOUT,
@@ -741,14 +872,29 @@ pub async fn backup(
       return combine_restart(Err(err), started, service, &progress);
     }
   };
-  let pruned = local_call::<serde_json::Value>(
-    state,
-    &snap,
-    (&w.target, service),
-    &creds.key,
-    ResticAction::Prune,
-    cancel,
-  )
+  let pruned = async {
+    if let Some(action) = prune_action(
+      state,
+      service,
+      &w.target,
+      &w.target,
+      policy.retention,
+      &progress,
+    )
+    .await?
+    {
+      local_call::<serde_json::Value>(
+        state,
+        &snap,
+        (&w.target, service),
+        &creds.key,
+        action,
+        cancel,
+      )
+      .await?;
+    }
+    Ok::<_, ApiError>(())
+  }
   .await;
   if let Err(e) = pruned {
     progress(format!("提醒：清理旧快照失败：{e}"));
@@ -806,7 +952,14 @@ pub async fn restore(
   let snap = snapshot::load(&state.db).await?;
   let target = restore_target(state, &snap, service, target).await?;
   let w = location(&snap, service, target);
-  check_location(state, &snap, &w, service).await?;
+  check_location(
+    state,
+    &snap,
+    &w,
+    service,
+    crate::link::ProbeMode::Persist,
+  )
+  .await?;
   let creds = ensure_service_creds(state, service).await?;
   ensure_server(state, &snap, &w, Some(service), &progress, cancel)
     .await?;
@@ -862,6 +1015,70 @@ pub async fn restore(
   combine_restart(restored.map(|_| ()), started, service, &progress)
 }
 
+const SPIKE_WINDOW: usize = 7;
+const MIB: u64 = 1024 * 1024;
+
+pub(crate) fn evaluate_backup_spike(
+  added: u64,
+  history: &[u64],
+) -> Option<(f64, String)> {
+  if history.len() < 3 {
+    return None;
+  }
+  let avg = (history.iter().map(|&n| n as f64).sum::<f64>()
+    / history.len() as f64)
+    .max(MIB as f64);
+  let ratio = if added > 100 * MIB {
+    added as f64 / avg
+  } else {
+    0.0
+  };
+  Some((
+    ratio,
+    format!(
+      "本次新增 {:.1} MiB，近 {} 次均值 {:.1} MiB（{:.1} 倍）",
+      added as f64 / MIB as f64,
+      history.len(),
+      avg / MIB as f64,
+      added as f64 / avg
+    ),
+  ))
+}
+
+pub(crate) fn spike_issues(
+  world: &crate::world::World,
+) -> Vec<wharf_api_types::view::Issue> {
+  use wharf_api_types::view::{Issue, IssueLevel, IssueSubject};
+  crate::rules::firing_subjects("backup_spike")
+    .into_iter()
+    .filter(|(name, _)| {
+      name == crate::core_backup::REPO
+        || world
+          .services
+          .get(name)
+          .is_some_and(|r| r.spec.backup.is_some())
+    })
+    .map(|(name, title)| {
+      let (alert, ack) =
+        crate::rules::issue_alert("backup_spike", &name);
+      Issue {
+        code: "backup_spike".into(),
+        level: IssueLevel::Warn,
+        subject: (name != crate::core_backup::REPO).then_some(
+          IssueSubject {
+            kind: "service".into(),
+            name,
+          },
+        ),
+        title,
+        hint: None,
+        alert,
+        ack,
+      }
+    })
+    .collect()
+}
+
 pub(crate) async fn record(
   state: &AppState,
   run_id: &str,
@@ -912,19 +1129,40 @@ pub(crate) async fn record(
     w.target.clone(),
     run_id.to_string(),
   );
-  state
+  let spike = state
     .db
     .call(move |c| {
       let (service, server, target, run_id) = values;
+      let spike = if ok {
+        let mut stmt = c.prepare(
+          "SELECT body FROM backups WHERE service = ?1 AND target = ?2 AND ok = 1 ORDER BY id DESC LIMIT ?3"
+        ).map_err(sql_err)?;
+        let history = stmt.query_map(params![service, target, SPIKE_WINDOW], |r| r.get::<_, String>(0))
+          .map_err(sql_err)?.collect::<Result<Vec<_>, _>>().map_err(sql_err)?;
+        let history: Vec<_> = history.iter().filter_map(|row| serde_json::from_str::<BackupSummary>(row).ok().map(|s| s.added_bytes)).collect();
+        let summary: BackupSummary = serde_json::from_str(&body).map_err(json_err)?;
+        evaluate_backup_spike(summary.added_bytes, &history)
+      } else { None };
       c.execute(
         "INSERT INTO backups (service, server, target, run_id, ok, body, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![service, server, target, run_id, ok, body, now_ms()],
       )
       .map_err(sql_err)?;
-      Ok(())
+      Ok(spike)
     })
-    .await
+    .await?;
+  if let Some((ratio, detail)) = spike {
+    crate::rules::observe(
+      state,
+      "backup.spike_ratio",
+      service,
+      ratio,
+      &detail,
+    )
+    .await;
+  }
+  Ok(())
 }
 
 pub async fn records(
@@ -985,14 +1223,23 @@ pub async fn records(
 
 // ---- 接口 ----
 
+#[derive(Default, Deserialize)]
+pub struct ListQuery {
+  #[serde(default)]
+  pub from: Option<String>,
+}
+
 pub async fn list(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
+  Query(query): Query<ListQuery>,
 ) -> ApiResult<BackupsView> {
   auth.require(Perm::Read)?;
+  crate::token_scope::require_service(&auth, &name)?;
   let snap = snapshot::load(&s.db).await?;
-  let repo_target = resolve_target(&s, &snap, &name, None).await?;
+  let repo_target =
+    resolve_target(&s, &snap, &name, query.from.as_deref()).await?;
   let target = snap.world.services[&name]
     .spec
     .backup
@@ -1041,7 +1288,10 @@ pub async fn list(
       }
     }
   }
+  let policy = snap.world.services[&name].spec.backup.as_ref();
   Ok(Json(BackupsView {
+    exclude: policy.map(|p| p.exclude.clone()).unwrap_or_default(),
+    retention: policy.and_then(|p| p.retention),
     service: name,
     target,
     snapshot_target: repo_target,
@@ -1064,6 +1314,26 @@ async fn repository_secrets(
     .await
 }
 
+fn restic_call_timeout(action: &ResticAction) -> Duration {
+  use wharf_api_types::backup::{
+    RESTIC_DUMP_TIMEOUT, RESTIC_INDEX_TIMEOUT,
+  };
+  let browse_budget = match action {
+    ResticAction::ExtractPrepare { .. } => {
+      RESTIC_INDEX_TIMEOUT + RESTIC_DUMP_TIMEOUT
+    }
+    ResticAction::DiffSnapshots { .. } => RESTIC_INDEX_TIMEOUT * 3,
+    ResticAction::Ls { .. } | ResticAction::DiffLocal { .. } => {
+      RESTIC_INDEX_TIMEOUT
+    }
+    ResticAction::Prune | ResticAction::PruneV2 { .. } => {
+      return RESTIC_TIMEOUT;
+    }
+    _ => return LIST_TIMEOUT,
+  };
+  browse_budget + Duration::from_secs(15)
+}
+
 async fn local_call<T: serde::de::DeserializeOwned>(
   state: &AppState,
   snap: &Snap,
@@ -1072,11 +1342,7 @@ async fn local_call<T: serde::de::DeserializeOwned>(
   action: ResticAction,
   cancel: &CancellationToken,
 ) -> Result<T, ApiError> {
-  let timeout = if matches!(action, ResticAction::Prune) {
-    RESTIC_TIMEOUT
-  } else {
-    LIST_TIMEOUT
-  };
+  let timeout = restic_call_timeout(&action);
   state
     .hub
     .call(
@@ -1420,6 +1686,8 @@ fn current_key(keys: &[ResticKeyInfo]) -> Result<&str, ApiError> {
 #[derive(Deserialize, Default)]
 pub struct UnlockRequest {
   #[serde(default)]
+  pub target: Option<String>,
+  #[serde(default)]
   pub stale_only: bool,
 }
 
@@ -1428,21 +1696,24 @@ pub async fn unlock(
   auth: Auth,
   Path(service): Path<String>,
   body: Option<Json<UnlockRequest>>,
-) -> ApiResult<()> {
+) -> ApiResult<BackupUnlockResult> {
+  let req = body.map(|Json(req)| req).unwrap_or_default();
   auth.require(Perm::Apply)?;
   crate::token_scope::require_service(&auth, &service)?;
-  let _guard = s.locks.acquire(
+  let guard = s.locks.acquire(
     crate::locks::LockSpec::Backup(service.clone()),
     "解锁备份仓库",
   )?;
   let snap = snapshot::load(&s.db).await?;
-  let target = resolve_target(&s, &snap, &service, None)
-    .await?
-    .ok_or_else(|| missing_target(&service))?;
+  let target =
+    resolve_target(&s, &snap, &service, req.target.as_deref())
+      .await?
+      .ok_or_else(|| missing_target(&service))?;
+  guard.reserve_backup_target(target.clone())?;
   require_safe_backup(&s, &target)?;
   let (key, legacy) = repository_secrets(&s, &service).await?;
   let action = ResticAction::Unlock {
-    remove_all: !body.is_some_and(|b| b.stale_only),
+    remove_all: !req.stale_only,
   };
   let cancel = CancellationToken::new();
   let _cancel = cancel.clone().drop_guard();
@@ -1474,21 +1745,31 @@ pub async fn unlock(
   } else {
     result?;
   }
-  Ok(Json(()))
+  Ok(Json(BackupUnlockResult {
+    target,
+    stale_only: req.stale_only,
+    unlocked: true,
+  }))
 }
 
 pub async fn run_now(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
+  body: Option<Json<BackupRunRequest>>,
 ) -> ApiResult<ApplyResponse> {
   auth.require(Perm::Apply)?;
+  let options = body.map(|Json(body)| body).unwrap_or_default();
+  options.validate()?;
   crate::token_scope::require_service(&auth, &name)?;
   Ok(Json(
     apply::start_task_by(
       s.clone(),
       format!("备份 {name}"),
-      Step::Backup { service: name },
+      Step::Backup {
+        service: name,
+        options,
+      },
       Some(crate::apply::format_actor(&auth)),
     )
     .await?,

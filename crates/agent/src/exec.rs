@@ -7,7 +7,10 @@
 use std::{path::Path, process::Stdio, sync::Arc, time::Duration};
 
 use tokio::{
-  io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader},
+  io::{
+    AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt,
+    BufReader,
+  },
   process::Command,
 };
 use tokio_util::sync::CancellationToken;
@@ -87,6 +90,7 @@ pub struct Cmd {
   program: String,
   args: Vec<String>,
   cwd: Option<std::path::PathBuf>,
+  input: Option<Vec<u8>>,
   env: Vec<(String, String)>,
   timeout: Duration,
   stall: Option<(Duration, ProgressMatcher)>,
@@ -101,6 +105,7 @@ impl Cmd {
       program: program.to_string(),
       args: Vec::new(),
       cwd: None,
+      input: None,
       env: Vec::new(),
       timeout: Duration::from_secs(60),
       stall: None,
@@ -145,6 +150,11 @@ impl Cmd {
     self
       .env
       .extend(vars.into_iter().map(|(k, v)| (k.to_string(), v)));
+    self
+  }
+
+  pub fn input(mut self, input: Vec<u8>) -> Self {
+    self.input = Some(input);
     self
   }
 
@@ -255,18 +265,75 @@ impl Cmd {
     result.map(|()| bytes)
   }
 
+  pub(crate) async fn stdout_to(
+    self,
+    ctx: &Ctx,
+    limit: u64,
+    dest: &mut (impl tokio::io::AsyncWrite + Unpin),
+  ) -> Result<(Option<i32>, String), ApiError> {
+    let what = self.describe();
+    if ctx.cancel.is_cancelled() {
+      return Err(cancelled(&what));
+    }
+    let mut child = self
+      .command()
+      .spawn()
+      .map_err(|_| ApiError::internal("无法启动读取操作"))?;
+    let pid = child.id();
+    let stderr = child.stderr.take();
+    let mut stdout =
+      child.stdout.take().expect("已接管 stdout").take(limit + 1);
+    let read = async {
+      let bytes = tokio::io::copy(&mut stdout, dest)
+        .await
+        .map_err(|_| ApiError::internal("写入临时输出失败"))?;
+      if bytes > limit {
+        return Err(ApiError::invalid("备份文件或索引超过读取上限"));
+      }
+      child
+        .wait()
+        .await
+        .map(|status| status.code())
+        .map_err(|_| ApiError::internal("读取命令未完成"))
+    };
+    let streams = async {
+      tokio::try_join!(read, async {
+        Ok::<_, ApiError>(capture(stderr, None).await)
+      })
+    };
+    let result = tokio::select! {
+      result = streams => result,
+      _ = tokio::time::sleep(self.timeout) => Err(ApiError::new(ErrorCode::Timeout, "读取备份超时")),
+      _ = ctx.cancel.cancelled() => Err(cancelled(&what)),
+    };
+    if result.is_err() {
+      kill_group(pid, &mut child).await;
+    }
+    result
+  }
+
   pub async fn run(mut self, ctx: &Ctx) -> Result<Output, ApiError> {
     let what = self.describe();
     if ctx.cancel.is_cancelled() {
       return Err(cancelled(&what));
     }
     let mut command = self.command();
+    if self.input.is_some() {
+      command.stdin(Stdio::piped());
+    }
     let mut child = command.spawn().map_err(|e| {
       ApiError::new(
         ErrorCode::AgentFailed,
         format!("无法执行 {}：{e}", self.program),
       )
     })?;
+    if let Some((mut stdin, input)) =
+      child.stdin.take().zip(self.input.take())
+    {
+      tokio::spawn(async move {
+        let _ = stdin.write_all(&input).await;
+      });
+    }
     let pid = child.id();
     let progress = if self.stream {
       ctx.progress.clone()
@@ -430,7 +497,7 @@ async fn bounded_lines(
 }
 
 /// 先 SIGTERM 整个进程组，5 秒后还在就 SIGKILL。
-async fn kill_group(
+pub(crate) async fn kill_group(
   pid: Option<u32>,
   child: &mut tokio::process::Child,
 ) {

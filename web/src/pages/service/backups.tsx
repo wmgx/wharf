@@ -77,8 +77,11 @@ export function Backups({ svc }: { svc: ServiceView }) {
             <>
               <p>
                 每天把 <code className="font-mono text-xs">/srv/{name}/</code> 备份到 <ServerTag name={target} />
-                ，备份时会先停服务、备份完再启动。保留最近 7 天、4 周、6 个月各一份。
+                ，备份时会先停服务、备份完再启动。
               </p>
+              <p>保留 {data?.retention?.daily ?? 7} 日 / {data?.retention?.weekly ?? 4} 周 / {data?.retention?.monthly ?? 6} 月
+              </p>
+              {!!data?.exclude?.length && <p>排除 {data.exclude.join("、")}</p>}
               {last && (
                 <p className="text-muted-foreground">
                   上次备份 {ago(last.created_at)}：
@@ -120,7 +123,11 @@ export function Backups({ svc }: { svc: ServiceView }) {
             <TableBody>
               {data.snapshots.map((s, i) => (
                 <TableRow key={s.id}>
-                  <TableCell className="pl-4 font-mono text-xs">{s.short_id}</TableCell>
+                  <TableCell className="pl-4 font-mono text-xs">
+                    {s.short_id}
+                    {s.keep && <Badge variant="secondary" className="ml-2">留底</Badge>}
+                    {s.note && <div className="break-all text-muted-foreground">{s.note}</div>}
+                  </TableCell>
                   <TableCell>
                     <Tip text={new Date(s.time).toLocaleString("zh-CN")}><span>{ago(s.time)}</span></Tip>
                     {i === 0 && (

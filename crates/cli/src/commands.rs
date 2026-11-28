@@ -1,11 +1,15 @@
 //! 各子命令的实现。
 
-use std::{collections::BTreeMap, io::Write, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 
 use serde_json::{Value, json};
 use wharf_api_types::{
   ApiError, ErrorCode,
   agent::UpgradeResult,
+  backup::{
+    BackupDiffView, BackupKeepResult, BackupLsView, BackupPolicy,
+    BackupRetention, BackupRunRequest, validate_backup_excludes,
+  },
   plan::{
     ApplyRequest, ApplyResponse, Plan, PlanRequest, Run, RunStatus,
   },
@@ -16,12 +20,13 @@ use wharf_api_types::{
     UpdateIgnoreScope, UpdateIgnoreSpec, VolumeSpec, image_repo,
   },
   view::{
-    AccountView, AppAccountView, AutoUpdateResult, BackupsView,
-    CheckStatus, DataView, DeploymentView, DoctorReport, GatewayView,
-    HostExecResponse, ImportPreview, ImportRequest, JoinInfo,
-    NetworkView, RestoreRequest, RollbackTarget, RouteView,
-    ScriptRuntime, SecretView, ServerView, ServiceView, ShellLog,
-    SsoStepResult, SsoTestResult, Status, Unmanaged,
+    AccountView, AppAccountView, AutoUpdateResult,
+    BackupUnlockResult, BackupsView, CheckStatus, DataView,
+    DeploymentView, DoctorReport, GatewayView, ImportPreview,
+    ImportRequest, JoinInfo, NetworkView, RestoreRequest,
+    RollbackTarget, RouteView, ScriptRuntime, SecretView, ServerView,
+    ServiceView, ShellLog, SsoStepResult, SsoTestResult, Status,
+    Unmanaged,
   },
 };
 
@@ -34,6 +39,7 @@ use crate::{
 };
 
 pub(crate) mod entry_protection;
+mod list_edits;
 
 pub async fn run(cli: Cli) -> CliResult<()> {
   let j = cli.json;
@@ -98,13 +104,16 @@ pub async fn run(cli: Cli) -> CliResult<()> {
       }
       Ok(())
     }
-    Command::Deploy { dir, name, port, build, detect_only: true, .. } => {
+    Command::Deploy { dir, name, port, add_port, build, detect_only: true, .. } => {
       let name = match name { Some(name) => name, None => dir_name(&dir)? };
-      let port = port.first().map(|p| parse_port(p)).transpose()?.and_then(|p| p.container);
+      let port = port.first().or_else(|| add_port.first()).map(|p| parse_port(p)).transpose()?.and_then(|p| p.container);
       crate::deploy::detect_only(&dir, &name, &build, port, j)
     }
     Command::Token(cmd) => {
       crate::token::run(cmd, cli.url, cli.token, j).await
+    }
+    Command::Service(ServiceCmd::Logs { names, container: Some(_), .. }) if names.len() > 1 => {
+      Err(ApiError::invalid("--container 只能用于单个服务").into())
     }
     Command::Service(ServiceCmd::Logs { follow: true, .. }) if j => {
       Err(ApiError::invalid("--json 需要一次性输出，跟随日志请去掉 --json 或 --follow").into())
@@ -350,7 +359,10 @@ async fn dispatch(
       name,
       server,
       port,
+      add_port,
+      rm_port,
       env,
+      unset_env,
       build,
       ops,
       apply,
@@ -369,9 +381,12 @@ async fn dispatch(
         compose_url: None,
         server,
         port,
+        add_port,
+        rm_port,
+        clear_ports: false,
         env,
-        unset_env: vec![],
-        unset_port: vec![],
+        unset_env,
+        clear_env: false,
         unset_start_timeout: false,
         start_timeout: None,
         health_path: None,
@@ -522,10 +537,20 @@ async fn dispatch(
     }
     Command::Exec {
       server,
-      timeout,
-      cwd,
+      args,
       command,
-    } => host_exec(c, server, timeout, cwd, command, j).await,
+    } => {
+      crate::exec_command::run(
+        c,
+        &server,
+        false,
+        None,
+        args,
+        command.into_iter().collect(),
+        j,
+      )
+      .await
+    }
     Command::Audit { actor, kind, limit } => {
       crate::audit::audit(c, actor, kind, limit, j).await
     }
@@ -537,6 +562,20 @@ async fn dispatch(
     }
     Command::SelfUpdate => crate::selfcmd::self_update(c, j).await,
     Command::Whoami => crate::selfcmd::whoami(c, j).await,
+    Command::Core(crate::CoreCmd::Resume) => {
+      let v: wharf_api_types::view::CoreSafeModeView =
+        c.post("/api/core/resume", &json!({})).await?;
+      out(j, &v, |v| {
+        println!(
+          "安全接管模式：{}",
+          if v.safe_mode { "开启" } else { "关闭" }
+        );
+        if let Some(hint) = &v.hint {
+          println!("{hint}");
+        }
+      });
+      Ok(())
+    }
     Command::Core(crate::CoreCmd::Snapshot(cmd)) => {
       core_snapshot(c, cmd, j).await
     }
@@ -1297,82 +1336,6 @@ pub(crate) async fn changes(
   .await
 }
 
-async fn host_exec(
-  c: &Client,
-  server: String,
-  timeout: Option<u64>,
-  cwd: Option<String>,
-  command: String,
-  j: bool,
-) -> CliResult<()> {
-  let timeout = timeout.unwrap_or(30);
-  let body = json!({
-    "command": command,
-    "timeout_secs": timeout,
-    "cwd": cwd,
-  });
-  enum Wait {
-    Done(CliResult<HostExecResponse>),
-    Interrupted,
-  }
-  let path = format!("/api/servers/{}/exec", seg(&server));
-  let wait = {
-    let request = c.post_timeout(
-      &path,
-      &body,
-      Duration::from_secs(timeout.saturating_add(45)),
-    );
-    tokio::pin!(request);
-    tokio::select! {
-      result = &mut request => Wait::Done(result),
-      _ = tokio::signal::ctrl_c() => Wait::Interrupted,
-    }
-  };
-  let result = match wait {
-    Wait::Done(result) => result?,
-    Wait::Interrupted => {
-      if !j {
-        eprintln!(
-          "\n正在取消，等待远端清理。再按一次 Ctrl-C 立即退出"
-        );
-      }
-      // 关闭 HTTP 请求会触发控制面取消；agent 的独立清理预算是 10 秒。
-      tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
-        _ = tokio::signal::ctrl_c() => {}
-      }
-      if j {
-        print::json(
-          &json!({"error": ApiError::new(ErrorCode::Cancelled, "已中止等待宿主机命令")}),
-        );
-      }
-      return Err(CliError::Exit(130));
-    }
-  };
-  if j {
-    print::json(&result);
-  } else {
-    std::io::stdout()
-      .write_all(result.stdout.as_bytes())
-      .map_err(anyhow::Error::from)?;
-    std::io::stderr()
-      .write_all(result.stderr.as_bytes())
-      .map_err(anyhow::Error::from)?;
-    if result.truncated {
-      eprintln!("\n[输出已截断]");
-    }
-  }
-  if result.exit_code == 0 {
-    Ok(())
-  } else {
-    Err(CliError::Exit(if j && result.exit_code == 2 {
-      1
-    } else {
-      result.exit_code
-    }))
-  }
-}
-
 async fn shell_log(
   c: &Client,
   server: Option<String>,
@@ -1426,11 +1389,20 @@ async fn shell_log(
 }
 
 fn command_summary(command: &str) -> String {
-  command
+  let mut lines = command.lines();
+  let first: String = lines
+    .next()
+    .unwrap_or_default()
     .chars()
     .flat_map(char::escape_default)
     .take(100)
-    .collect()
+    .collect();
+  let count = 1 + lines.count();
+  if count > 1 {
+    format!("{first}（共 {count} 行）")
+  } else {
+    first
+  }
 }
 
 // SERVERS
@@ -1647,14 +1619,17 @@ async fn server(
       region,
       public_ip,
       mirror,
+      rm_mirror,
       clear_mirrors,
       mirrors_only,
       private_ip,
       network,
       mode,
       lan_ip,
+      rm_lan_ip,
       clear_lan_ips,
       build_env,
+      rm_build_env,
       clear_build_env,
       git_proxy,
       pull_proxy,
@@ -1685,10 +1660,13 @@ async fn server(
         c.get(&format!("/api/servers/{}", seg(&name))).await?;
       let mut settings: ServerSettings = current.settings;
       if !(!mirror.is_empty()
+        || !rm_mirror.is_empty()
         || clear_mirrors
         || !lan_ip.is_empty()
+        || !rm_lan_ip.is_empty()
         || clear_lan_ips
         || !build_env.is_empty()
+        || !rm_build_env.is_empty()
         || clear_build_env
         || region.is_some()
         || public_ip.is_some()
@@ -1776,6 +1754,13 @@ async fn server(
       if clear_mirrors {
         settings.registry_mirrors.clear();
       }
+      for key in rm_mirror {
+        if settings.registry_mirrors.remove(key.trim()).is_none() {
+          return Err(
+            ApiError::invalid(format!("镜像源 {key} 不存在")).into(),
+          );
+        }
+      }
       for m in mirror {
         let (registry, list) =
           m.split_once('=').ok_or_else(|| {
@@ -1802,6 +1787,14 @@ async fn server(
       }
       if clear_lan_ips {
         settings.lan_addrs.clear();
+      }
+      for ip in rm_lan_ip {
+        list_edits::remove_named(
+          &mut settings.lan_addrs,
+          ip.trim(),
+          "局域网地址",
+          String::as_str,
+        )?;
       }
       for ip in lan_ip {
         let ip = ip.trim().to_string();
@@ -1865,6 +1858,14 @@ async fn server(
         }
         settings.github_mirror =
           (!m.is_empty()).then(|| m.to_string());
+      }
+      for key in rm_build_env {
+        if settings.build_env.remove(key.trim()).is_none() {
+          return Err(
+            ApiError::invalid(format!("构建参数 {key} 不存在"))
+              .into(),
+          );
+        }
       }
       for e in &build_env {
         let (k, v) = parse_kv(e, "--build-env")?;
@@ -2508,18 +2509,6 @@ fn parse_kv(s: &str, what: &str) -> CliResult<(String, String)> {
     })
 }
 
-fn merge_ports(current: &mut Vec<PortSpec>, updates: Vec<PortSpec>) {
-  for port in updates {
-    if let Some(old) =
-      current.iter_mut().find(|old| old.name == port.name)
-    {
-      *old = port;
-    } else {
-      current.push(port);
-    }
-  }
-}
-
 fn parse_port(s: &str) -> CliResult<PortSpec> {
   let (name, value) = parse_kv(s, "--port")?;
   let bad = || {
@@ -2688,20 +2677,51 @@ async fn service(
       });
       Ok(())
     }
+    ServiceCmd::Exec {
+      name,
+      container,
+      args,
+      command,
+    } => {
+      crate::exec_command::run(
+        c, &name, true, container, args, command, j,
+      )
+      .await
+    }
+    ServiceCmd::Render { name } => {
+      let v: wharf_api_types::view::ServiceRenderView = c
+        .get(&format!("/api/services/{}/render", seg(&name)))
+        .await?;
+      out(j, &v, |v| {
+        for warning in &v.warnings {
+          eprintln!("提醒：{warning}");
+        }
+        print!("{}", v.compose);
+        if let Some(init) = &v.init_cmd {
+          println!("# init_cmd:");
+          for line in init.lines() {
+            println!("# {line}");
+          }
+        }
+      });
+      Ok(())
+    }
     ServiceCmd::Logs {
       names,
       tail,
+      container,
       follow: true,
       ..
     } => {
-      follow_logs(
-        c,
-        &format!(
-          "/api/services/{}/logs/stream?tail={tail}",
-          seg(&names[0])
-        ),
-      )
-      .await
+      let mut path = format!(
+        "/api/services/{}/logs/stream?tail={tail}",
+        seg(&names[0])
+      );
+      if let Some(container) = container {
+        c.require_exec_v2_core().await?;
+        path.push_str(&format!("&container={}", seg(&container)));
+      }
+      follow_logs(c, &path).await
     }
     ServiceCmd::Discover { server } => {
       let v: Vec<Unmanaged> = c
@@ -2940,6 +2960,7 @@ async fn service(
       names,
       tail,
       follow: false,
+      container,
       previous,
       previous_list,
       since,
@@ -2994,6 +3015,9 @@ async fn service(
         let mut path = format!("/api/services/{}/logs", seg(name));
         if let Some(index) = previous {
           path.push_str(&format!("?previous={index}"));
+        } else if let Some(container) = container {
+          c.require_exec_v2_core().await?;
+          path.push_str(&format!("?container={}", seg(&container)));
         }
         path
       } else {
@@ -3036,11 +3060,15 @@ async fn service(
       )
       .await
     }
-    ServiceCmd::Restart { name } => {
+    ServiceCmd::Restart { name, container } => {
+      if container.is_some() {
+        c.require_exec_v2_core().await?;
+      }
       let r: ApplyResponse = c
         .post(
           &format!("/api/services/{}/restart", seg(&name)),
-          &json!({}),
+          &container
+            .map_or_else(|| json!({}), |c| json!({"container": c})),
         )
         .await?;
       finish_task(c, &r.run_id, true, j).await
@@ -3084,13 +3112,16 @@ async fn service(
       compose_url,
       server,
       port,
+      add_port,
+      rm_port,
+      clear_ports,
       env,
       unset_env,
+      clear_env,
       start_timeout,
       health_path,
       volume,
       unset_volume,
-      unset_port,
       unset_start_timeout,
       build,
       ops,
@@ -3114,7 +3145,10 @@ async fn service(
           || container.is_some()
           || server.is_some()
           || !port.is_empty()
-          || !unset_port.is_empty()
+          || !add_port.is_empty()
+          || !rm_port.is_empty()
+          || clear_ports
+          || clear_env
           || !env.is_empty()
           || !unset_env.is_empty()
           || start_timeout.is_some()
@@ -3143,6 +3177,7 @@ async fn service(
       let existing = existing.map(|view| view.spec);
       let first_port = port
         .first()
+        .or_else(|| add_port.first())
         .map(|p| parse_port(p))
         .transpose()?
         .and_then(|p| p.container)
@@ -3308,17 +3343,21 @@ async fn service(
       if let Some(container) = container {
         spec.container = Some(container);
       }
-      if !port.is_empty() {
-        let ports = port
-          .iter()
-          .map(|p| parse_port(p))
-          .collect::<CliResult<Vec<_>>>()?;
-        if is_new || from_run.is_some() {
-          spec.ports = ports;
-        } else {
-          merge_ports(&mut spec.ports, ports);
-        }
-      } else if (is_new && default_port.is_some() || was_compose)
+      list_edits::apply_port_edits(
+        &mut spec.ports,
+        &port,
+        &add_port,
+        &rm_port,
+        clear_ports,
+      )?;
+      if clear_ports || !port.is_empty() || !rm_port.is_empty() {
+        spec.port_checks.retain(|name, _| {
+          spec.ports.iter().any(|port| &port.name == name)
+        });
+      }
+      if !clear_ports
+        && rm_port.is_empty()
+        && (is_new && default_port.is_some() || was_compose)
         && !matches!(spec.source, Source::Compose { .. })
         && spec.ports.is_empty()
         && from_run.is_none()
@@ -3332,16 +3371,15 @@ async fn service(
           udp: p.udp,
         }];
       }
-      for name in unset_port {
-        spec.ports.retain(|port| port.name != name);
-        spec.port_checks.remove(&name);
+      if clear_env {
+        spec.env.clear();
+      }
+      for k in &unset_env {
+        spec.env.remove(k);
       }
       for e in &env {
         let (k, v) = parse_kv(e, "--env")?;
         spec.env.insert(k, v);
-      }
-      for k in &unset_env {
-        spec.env.remove(k);
       }
       for name in unset_volume {
         let index = spec
@@ -4488,6 +4526,8 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       no_auth,
       paths,
       no_paths,
+      add_path,
+      rm_path,
       tunnel,
       no_tunnel,
       internal,
@@ -4519,6 +4559,8 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
           || auth
           || no_auth
           || !paths.is_empty()
+          || !add_path.is_empty()
+          || !rm_path.is_empty()
           || no_paths
           || tunnel
           || no_tunnel
@@ -4566,6 +4608,11 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         internal: flag(internal, no_internal),
       };
       let mut spec = route_add_spec(old, args)?;
+      list_edits::apply_path_edits(
+        &mut spec.paths,
+        &add_path,
+        &rm_path,
+      )?;
       if unset_port {
         spec.port = None;
       }
@@ -4576,6 +4623,10 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       name,
       mode,
       skip,
+      add_skip,
+      rm_skip,
+      add_redirect,
+      rm_redirect,
       trust_internal,
       no_trust_internal,
       header,
@@ -4598,9 +4649,32 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
           ApiError::not_found(format!("域名 {name} 不存在"))
         })?;
       let mut spec = route.spec;
+      let has_list_edits =
+        [&add_skip, &rm_skip, &add_redirect, &rm_redirect]
+          .iter()
+          .any(|values| !values.is_empty());
       let Some(mode) =
         mode.or_else(|| off.then(|| "off".to_string()))
       else {
+        if has_list_edits {
+          let sso = spec.sso.as_mut().ok_or_else(|| {
+            ApiError::invalid("请先用 --mode 设置门禁方式")
+          })?;
+          list_edits::apply_sso_list_edits(
+            sso,
+            &add_skip,
+            &rm_skip,
+            &add_redirect,
+            &rm_redirect,
+          )?;
+          return changes(
+            c,
+            vec![Change::UpsertRoute { spec }],
+            apply,
+            j,
+          )
+          .await;
+        }
         apply.check_read_only()?;
         if !j
           && let Some(sso) = &spec.sso
@@ -4718,12 +4792,9 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         return Ok(());
       };
       if mode == "off" {
-        if file.is_some() || !redirect.is_empty() {
+        if file.is_some() || !redirect.is_empty() || has_list_edits {
           return Err(
-            ApiError::invalid(
-              "关闭门禁时不能指定 --file 或 --redirect",
-            )
-            .into(),
+            ApiError::invalid("关闭门禁时不能增删门禁设置").into(),
           );
         }
         spec.sso = None;
@@ -4786,7 +4857,7 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
           None
         },
         oidc: if mode == "oidc" {
-          if redirect.is_empty() {
+          if redirect.is_empty() && add_redirect.is_empty() {
             return Err(
                 ApiError::invalid("oidc 方式至少要一个 --redirect")
                   .with_hint("回调路径看应用的 OIDC 文档，例如 Grafana 是 /login/generic_oauth")
@@ -4821,6 +4892,15 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         skip_paths: skip,
         public,
       });
+      if let Some(sso) = spec.sso.as_mut() {
+        list_edits::apply_sso_list_edits(
+          sso,
+          &add_skip,
+          &rm_skip,
+          &add_redirect,
+          &rm_redirect,
+        )?;
+      }
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }
     RouteCmd::Guard {
@@ -5631,24 +5711,40 @@ fn print_secret(secret: &SecretView) {
   }
 }
 
+fn backup_url(
+  service: &str,
+  suffix: &str,
+  pairs: &[(&str, Option<&str>)],
+) -> String {
+  let base = format!("/api/services/{}/backups", seg(service));
+  let base = format!("{base}{suffix}");
+  let query = pairs
+    .iter()
+    .filter_map(|(k, v)| v.map(|v| format!("{k}={}", seg(v))))
+    .collect::<Vec<_>>()
+    .join("&");
+  if query.is_empty() {
+    base
+  } else {
+    format!("{base}?{query}")
+  }
+}
+
 async fn backup(
   c: &Client,
   cmd: BackupCmd,
   j: bool,
 ) -> CliResult<()> {
-  let set_backup = |name: String, backup: Option<BackupSpec>| async move {
-    let mut spec = c
-      .get::<ServiceView>(&format!("/api/services/{}", seg(&name)))
-      .await?
-      .spec;
-    spec.backup = backup;
-    Ok::<_, CliError>(Change::UpsertService {
-      pins: None,
-      commit: None,
-      name,
-      spec,
-      adopt: None,
-    })
+  let get_service = |name: &str| {
+    let url = format!("/api/services/{}", seg(name));
+    async move { c.get::<ServiceView>(&url).await }
+  };
+  let change = |name, spec| Change::UpsertService {
+    pins: None,
+    commit: None,
+    name,
+    spec,
+    adopt: None,
   };
   let repo_timeout = Duration::from_secs(30 * 60);
   match cmd {
@@ -5701,49 +5797,266 @@ async fn backup(
       });
       Ok(())
     }
-    BackupCmd::Enable { service, to, apply } => {
-      let change =
-        set_backup(service, Some(BackupSpec { to })).await?;
-      changes(c, vec![change], apply, j).await
+    BackupCmd::Enable {
+      service,
+      to,
+      exclude,
+      retention,
+      apply,
+    } => {
+      let mut spec = get_service(&service).await?.spec;
+      let mut policy = spec.backup.take().unwrap_or(BackupSpec {
+        to: to.clone(),
+        exclude: vec![],
+        retention: None,
+      });
+      policy.to = to;
+      policy.exclude.extend(exclude);
+      policy.exclude = validate_backup_excludes(&policy.exclude)?;
+      policy.retention = retention.merge(policy.retention)?;
+      spec.backup = Some(policy);
+      changes(c, vec![change(service, spec)], apply, j).await
+    }
+    BackupCmd::Set {
+      service,
+      to,
+      exclude,
+      unset_exclude,
+      clear_exclude,
+      retention,
+      apply,
+    } => {
+      let mut spec = get_service(&service).await?.spec;
+      let edited = to.is_some()
+        || !exclude.is_empty()
+        || !unset_exclude.is_empty()
+        || clear_exclude
+        || retention.edited();
+      if !edited {
+        if apply.apply
+          || apply.note.is_some()
+          || !apply.confirm.is_empty()
+          || apply.dns_verify.mode().is_some()
+        {
+          return Err(
+            ApiError::invalid("没有指定要修改的备份配置项")
+              .with_hint("不带 --apply 可只读查看当前配置")
+              .into(),
+          );
+        }
+        let policy = spec.backup.as_ref();
+        let result = BackupPolicy {
+          service,
+          enabled: policy.is_some(),
+          to: policy.map(|p| p.to.clone()),
+          exclude: policy
+            .map(|p| p.exclude.clone())
+            .unwrap_or_default(),
+          retention: policy.and_then(|p| p.retention),
+          effective_retention: policy
+            .and_then(|p| p.retention)
+            .unwrap_or_default(),
+        };
+        out(j, &result, |value| {
+          if let Some(to) = &value.to {
+            println!("{}：备份到 {to}", value.service);
+            print::backup_policy(
+              value.effective_retention,
+              &value.exclude,
+            );
+          } else {
+            println!("{}：没有开启备份", value.service);
+          }
+        });
+        return Ok(());
+      }
+      let mut policy = match (spec.backup.take(), to.as_ref()) {
+        (Some(policy), _) => policy,
+        (None, Some(to)) => BackupSpec {
+          to: to.clone(),
+          exclude: vec![],
+          retention: None,
+        },
+        (None, None) => return Err(
+          ApiError::invalid("服务尚未开启备份")
+            .with_hint(format!(
+              "开启请运行 wharf backup enable {service} --to <server>"
+            ))
+            .into(),
+        ),
+      };
+      if let Some(to) = to {
+        policy.to = to;
+      }
+      let removed = validate_backup_excludes(&unset_exclude)?;
+      policy
+        .exclude
+        .retain(|r| !clear_exclude && !removed.contains(r));
+      policy.exclude.extend(exclude);
+      policy.exclude = validate_backup_excludes(&policy.exclude)?;
+      policy.retention = retention.merge(policy.retention)?;
+      spec.backup = Some(policy);
+      changes(c, vec![change(service, spec)], apply, j).await
     }
     BackupCmd::Disable { service, apply } => {
-      let change = set_backup(service, None).await?;
-      changes(c, vec![change], apply, j).await
+      let mut spec = get_service(&service).await?.spec;
+      spec.backup = None;
+      changes(c, vec![change(service, spec)], apply, j).await
     }
-    BackupCmd::Run { service, no_wait } => {
-      let r: ApplyResponse = c
-        .post(
-          &format!("/api/services/{}/backups", seg(&service)),
-          &json!({}),
-        )
-        .await?;
+    BackupCmd::Run {
+      service,
+      no_wait,
+      keep,
+      note,
+    } => {
+      let options = BackupRunRequest { keep, note };
+      options.validate()?;
+      let r: ApplyResponse =
+        c.post(&backup_url(&service, "", &[]), &options).await?;
       finish_task(c, &r.run_id, !no_wait, j).await
+    }
+    BackupCmd::Ls {
+      service,
+      path,
+      lookup,
+      recursive,
+      limit,
+    } => {
+      let url = backup_url(
+        &service,
+        "/ls",
+        &[
+          ("path", Some(&path)),
+          ("snapshot", Some(&lookup.snapshot)),
+          ("from", lookup.from.as_deref()),
+          (
+            "recursive",
+            Some(if recursive { "true" } else { "false" }),
+          ),
+          ("limit", Some(&limit.to_string())),
+        ],
+      );
+      let v: BackupLsView =
+        c.get_timeout(&url, Duration::from_secs(7 * 60)).await?;
+      out(j, &v, print::backup_ls);
+      Ok(())
+    }
+    BackupCmd::Extract {
+      service,
+      path,
+      lookup,
+      output,
+      force,
+    } => {
+      let url = backup_url(
+        &service,
+        "/extract",
+        &[
+          ("path", Some(&path)),
+          ("snapshot", Some(&lookup.snapshot)),
+          ("from", lookup.from.as_deref()),
+        ],
+      );
+      crate::backup_extract::run(
+        c,
+        &url,
+        &service,
+        &path,
+        output.as_deref(),
+        force,
+        j,
+      )
+      .await
+    }
+    BackupCmd::Diff {
+      service,
+      lookup,
+      base,
+      limit,
+    } => {
+      let url = backup_url(
+        &service,
+        "/diff",
+        &[
+          ("snapshot", Some(&lookup.snapshot)),
+          ("from", lookup.from.as_deref()),
+          ("base", base.as_deref()),
+          ("limit", Some(&limit.to_string())),
+        ],
+      );
+      let v: BackupDiffView =
+        c.get_timeout(&url, Duration::from_secs(35 * 60)).await?;
+      out(j, &v, print::backup_diff);
+      Ok(())
+    }
+    BackupCmd::Keep {
+      service,
+      snapshot,
+      from,
+      off,
+      note,
+      unset_note,
+    } => {
+      let v: BackupKeepResult = c.post(&backup_url(&service, "/keep", &[]), &json!({
+        "snapshot": snapshot, "keep": !off, "note": note, "clear_note": unset_note, "target": from,
+      })).await?;
+      out(j, &v, |v| {
+        println!(
+          "{}：{}",
+          v.snapshot.short_id,
+          if v.snapshot.keep {
+            "已留底"
+          } else {
+            "已撤销留底"
+          }
+        )
+      });
+      Ok(())
     }
     BackupCmd::Unlock {
       service,
+      from,
       stale_only,
     } => {
-      let value: Value = c
+      let value: BackupUnlockResult = c
         .post(
           &format!("/api/services/{}/backups/unlock", seg(&service)),
-          &json!({ "stale_only": stale_only }),
+          &json!({ "target": from, "stale_only": stale_only }),
         )
         .await?;
-      out(j, &value, |_| println!("已解锁备份仓库"));
+      out(j, &value, |v| {
+        println!("已解锁 {} 上的备份仓库", v.target)
+      });
       Ok(())
+    }
+    BackupCmd::Core {
+      ref retention,
+      ref to,
+      run,
+      unlock,
+      ..
+    } if retention.edited() && (to.is_some() || run || unlock) => {
+      Err(
+        ApiError::invalid(
+          "修改保留策略需单独执行，不能同时启用、解锁或运行备份",
+        )
+        .into(),
+      )
     }
     BackupCmd::Core {
       unlock: true,
       stale_only,
       ..
     } => {
-      let value: Value = c
+      let value: BackupUnlockResult = c
         .post(
           "/api/core-backup/unlock",
           &json!({ "stale_only": stale_only }),
         )
         .await?;
-      out(j, &value, |_| println!("已解锁控制面备份仓库"));
+      out(j, &value, |v| {
+        println!("已解锁 {} 上的控制面备份仓库", v.target)
+      });
       Ok(())
     }
     BackupCmd::Core { to: Some(to), .. } => {
@@ -5756,19 +6069,43 @@ async fn backup(
         .await?;
       finish_task(c, &r.run_id, true, j).await
     }
-    BackupCmd::Core { run: true, .. } => {
+    BackupCmd::Core {
+      run: true,
+      keep,
+      note,
+      ..
+    } => {
+      let options = BackupRunRequest { keep, note };
+      options.validate()?;
       let r: ApplyResponse =
-        c.post("/api/core-backup/run", &json!({})).await?;
+        c.post("/api/core-backup/run", &options).await?;
       finish_task(c, &r.run_id, true, j).await
+    }
+    BackupCmd::Core { retention, .. } if retention.edited() => {
+      let v: Value = c.get("/api/core-backup").await?;
+      let previous: Option<BackupRetention> =
+        serde_json::from_value(v["retention"].clone())
+          .map_err(|_| ApiError::internal("无法读取现有保留策略"))?;
+      let retention = retention.merge(previous)?;
+      let v: Value = c
+        .put(
+          "/api/core-backup/retention",
+          &json!({"retention": retention}),
+        )
+        .await?;
+      out(j, &v, |_| {
+        print::backup_policy(retention.unwrap_or_default(), &[])
+      });
+      Ok(())
     }
     BackupCmd::Core { .. } => {
       let v: Value = c.get("/api/core-backup").await?;
       out(j, &v, print::core_backup);
       Ok(())
     }
-    BackupCmd::List { service } => {
+    BackupCmd::List { service, from } => {
       let v: BackupsView = c
-        .get(&format!("/api/services/{}/backups", seg(&service)))
+        .get(&backup_url(&service, "", &[("from", from.as_deref())]))
         .await?;
       out(j, &v, print::backups);
       Ok(())
@@ -6141,7 +6478,7 @@ mod tests {
     let Command::Exec { command, .. } = cli.command else {
       panic!("不是 exec");
     };
-    assert_eq!(command, "printf '%s' hello");
+    assert_eq!(command.as_deref(), Some("printf '%s' hello"));
     assert_eq!(command_summary("a\x1b[31m"), r"a\u{1b}[31m");
     assert!(
       Cli::try_parse_from(["wharf", "exec", "s1", "--", "a", "b"])
@@ -6247,19 +6584,10 @@ fn parse_volume_arg_handles_local_shared_alias_and_ro() {
 }
 
 #[test]
-fn gateway_add_unset_and_service_port_merge() {
+fn gateway_add_unset() {
   assert_eq!(gateway_text(Some(" ".into()), false), Some(None));
   assert_eq!(gateway_port(Some(80), false, 80), Some(None));
   assert_eq!(gateway_port(Some(0), false, 443), Some(None));
-  let mut ports = vec![parse_port("http=8080").unwrap()];
-  merge_ports(&mut ports, vec![parse_port("metrics=9090").unwrap()]);
-  assert_eq!(
-    ports
-      .iter()
-      .map(|port| port.name.as_str())
-      .collect::<Vec<_>>(),
-    ["http", "metrics"]
-  );
 }
 
 #[cfg(test)]

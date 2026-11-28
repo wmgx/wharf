@@ -405,6 +405,9 @@ async fn claim(
   key: &(String, String),
   due: impl Fn(Option<i64>) -> bool,
 ) -> bool {
+  if state.is_safe_mode() {
+    return false;
+  }
   let claimed = with(|m| {
     let suppressed = m
       .firing

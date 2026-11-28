@@ -559,7 +559,7 @@ fn render_config_file_with_host_style(
 }
 
 /// 加上服务的配置文件，内容里的密钥和 `[[@服务]]` 先替换好。
-fn with_files(
+pub(crate) fn with_files(
   world: &World,
   net: &Net,
   name: &str,
@@ -1107,6 +1107,8 @@ pub(crate) async fn read_legacy_acme_dns_hash(
       AgentOp::TaskRun(TaskRunJob {
         name: "gateway-acme-hash".into(),
         how: TaskHow::Exec {
+          cancellable: false,
+          env: BTreeMap::new(),
           project: project.into(),
           service: Some("caddy".into()),
           command: r#"url=$(awk '$1 == "server_url" && $2 ~ /\/agent\/acme-dns$/ {print $2; exit}' /etc/caddy/Caddyfile) && [ -n "$url" ] && printf '%s' "$url" | sha256sum"#.into(),

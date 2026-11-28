@@ -81,6 +81,7 @@ struct Conn {
   backup_isolation: bool,
   safe_delete: bool,
   data_cleanup: bool,
+  exec_v2: bool,
   shared_volumes: bool,
   safe_gateway: bool,
   gateway_probe: bool,
@@ -88,6 +89,7 @@ struct Conn {
   safe_adopt: bool,
   safe_migrate: bool,
   safe_backup: bool,
+  backup_v2: bool,
   build_v2: bool,
   deploy_v2: bool,
   safe_rollback: bool,
@@ -384,6 +386,12 @@ impl Hub {
     Ok(())
   }
 
+  pub fn supports_backup_v2(&self, server: &str) -> bool {
+    lock(&self.conns)
+      .get(server)
+      .is_some_and(|c| !c.upgrade_only && c.backup_v2)
+  }
+
   pub fn supports_safe_backup(&self, server: &str) -> bool {
     lock(&self.conns)
       .get(server)
@@ -649,6 +657,79 @@ impl Hub {
     self.shared_volumes_conn_id(server).is_ok()
   }
 
+  pub(crate) fn exec_v2_conn_id(
+    &self,
+    server: &str,
+    feature: &str,
+  ) -> Result<u64, ApiError> {
+    self.exec_connection(server).and_then(|(id, supported)| {
+      if supported {
+        Ok(id)
+      } else {
+        Err(
+          ApiError::new(
+            ErrorCode::Conflict,
+            format!(
+              "服务器 {server} 的 agent 版本旧，不支持{feature}"
+            ),
+          )
+          .with_hint("先升级 agent：wharf upgrade"),
+        )
+      }
+    })
+  }
+
+  pub(crate) fn host_exec_connection(
+    &self,
+    server: &str,
+  ) -> Result<(u64, bool), ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|c| !c.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if !conn.host_shell || conn.upgrade_only {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 不支持宿主机命令"),
+        )
+        .with_hint("先升级 agent：wharf upgrade"),
+      );
+    }
+    Ok((conn.conn_id, conn.exec_v2))
+  }
+
+  fn exec_connection(
+    &self,
+    server: &str,
+  ) -> Result<(u64, bool), ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|c| !c.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    Ok((conn.conn_id, !conn.upgrade_only && conn.exec_v2))
+  }
+
+  pub(crate) async fn call_optional_bound<T: DeserializeOwned>(
+    &self,
+    server: &str,
+    conn: Option<u64>,
+    op: AgentOp,
+    timeout: Duration,
+    progress: Option<ProgressFn>,
+    cancel: &CancellationToken,
+  ) -> Result<T, ApiError> {
+    if let Some(conn) = conn {
+      self
+        .call_bound((server, conn), op, timeout, progress, cancel)
+        .await
+    } else {
+      self.call(server, op, timeout, progress, cancel).await
+    }
+  }
+
   pub(crate) fn safe_delete_conn_id(
     &self,
     server: &str,
@@ -773,7 +854,31 @@ impl Hub {
         .suggest(format!("wharf server upgrade {server}")),
       );
     }
+    let requires_exec_v2 = match &op {
+      AgentOp::ServiceExec(_) => true,
+      AgentOp::HostExec(job) => job.stream,
+      AgentOp::Logs { container, .. }
+      | AgentOp::ProjectRestart { container, .. } => {
+        container.is_some()
+      }
+      AgentOp::TaskRun(job) => {
+        matches!(&job.how, wharf_api_types::agent::TaskHow::Exec { env, .. } if !env.is_empty())
+      }
+      _ => false,
+    };
+    if requires_exec_v2 && (conn.upgrade_only || !conn.exec_v2) {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 版本旧"),
+        )
+        .with_hint("先升级 agent：wharf upgrade"),
+      );
+    }
     let cancel_grace = match &op {
+      AgentOp::HostExec(_)
+      | AgentOp::ServiceExec(_)
+      | AgentOp::TaskRun(_) => Some(Duration::from_secs(15)),
       AgentOp::LinkApply(_) => Some(Duration::from_secs(90)),
       AgentOp::ServiceStopForData { .. } => {
         Some(Duration::from_secs(250))
@@ -784,6 +889,7 @@ impl Hub {
           wharf_api_types::agent::ResticAction::Backup { .. }
             | wharf_api_types::agent::ResticAction::Restore { .. }
             | wharf_api_types::agent::ResticAction::Prune
+            | wharf_api_types::agent::ResticAction::PruneV2 { .. }
         ) =>
       {
         Some(Duration::from_secs(45))
@@ -797,6 +903,12 @@ impl Hub {
     ) && (conn.upgrade_only || !conn.shared_volumes)
     {
       return Err(shared_volumes_required(server));
+    }
+    if let AgentOp::Restic(job) = &op
+      && job.action.needs_backup_v2()
+      && (conn.upgrade_only || !conn.backup_v2)
+    {
+      return Err(crate::backup::old_backup_v2(server));
     }
     let needs_safe_backup = match &op {
       AgentOp::ServiceStopForData { .. }
@@ -1010,7 +1122,7 @@ impl Hub {
           tokio::select! {
             result = &mut rx => result.unwrap_or_else(|_| Err(offline(server))),
             _ = conn.closed.cancelled() => Err(offline(server)),
-            _ = tokio::time::sleep(grace) => Err(abort(ErrorCode::Timeout, "未收到 agent 数据操作收尾确认".into())),
+            _ = tokio::time::sleep(grace) => Err(abort(ErrorCode::Timeout, "未收到 agent 收尾确认".into())),
           }
         } else {
           Err(abort(ErrorCode::Cancelled, "已取消".into()))
@@ -1181,6 +1293,7 @@ async fn handle_socket(
     backup_isolation,
     safe_delete,
     data_cleanup,
+    exec_v2,
     shared_volumes,
     safe_gateway,
     gateway_probe,
@@ -1188,6 +1301,7 @@ async fn handle_socket(
     safe_adopt,
     safe_migrate,
     safe_backup,
+    backup_v2,
     build_v2,
     deploy_v2,
     safe_rollback,
@@ -1357,6 +1471,7 @@ async fn handle_socket(
     backup_isolation,
     safe_delete,
     data_cleanup,
+    exec_v2,
     shared_volumes,
     safe_gateway,
     gateway_probe,
@@ -1364,6 +1479,7 @@ async fn handle_socket(
     safe_adopt,
     safe_migrate,
     safe_backup,
+    backup_v2,
     build_v2,
     deploy_v2,
     safe_rollback,

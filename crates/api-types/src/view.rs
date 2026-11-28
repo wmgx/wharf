@@ -140,12 +140,59 @@ pub struct ServerView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ServiceRenderView {
+  pub service: String,
+  pub server: String,
+  pub source: String,
+  pub compose: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub init_cmd: Option<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub secrets_masked: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HostExecResponse {
   pub exit_code: i32,
   pub stdout: String,
   pub stderr: String,
   pub truncated: bool,
   pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ServiceExecResponse {
+  pub service: String,
+  pub server: String,
+  pub container: String,
+  pub exit_code: i32,
+  pub stdout: String,
+  pub stderr: String,
+  pub truncated: bool,
+  pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ExecStreamEvent {
+  Stdout {
+    data: String,
+  },
+  Stderr {
+    data: String,
+  },
+  Done {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    container: Option<String>,
+    exit_code: i32,
+    truncated: bool,
+    duration_ms: u64,
+  },
+  Error {
+    error: crate::ApiError,
+  },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -916,8 +963,21 @@ pub struct Issue {
   pub alert: Option<AlertTarget>,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CoreSafeModeView {
+  pub safe_mode: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub resumed: Option<bool>,
+  #[serde(default)]
+  pub paused: Vec<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub hint: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Status {
+  #[serde(default)]
+  pub safe_mode: bool,
   #[serde(default)]
   pub bookmarks: Vec<BookmarkView>,
   pub servers: Vec<ServerView>,
@@ -1190,9 +1250,20 @@ pub struct BackupRecord {
   pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct BackupUnlockResult {
+  pub target: String,
+  pub stale_only: bool,
+  pub unlocked: bool,
+}
+
 /// `GET /api/services/{name}/backups`
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BackupsView {
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub exclude: Vec<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub retention: Option<crate::backup::BackupRetention>,
   pub service: String,
   /// 没开启备份时为空。
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1570,6 +1641,7 @@ pub enum TaskStatus {
   Failed,
   TimedOut,
   Skipped,
+  Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
