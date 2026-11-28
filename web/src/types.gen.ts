@@ -3030,6 +3030,7 @@ export interface ServiceExecResponse {
 export interface ServiceRenderView {
   compose: string;
   init_cmd?: string | null;
+  project_env_keys?: string[];
   secrets_masked?: string[];
   server: string;
   service: string;
@@ -3086,6 +3087,7 @@ export interface ServiceSpec {
    * 每天自动备份 `/srv/<服务>/` 到另一台服务器（restic）。
    */
   backup?: BackupSpec | null;
+  compose_env?: boolean;
   /**
    * compose 来源：环境变量、资源上限和配置文件加在哪个容器上。只有一个容器时不用填。
    */

@@ -148,11 +148,12 @@ fn preview(
 
   let net = snap.net(&world);
   let row = &world.services[name];
+  let component = crate::compose_env::component_settings(&row.spec);
   let (spec, substitutions) = crate::variables::prepare_spec(
     &world,
     &net,
     name,
-    &row.spec,
+    &component,
     Some(&masks),
   )?;
   let (compose, mounts) = render::service_compose(
@@ -200,6 +201,11 @@ fn preview(
     init_cmd: init_cmd
       .map(|cmd| redact(&crate::redact::redact_command(&cmd))),
     secrets_masked: masks.into_keys().collect(),
+    project_env_keys: crate::compose_env::validate(
+      &snap.world.services[name].spec,
+    )?
+    .into_iter()
+    .collect(),
     warnings,
   })
 }

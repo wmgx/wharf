@@ -536,6 +536,7 @@ impl World {
                 || old.spec.container != spec.container
                 || old.spec.limits != spec.limits
                 || old.spec.env != spec.env
+                || old.spec.compose_env != spec.compose_env
             })
           {
             crate::render::compose_with_settings(
@@ -2091,6 +2092,7 @@ fn validate_service(
     ));
   }
   crate::updates::validate_ignore(spec)?;
+  crate::compose_env::validate(spec)?;
   validate_deploy_options(name, spec)?;
   if name.starts_with(GATEWAY_PROJECT_PREFIX) {
     return Err(ApiError::invalid(format!(
@@ -2916,6 +2918,7 @@ mod tests {
       lan: None,
       extra_hosts: Default::default(),
       self_refs: false,
+      compose_env: false,
       networks: Default::default(),
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),

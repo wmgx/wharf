@@ -288,6 +288,7 @@ pub async fn preview(
       lan: None,
       extra_hosts: Default::default(),
       self_refs: false,
+      compose_env: false,
       networks: Default::default(),
     },
     adopt: converted.adopt,

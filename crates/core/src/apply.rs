@@ -380,6 +380,12 @@ pub(crate) async fn start_with_actor(
         })
         .transpose()?;
       if let Some(spec) = next.as_ref().or(previous)
+        && (spec.compose_env
+          || previous.is_some_and(|old| old.compose_env))
+      {
+        state.hub.compose_env_conn_id(&spec.server)?;
+      }
+      if let Some(spec) = next.as_ref().or(previous)
         && (!spec.networks.is_empty()
           || previous.is_some_and(|old| !old.networks.is_empty()))
       {
@@ -1990,6 +1996,7 @@ async fn run_step_with_dns(
               readiness: None,
               init: None,
               networks: Default::default(),
+              project_env: None,
             },
             caddyfile: r.config,
             caddyfile_hash: r.config_hash,
@@ -2105,6 +2112,7 @@ async fn run_step_with_dns(
         readiness: None,
         init: None,
         networks: Default::default(),
+        project_env: None,
       };
       let op = match p.reload {
         Some(r) => {
@@ -2159,6 +2167,7 @@ async fn run_step_with_dns(
             readiness: None,
             init: None,
             networks: Default::default(),
+            project_env: None,
           }),
           GATEWAY_TIMEOUT,
           Some(progress),
@@ -2867,6 +2876,11 @@ async fn service_up(
     )
   })?;
   let server = &row.spec.server;
+  let env_conn = row
+    .spec
+    .compose_env
+    .then(|| state.hub.compose_env_conn_id(server))
+    .transpose()?;
   let network_conn = if row.spec.networks.is_empty() {
     None
   } else {
@@ -3034,13 +3048,24 @@ async fn service_up(
     trial,
     init,
     networks: row.spec.networks.clone(),
+    project_env: crate::compose_env::inputs(
+      world,
+      &net,
+      service,
+      &snap.render_values(world, service),
+    )?,
     start_timeout_secs: row.spec.start_timeout_secs,
     readiness,
   });
   let deploy_conn = required
     .map(|what| state.hub.deploy_v2_conn_id(server, what))
     .transpose()?;
-  if network_conn.zip(deploy_conn).is_some_and(|(a, b)| a != b) {
+  let conn = network_conn.or(deploy_conn).or(env_conn);
+  if [network_conn, deploy_conn, env_conn]
+    .into_iter()
+    .flatten()
+    .any(|id| Some(id) != conn)
+  {
     return Err(
       ApiError::new(
         ErrorCode::AgentOffline,
@@ -3053,7 +3078,7 @@ async fn service_up(
     .hub
     .call_optional_bound(
       server,
-      network_conn.or(deploy_conn),
+      conn,
       op,
       SERVICE_UP_TIMEOUT,
       Some(progress.clone()),

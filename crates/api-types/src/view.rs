@@ -187,6 +187,8 @@ pub struct ServiceRenderView {
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub secrets_masked: Vec<String>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub project_env_keys: Vec<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub warnings: Vec<String>,
 }
 

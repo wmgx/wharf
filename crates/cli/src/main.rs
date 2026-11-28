@@ -578,6 +578,10 @@ pub struct DeployOps {
   pub add_network: Vec<String>,
   #[arg(long, value_name = "NAME")]
   pub rm_network: Vec<String>,
+  #[arg(long, conflicts_with = "no_compose_env")]
+  pub compose_env: bool,
+  #[arg(long)]
+  pub no_compose_env: bool,
 }
 
 /// 看日志的公共参数。

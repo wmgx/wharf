@@ -1077,6 +1077,9 @@ fn set_network_options(
   spec: &mut ServiceSpec,
   ops: &crate::DeployOps,
 ) -> CliResult<()> {
+  if ops.compose_env || ops.no_compose_env {
+    spec.compose_env = ops.compose_env;
+  }
   if ops.self_refs || ops.no_self_refs {
     spec.self_refs = ops.self_refs;
   }
@@ -3479,7 +3482,9 @@ async fn service(
           || !ops.add_extra_host.is_empty()
           || !ops.rm_extra_host.is_empty()
           || !ops.add_network.is_empty()
-          || !ops.rm_network.is_empty())
+          || !ops.rm_network.is_empty()
+          || ops.compose_env
+          || ops.no_compose_env)
       {
         apply.check_read_only()?;
         wharf_api_types::filter_note(
@@ -3597,6 +3602,7 @@ async fn service(
             lan: None,
             extra_hosts: Default::default(),
             self_refs: false,
+            compose_env: false,
             networks: Default::default(),
           }
         }

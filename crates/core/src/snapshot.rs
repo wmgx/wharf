@@ -490,11 +490,12 @@ fn resolve_service(
   let row = world.services.get(name).ok_or_else(|| {
     ApiError::not_found(format!("服务 {name} 不存在"))
   })?;
+  let component = crate::compose_env::component_settings(&row.spec);
   let (spec, substitutions) = crate::variables::prepare_spec(
     world,
     net,
     name,
-    &row.spec,
+    &component,
     Some(secrets),
   )?;
   let (resolved, mounts) = render::service_compose(
@@ -534,6 +535,15 @@ fn resolve_service(
     }
     None => render::hash(&resolved),
   };
+  let hash = if let Some(inputs) =
+    crate::compose_env::inputs(world, net, name, secrets)?
+  {
+    let inputs =
+      serde_json::to_string(&inputs).map_err(crate::db::json_err)?;
+    render::hash(&format!("{hash}\n# wharf.project_env={inputs}"))
+  } else {
+    hash
+  };
   Ok((resolved, hash))
 }
 
@@ -546,11 +556,12 @@ pub fn service_trial(
   let row = world.services.get(name).ok_or_else(|| {
     ApiError::not_found(format!("服务 {name} 不存在"))
   })?;
+  let component = crate::compose_env::component_settings(&row.spec);
   let (spec, substitutions) = crate::variables::prepare_spec(
     world,
     net,
     name,
-    &row.spec,
+    &component,
     Some(secrets),
   )?;
   let (trial, mounts) =
@@ -641,8 +652,9 @@ pub fn service_template(
   name: &str,
 ) -> Result<String, ApiError> {
   let row = &world.services[name];
+  let component = crate::compose_env::component_settings(&row.spec);
   let (spec, substitutions) = crate::variables::prepare_spec(
-    world, net, name, &row.spec, None,
+    world, net, name, &component, None,
   )?;
   let (text, mounts) = render::service_compose(
     name,

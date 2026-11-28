@@ -400,6 +400,8 @@ pub struct ServiceSpec {
   pub self_refs: bool,
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub networks: BTreeMap<String, NetworkAttachment>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub compose_env: bool,
 }
 
 #[derive(

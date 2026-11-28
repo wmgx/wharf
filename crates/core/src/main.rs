@@ -32,6 +32,7 @@ mod cli_dist;
 mod cli_tunnel;
 mod clock;
 mod cloudflare_ips;
+mod compose_env;
 mod config_api;
 mod connect;
 mod core_backup;

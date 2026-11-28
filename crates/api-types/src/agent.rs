@@ -196,6 +196,8 @@ pub enum AgentMsg {
     files_v2: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     named_networks_v1: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    compose_env_v1: bool,
   },
   KeyReady {
     core_public_key: String,
@@ -445,6 +447,11 @@ pub enum AgentOp {
   ProjectUp(ProjectUp),
   NamedNetworksCheck {
     networks: BTreeMap<String, crate::spec::NetworkAttachment>,
+  },
+  ComposeEnvCheck {
+    project: String,
+    compose: String,
+    project_env: BTreeMap<String, String>,
   },
   GatewayProbe(GatewayProbeJob),
   LinkApply(LinkApply),

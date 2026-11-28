@@ -396,6 +396,25 @@ pub fn substitute(
   )
 }
 
+pub(crate) fn project_env_value(
+  text: &str,
+  secrets: &BTreeMap<String, String>,
+) -> Result<String, ApiError> {
+  let mut files = BTreeSet::new();
+  let value = substitute_values(
+    text,
+    Some(secrets),
+    SecretContext::Env,
+    &mut files,
+  )?;
+  if !files.is_empty() {
+    return Err(ApiError::invalid(
+      "Compose 项目变量不能引用密钥文件",
+    ));
+  }
+  Ok(value)
+}
+
 fn substitute_values(
   text: &str,
   secrets: Option<&BTreeMap<String, String>>,
@@ -820,7 +839,8 @@ pub fn compose_with_settings(
   content: &str,
   spec: &ServiceSpec,
 ) -> Result<String, ApiError> {
-  apply_compose_settings(name, content, spec, true)
+  let spec = crate::compose_env::component_settings(spec);
+  apply_compose_settings(name, content, &spec, true)
 }
 
 fn apply_compose_settings(
@@ -1131,6 +1151,8 @@ fn service_compose_base(
         updated = compose_extra_hosts(name, content, spec)?;
         &updated
       };
+      let component = crate::compose_env::component_settings(spec);
+      let spec = component.as_ref();
       let template =
         apply_compose_settings(name, content, spec, false)?;
       let legacy = substitute_compose(name, &template, secrets);
@@ -2602,6 +2624,7 @@ mod tests {
       lan: None,
       extra_hosts: Default::default(),
       self_refs: false,
+      compose_env: false,
       networks: Default::default(),
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),

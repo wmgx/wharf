@@ -183,6 +183,18 @@ impl Ops {
         };
         to_value(self.link_apply(&apply, ctx).await?)
       }
+      AgentOp::ComposeEnvCheck {
+        project,
+        compose,
+        project_env,
+      } => {
+        check_project(&project)?;
+        self
+          .docker
+          .check_project_env(&project, &compose, &project_env, ctx)
+          .await?;
+        Ok(Value::Null)
+      }
       AgentOp::NamedNetworksCheck { networks } => {
         named_networks::ensure(&self.docker, &networks, false, ctx)
           .await?;
@@ -851,7 +863,12 @@ impl Ops {
   ) -> Result<Vec<String>, ApiError> {
     let images = self
       .docker
-      .images_for_compose(&up.project, &up.compose, ctx)
+      .images_for_compose(
+        &up.project,
+        &up.compose,
+        up.project_env.as_ref(),
+        ctx,
+      )
       .await?;
     for image in &images {
       if up.expected_images.contains_key(image) {
@@ -931,6 +948,14 @@ impl Ops {
     .await;
     let result = async {
       self.docker.write_compose(&up.project, &up.compose)?;
+      self.docker.write_project_env(
+        &up.project,
+        up.project_env
+          .as_ref()
+          .map(crate::docker::dotenv)
+          .transpose()?
+          .as_deref(),
+      )?;
       self
         .up_with_crash_logs(
           &up.project,
@@ -1152,7 +1177,14 @@ impl Ops {
       );
     }
     if let Some(init) = &up.init {
+      let old_env = self.docker.read_project_env(&up.project)?;
       self.docker.write_compose(&up.project, &up.compose)?;
+      let env = up
+        .project_env
+        .as_ref()
+        .map(crate::docker::dotenv)
+        .transpose()?;
+      self.docker.write_project_env(&up.project, env.as_deref())?;
       if let Err(error) =
         self.docker.run_init(&up.project, init, ctx).await
       {
@@ -1171,6 +1203,12 @@ impl Ops {
         };
         if let Err(back) = restored {
           ctx.say(format!("恢复原 compose 失败：{}", back.message));
+        }
+        if let Err(back) = self
+          .docker
+          .write_project_env(&up.project, old_env.as_deref())
+        {
+          ctx.say(format!("恢复原项目变量失败：{}", back.message));
         }
         if let Err(back) = self
           .restore_images(
@@ -1278,6 +1316,10 @@ impl Ops {
     let restored = async {
       self.restore_images(&previous.images, ctx).await?;
       self.docker.write_compose(project, &previous.compose)?;
+      self.docker.write_project_env(
+        project,
+        previous.project_env.as_deref(),
+      )?;
       self.docker.write_hash(project, &previous.hash)?;
       self.docker.up(project, false, previous_grace, ctx).await?;
       let status = self.docker.one_status(project, ctx).await?;

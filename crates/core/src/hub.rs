@@ -82,6 +82,7 @@ struct Conn {
   backup_isolation: bool,
   safe_delete: bool,
   named_networks_v1: bool,
+  compose_env_v1: bool,
   data_cleanup: bool,
   exec_v2: bool,
   files_v2: bool,
@@ -217,7 +218,15 @@ fn safe_adopt_required(server: &str) -> ApiError {
   .suggest("wharf upgrade")
 }
 
-pub fn old_network_agent(server: &str) -> ApiError {
+pub fn old_compose_env_agent(server: &str) -> ApiError {
+  ApiError::new(
+    ErrorCode::Conflict,
+    format!("服务器 {server} 的 agent 不支持 Compose 项目变量"),
+  )
+  .with_hint("运行 wharf upgrade，升级后重新生成计划")
+}
+
+fn old_network_agent(server: &str) -> ApiError {
   ApiError::new(
     ErrorCode::Conflict,
     format!("服务器 {server} 的 agent 不支持命名私网"),
@@ -225,7 +234,7 @@ pub fn old_network_agent(server: &str) -> ApiError {
   .with_hint("运行 wharf upgrade，升级后重新生成计划")
 }
 
-fn offline(server: &str) -> ApiError {
+pub(crate) fn offline(server: &str) -> ApiError {
   ApiError::new(
     ErrorCode::AgentOffline,
     format!("服务器 {server} 的 agent 不在线"),
@@ -807,6 +816,21 @@ impl Hub {
     }
   }
 
+  pub(crate) fn compose_env_conn_id(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.compose_env_v1 {
+      return Err(old_compose_env_agent(server));
+    }
+    Ok(conn.conn_id)
+  }
+
   pub(crate) fn named_network_conn_id(
     &self,
     server: &str,
@@ -916,6 +940,7 @@ impl Hub {
     if !conn.monitor_v2
       && match &op {
         AgentOp::HttpCheck(job) => !job.headers.is_empty(),
+        AgentOp::ComposeEnvCheck { .. } => true,
         AgentOp::ProjectUp(up) => {
           up.readiness.as_ref().is_some_and(|p| !p.headers.is_empty())
         }
@@ -1097,6 +1122,12 @@ impl Hub {
       {
         progress(crate::build::old_agent_warning(server));
       }
+    }
+    if (matches!(&op, AgentOp::ComposeEnvCheck { .. })
+      || matches!(&op, AgentOp::ProjectUp(up) if up.project_env.is_some()))
+      && (conn.upgrade_only || !conn.compose_env_v1)
+    {
+      return Err(old_compose_env_agent(server));
     }
     if (matches!(&op, AgentOp::NamedNetworksCheck { .. })
       || matches!(&op, AgentOp::ProjectUp(up) if !up.networks.is_empty()))
@@ -1451,6 +1482,7 @@ async fn handle_socket(
     backup_isolation,
     safe_delete,
     named_networks_v1,
+    compose_env_v1,
     data_cleanup,
     exec_v2,
     files_v2,
@@ -1635,6 +1667,7 @@ async fn handle_socket(
     backup_isolation,
     safe_delete,
     named_networks_v1,
+    compose_env_v1,
     data_cleanup,
     exec_v2,
     files_v2,

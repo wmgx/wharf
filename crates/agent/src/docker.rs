@@ -30,6 +30,7 @@ fn stop_timeout(grace: u64) -> Duration {
 }
 
 pub const HASH_FILE: &str = ".wharf-hash";
+const PROJECT_ENV_FILE: &str = ".wharf-project.env";
 pub const CONFIG_HASH_FILE: &str = ".wharf-config-hash";
 
 /// 跟随日志的最长时长，到点后页面会自动重连。
@@ -38,6 +39,7 @@ const FOLLOW_MAX: Duration = Duration::from_secs(30 * 60);
 pub struct Previous {
   pub compose: String,
   pub hash: String,
+  pub project_env: Option<String>,
   /// 旧容器用的镜像：compose 里写的镜像名和当时的镜像 ID。
   pub images: BTreeMap<String, String>,
 }
@@ -130,11 +132,36 @@ impl Docker {
   /// `docker compose -p <project> -f <dir>/compose.yaml ...`
   pub fn compose(&self, project: &str) -> Cmd {
     let dir = self.project_dir(project);
-    self
-      .cmd()
-      .args(["compose", "-p", project, "-f"])
-      .arg(dir.join("compose.yaml").display().to_string())
-      .cwd(&dir)
+    let env = dir.join(PROJECT_ENV_FILE);
+    self.compose_file(
+      project,
+      &dir,
+      &dir.join("compose.yaml"),
+      env.is_file().then_some(&env),
+    )
+  }
+
+  fn compose_file(
+    &self,
+    project: &str,
+    dir: &Path,
+    file: &Path,
+    env: Option<&Path>,
+  ) -> Cmd {
+    let mut cmd = self.cmd().args(["compose", "-p", project]);
+    if let Some(env) = env {
+      cmd = cmd
+        .arg("--env-file")
+        .arg(env.display().to_string())
+        .clear_env();
+      for key in ["PATH", "HOME", "DOCKER_CONFIG", "XDG_CONFIG_HOME"]
+      {
+        if let Ok(value) = std::env::var(key) {
+          cmd = cmd.env(key, &value);
+        }
+      }
+    }
+    cmd.arg("-f").arg(file.display().to_string()).cwd(dir)
   }
 
   pub async fn versions(&self) -> (Option<String>, Option<String>) {
@@ -296,6 +323,38 @@ impl Docker {
     write_private(&dir.join("compose.yaml"), compose)
   }
 
+  pub(crate) fn read_project_env(
+    &self,
+    project: &str,
+  ) -> Result<Option<String>, ApiError> {
+    let env = self.project_dir(project).join(PROJECT_ENV_FILE);
+    match std::fs::read_to_string(&env) {
+      Ok(value) => Ok(Some(value)),
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Ok(None)
+      }
+      Err(error) => Err(io_err(&env)(error)),
+    }
+  }
+
+  pub(crate) fn write_project_env(
+    &self,
+    project: &str,
+    content: Option<&str>,
+  ) -> Result<(), ApiError> {
+    let env = self.project_dir(project).join(PROJECT_ENV_FILE);
+    if let Some(content) = content {
+      return write_private(&env, content);
+    }
+    match std::fs::remove_file(&env) {
+      Ok(()) => Ok(()),
+      Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Ok(())
+      }
+      Err(error) => Err(io_err(&env)(error)),
+    }
+  }
+
   pub fn write_hash(
     &self,
     project: &str,
@@ -318,18 +377,87 @@ impl Docker {
     &self,
     project: &str,
     compose: &str,
+    env: Option<&BTreeMap<String, String>>,
     ctx: &Ctx,
   ) -> Result<Vec<String>, ApiError> {
     let dir = self.project_dir(project);
     std::fs::create_dir_all(&dir).map_err(io_err(&dir))?;
     let pending = TempCompose(dir.join("compose.yaml.next"));
     write_private(&pending.0, compose)?;
-    let cmd = self
-      .cmd()
-      .args(["compose", "-p", project, "-f"])
-      .arg(pending.0.display().to_string())
-      .cwd(&dir);
-    self.compose_images(cmd, ctx).await
+    let pending_env =
+      TempCompose(dir.join(".wharf-project-env.next"));
+    let env = if let Some(env) = env {
+      write_private(&pending_env.0, &dotenv(env)?)?;
+      Some(pending_env.0.as_path())
+    } else {
+      None
+    };
+    let cmd = self.compose_file(project, &dir, &pending.0, env);
+    match self.compose_images(cmd, ctx).await {
+      Err(error)
+        if env.is_some() && error.code == ErrorCode::AgentFailed =>
+      {
+        Err(
+          ApiError::invalid("Compose 项目变量校验失败")
+            .with_hint("检查已声明的环境变量及表达式"),
+        )
+      }
+      result => result,
+    }
+  }
+
+  pub(crate) async fn check_project_env(
+    &self,
+    project: &str,
+    compose: &str,
+    inputs: &BTreeMap<String, String>,
+    ctx: &Ctx,
+  ) -> Result<(), ApiError> {
+    use wharf_api_types::compose::{parse_compose, project_env_keys};
+    let keys = project_env_keys(&parse_compose(compose)?)?;
+    let temp = tempfile::Builder::new()
+      .prefix("wharf-compose-check-")
+      .tempdir()
+      .map_err(|_| {
+        ApiError::internal("无法建立私有 Compose 校验目录")
+      })?;
+    let file = temp.path().join("compose.yaml");
+    let env = temp.path().join(PROJECT_ENV_FILE);
+    write_private(&file, compose)?;
+    write_private(&env, &dotenv(inputs)?)?;
+    let quiet = Ctx {
+      progress: None,
+      cancel: ctx.cancel.clone(),
+    };
+    let result = self
+      .compose_file(project, temp.path(), &file, Some(&env))
+      .args(["config", "--quiet"])
+      .timeout(Duration::from_secs(25))
+      .run(&quiet)
+      .await?;
+    if !result.success {
+      if let Some(key) = keys
+        .iter()
+        .filter(|key| !inputs.contains_key(*key))
+        .find(|key| {
+          result.stderr.contains(&format!("required variable {key} "))
+        })
+      {
+        return Err(
+          ApiError::invalid(format!(
+            "服务 {project} 的 Compose 插值缺少 {key}"
+          ))
+          .with_hint(format!("补上 --add-env {key}=...")),
+        );
+      }
+      return Err(
+        ApiError::invalid(format!(
+          "服务 {project} 的 Compose 项目变量校验失败"
+        ))
+        .with_hint("检查 environment 中的变量表达式及必填项"),
+      );
+    }
+    Ok(())
   }
 
   async fn compose_images(
@@ -1011,6 +1139,7 @@ impl Docker {
         .trim()
         .to_string(),
       images: BTreeMap::new(),
+      project_env: self.read_project_env(project).ok()?,
     })
   }
 
@@ -1507,6 +1636,10 @@ pub(crate) fn clean_project_dir(
       HASH_FILE,
       ".wharf-hash.tmp",
       "compose.tmp",
+      PROJECT_ENV_FILE,
+      ".wharf-project.tmp",
+      ".wharf-project-env.next",
+      ".wharf-project-env.tmp",
     ],
   )?;
   // 只清理 Wharf 管理的网关和隧道配置。
@@ -1725,6 +1858,36 @@ pub fn io_err(
       format!("读写 {} 失败：{e}", path.display()),
     )
   }
+}
+
+pub(crate) fn dotenv(
+  values: &BTreeMap<String, String>,
+) -> Result<String, ApiError> {
+  let mut out = String::new();
+  for (key, value) in values {
+    if !wharf_api_types::compose::valid_project_env_key(key)
+      || value.contains('\0')
+    {
+      return Err(ApiError::invalid(
+        "Compose 项目变量键不合法或值含 NUL",
+      ));
+    }
+    out.push_str(key);
+    out.push_str("=\"");
+    for ch in value.chars() {
+      match ch {
+        '$' => out.push_str("$$"),
+        '\\' => out.push_str("\\\\"),
+        '"' => out.push_str("\\\""),
+        '\n' => out.push_str("\\n"),
+        '\r' => out.push_str("\\r"),
+        '\t' => out.push_str("\\t"),
+        _ => out.push(ch),
+      }
+    }
+    out.push_str("\"\n");
+  }
+  Ok(out)
 }
 
 pub fn write_private(

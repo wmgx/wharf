@@ -1184,6 +1184,24 @@ pub(crate) async fn make_plan_inner(
   for step in &b.steps {
     if let Step::ServiceUp { service, .. } = &step.step
       && let Some(row) = desired.services.get(service)
+      && (row.spec.compose_env
+        || current
+          .services
+          .get(service)
+          .is_some_and(|old| old.spec.compose_env))
+    {
+      crate::compose_env::preflight(
+        &state.hub,
+        &desired,
+        &net,
+        service,
+        &snap.render_values(&desired, service),
+        &tokio_util::sync::CancellationToken::new(),
+      )
+      .await?;
+    }
+    if let Step::ServiceUp { service, .. } = &step.step
+      && let Some(row) = desired.services.get(service)
       && (!row.spec.networks.is_empty()
         || current
           .services

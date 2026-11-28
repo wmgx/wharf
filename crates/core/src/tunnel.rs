@@ -203,6 +203,7 @@ pub async fn sync(
         readiness: None,
         init: None,
         networks: Default::default(),
+        project_env: None,
       }),
       CONNECTOR_TIMEOUT,
       Some(progress.clone()),
