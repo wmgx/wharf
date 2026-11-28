@@ -1014,6 +1014,11 @@ pub fn edge_view(snap: &Snapshot, name: &str) -> Option<EdgeAppView> {
 
 pub fn export(world: &World) -> Fleet {
   Fleet {
+    vars: world
+      .vars
+      .iter()
+      .map(|(name, row)| (name.clone(), row.value.clone()))
+      .collect(),
     bookmarks: world
       .bookmarks
       .iter()

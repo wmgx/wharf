@@ -23,11 +23,38 @@ fn bare_secret(name: &str) -> bool {
       .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PublicRef<'a> {
+  Var(&'a str),
+  Own(&'a str, Option<&'a str>),
+}
+
+pub fn parse_public_ref(
+  raw: &str,
+  self_refs: bool,
+) -> Option<PublicRef<'_>> {
+  if let Some(name) = raw.strip_prefix("var:") {
+    return Some(PublicRef::Var(name));
+  }
+  if !self_refs {
+    return None;
+  }
+  let (name, arg) = raw
+    .split_once(':')
+    .map_or((raw, None), |(name, arg)| (name, Some(arg)));
+  name
+    .starts_with("SELF_")
+    .then_some(PublicRef::Own(name, arg))
+}
+
 pub fn parse_placeholder(
   inner: &str,
   allow_account: bool,
 ) -> Result<Option<Placeholder<'_>>, ApiError> {
-  if inner.starts_with('@') {
+  if inner.starts_with('@')
+    || parse_public_ref(inner, false).is_some()
+    || inner.starts_with("SELF_PORT:")
+  {
     return Ok(None);
   }
   let valid = |name| {

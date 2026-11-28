@@ -585,6 +585,13 @@ export interface CertStatus {
  * 对期望状态的局部修改。CLI 的 `service deploy`、`route add` 等命令都生成它。
  */
 export type Change = {
+  name: string;
+  op: "upsert_var";
+  value: string;
+} | {
+  name: string;
+  op: "remove_var";
+} | {
   id: string | null;
   op: "upsert_bookmark";
   spec: BookmarkSpec;
@@ -3086,6 +3093,7 @@ export interface ServiceSpec {
   /**
    * 运行在哪台服务器上。
    */
+  self_refs?: boolean;
   server: string;
   source: Source;
   /**

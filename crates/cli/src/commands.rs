@@ -832,6 +832,7 @@ async fn dispatch_command(
       Box::pin(crate::task::task(c, cmd, j)).await
     }
     Command::Edge(cmd) => crate::edge::edge(c, cmd, j).await,
+    Command::Var(cmd) => crate::variables::run(c, cmd, j).await,
     Command::Bookmark(cmd) => {
       crate::bookmark::bookmark(c, cmd, j).await
     }
@@ -1047,6 +1048,9 @@ fn set_network_options(
   spec: &mut ServiceSpec,
   ops: &crate::DeployOps,
 ) -> CliResult<()> {
+  if ops.self_refs || ops.no_self_refs {
+    spec.self_refs = ops.self_refs;
+  }
   if ops.inherit_lan {
     spec.lan = None;
   } else if ops.lan || ops.no_lan {
@@ -3313,6 +3317,8 @@ async fn service(
           || ops.lan
           || ops.no_lan
           || ops.inherit_lan
+          || ops.self_refs
+          || ops.no_self_refs
           || !ops.add_extra_host.is_empty()
           || !ops.rm_extra_host.is_empty())
       {
@@ -3431,6 +3437,7 @@ async fn service(
             init_timeout_secs: None,
             lan: None,
             extra_hosts: Default::default(),
+            self_refs: false,
           }
         }
       };

@@ -603,6 +603,8 @@ pub(crate) fn mark_compose_refs<'a>(
     marked.push_str(&rest[..start]);
     let raw = &rest[start..end];
     if parse_placeholder(inner, true).is_ok_and(|p| p.is_some())
+      || wharf_api_types::references::parse_public_ref(inner, true)
+        .is_some()
       || !crate::refs::used(raw).is_empty()
     {
       marked.push_str(&marker(raw));
@@ -2587,6 +2589,7 @@ mod tests {
       init_timeout_secs: None,
       lan: None,
       extra_hosts: Default::default(),
+      self_refs: false,
       server: "node1".into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

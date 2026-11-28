@@ -204,8 +204,17 @@ pub(crate) fn service_render_refs(
   spec: &ServiceSpec,
 ) -> impl Iterator<Item = &str> {
   service_templates(spec)
-    .flat_map(|text| {
-      placeholders_checked(text, true, true).filter_map(Result::ok)
+    .flat_map(move |text| {
+      placeholders_checked(text, true, true)
+        .filter_map(Result::ok)
+        .filter(move |p| {
+          p.mode != SecretMode::Plain
+            || wharf_api_types::references::parse_public_ref(
+              p.name,
+              spec.self_refs,
+            )
+            .is_none()
+        })
     })
     .chain(
       spec
@@ -483,6 +492,15 @@ pub fn validate_world(world: &World) -> Result<(), ApiError> {
       .flat_map(|text| placeholders_checked(text, true, true))
     {
       let p = p?;
+      if p.mode == SecretMode::Plain
+        && wharf_api_types::references::parse_public_ref(
+          p.name,
+          row.spec.self_refs,
+        )
+        .is_some()
+      {
+        continue;
+      }
       if p.mode != SecretMode::Plain || !oidc.contains(p.name) {
         reject_system_secret(p.name, &context)?;
       }

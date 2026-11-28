@@ -240,6 +240,7 @@ pub async fn preview(
       init_timeout_secs: None,
       lan: None,
       extra_hosts: Default::default(),
+      self_refs: false,
     },
     adopt: converted.adopt,
     name,

@@ -333,6 +333,23 @@ pub fn require_plan_request(
   current: &World,
   req: &PlanRequest,
 ) -> Result<(), ApiError> {
+  if req.changes.iter().any(|change| {
+    matches!(
+      change,
+      Change::UpsertVar { .. } | Change::RemoveVar { .. }
+    )
+  }) || req
+    .fleet
+    .iter()
+    .chain(req.partial.iter())
+    .any(|fleet| !fleet.vars.is_empty())
+  {
+    crate::variables::require_global(auth)?;
+    crate::auth::require_perm(
+      &auth.perms,
+      wharf_api_types::view::Perm::Admin,
+    )?;
+  }
   let Some(services) = &auth.services else {
     return Ok(());
   };
@@ -420,6 +437,9 @@ pub fn require_plan_request(
         Some(format!("bookmark/{}", id.as_deref().unwrap_or("new")))
       }
       Change::RemoveBookmark { id } => Some(format!("bookmark/{id}")),
+      Change::UpsertVar { name, .. } | Change::RemoveVar { name } => {
+        Some(format!("var/{name}"))
+      }
       Change::UpsertRoute { spec } => upsert_route(spec)?,
       Change::RemoveRoute { hostname } => {
         let host = crate::world::normalize_hostname(hostname)?;
@@ -451,6 +471,17 @@ pub fn require_plan(
   plan: &Plan,
   effects: &RouteEffects,
 ) -> Result<(), ApiError> {
+  if plan
+    .items
+    .iter()
+    .any(|item| item.address.starts_with("var/"))
+  {
+    crate::variables::require_global(auth)?;
+    crate::auth::require_perm(
+      &auth.perms,
+      wharf_api_types::view::Perm::Admin,
+    )?;
+  }
   if let Some(services) = &auth.services {
     check_plan_scope(services, plan, effects).map_err(|blocked| {
       forbidden(

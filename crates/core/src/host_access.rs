@@ -30,7 +30,10 @@ pub use policy::{
 };
 
 use compose::compose_host_reasons;
-pub use compose::{has_new_public_bind, validate_service_ports};
+pub use compose::{
+  compose_published_ports, has_new_public_bind,
+  validate_service_ports,
+};
 
 #[cfg(test)]
 pub(crate) use compose::compose_public_binds;

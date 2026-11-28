@@ -490,9 +490,16 @@ fn resolve_service(
   let row = world.services.get(name).ok_or_else(|| {
     ApiError::not_found(format!("服务 {name} 不存在"))
   })?;
-  let (resolved, mounts) = render::service_compose(
+  let (spec, substitutions) = crate::variables::prepare_spec(
+    world,
+    net,
     name,
     &row.spec,
+    Some(secrets),
+  )?;
+  let (resolved, mounts) = render::service_compose(
+    name,
+    &spec,
     &row.host_ports,
     &net.bind_ips(&row.spec),
     Some(secrets),
@@ -506,6 +513,7 @@ fn resolve_service(
   let resolved = crate::refs::resolve_with_host_style(
     &resolved, name, world, net, legacy,
   )?;
+  let resolved = substitutions.finish_compose(resolved)?;
   let resolved = with_files(
     world,
     net,
@@ -538,9 +546,17 @@ pub fn service_trial(
   let row = world.services.get(name).ok_or_else(|| {
     ApiError::not_found(format!("服务 {name} 不存在"))
   })?;
+  let (spec, substitutions) = crate::variables::prepare_spec(
+    world,
+    net,
+    name,
+    &row.spec,
+    Some(secrets),
+  )?;
   let (trial, mounts) =
-    render::trial_compose(name, &row.spec, Some(secrets))?;
+    render::trial_compose(name, &spec, Some(secrets))?;
   let trial = crate::refs::resolve(&trial, name, world, net)?;
+  let trial = substitutions.finish_compose(trial)?;
   with_files(world, net, name, &trial, mounts, Some(secrets), false)
 }
 
@@ -566,10 +582,18 @@ fn render_config_file_with_host_style(
   mounts: &mut BTreeSet<String>,
   legacy: bool,
 ) -> Result<String, ApiError> {
-  let content = render::file_content(&file.content, secrets, mounts)?;
-  crate::refs::resolve_with_host_style(
+  let (content, substitutions) = crate::variables::prepare_file(
+    world,
+    net,
+    name,
+    &file.content,
+    secrets,
+  )?;
+  let content = render::file_content(&content, secrets, mounts)?;
+  let content = crate::refs::resolve_with_host_style(
     &content, name, world, net, legacy,
-  )
+  )?;
+  Ok(substitutions.finish_text(&content, false))
 }
 
 /// 加上服务的配置文件，内容里的密钥和 `[[@服务]]` 先替换好。
@@ -617,9 +641,12 @@ pub fn service_template(
   name: &str,
 ) -> Result<String, ApiError> {
   let row = &world.services[name];
+  let (spec, substitutions) = crate::variables::prepare_spec(
+    world, net, name, &row.spec, None,
+  )?;
   let (text, mounts) = render::service_compose(
     name,
-    &row.spec,
+    &spec,
     &row.host_ports,
     &net.bind_ips(&row.spec),
     None,
@@ -631,6 +658,7 @@ pub fn service_template(
     false,
   )?;
   let text = crate::refs::resolve(&text, name, world, net)?;
+  let text = substitutions.finish_compose(text)?;
   with_files(world, net, name, &text, mounts, None, false)
 }
 

@@ -163,6 +163,7 @@ fn read_when_no_args(command: &str) -> bool {
       | "data cleanup policy"
       | "backup set"
       | "task set"
+      | "var set"
   )
 }
 
@@ -170,6 +171,12 @@ fn effect(
   command: &str,
   cmd: &clap::Command,
 ) -> (&'static str, &'static [&'static str]) {
+  if matches!(command, "var set" | "var rm") {
+    return ("plan", &["plan", "admin"]);
+  }
+  if command == "var get" {
+    return ("read", &["read"]);
+  }
   if matches!(command, "schema" | "commands" | "validate" | "login") {
     return ("read", &[]);
   }
@@ -345,6 +352,7 @@ fn returns(command: &str) -> Option<&'static str> {
     "exec" => "host_exec",
     "service exec" => "service_exec",
     "service render" => "service_render",
+    "var get" | "var list" => "var",
     "backup list" => "backup",
     "backup ls" => "backup_ls",
     "backup extract" => "backup_extract",

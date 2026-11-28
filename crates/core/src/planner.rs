@@ -550,6 +550,12 @@ pub(crate) async fn make_plan_inner(
     &desired,
     &snap.secret_restrictions,
   )?;
+  crate::variables::validate_removals(&current, &desired)?;
+  crate::variables::validate_self_conflicts(
+    &current,
+    &desired,
+    &snap.secrets,
+  )?;
   crate::missing_refs::check_plan(&desired, &snap)?;
   desired.validate_against(&current)?;
   crate::link::validate_new_admin_port_bindings(&current, &desired)?;
@@ -1236,6 +1242,9 @@ fn spec_json(world: &World, kind: &str, name: &str) -> Option<Value> {
     KIND_EDGE => world.edge_apps.get(name).map(|r| to_json(&r.spec)),
     KIND_BOOKMARK => {
       world.bookmarks.get(name).map(|r| to_json(&r.spec))
+    }
+    crate::world::KIND_VAR => {
+      world.vars.get(name).map(|r| json!({"value": r.value}))
     }
     _ => None,
   }

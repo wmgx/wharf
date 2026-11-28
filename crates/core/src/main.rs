@@ -152,6 +152,7 @@ mod traffic;
 mod tunnel;
 mod updates;
 mod uploads;
+mod variables;
 mod vendor_checks;
 mod views;
 mod web;

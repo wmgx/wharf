@@ -110,6 +110,7 @@ fn merge_fleets(
     merge!(gateways, "网关");
     merge!(edge_apps, "边缘应用");
     merge!(bookmarks, "书签");
+    merge!(vars, "变量");
     merged
       .routes
       .extend(part.routes.into_iter().filter(|route| {

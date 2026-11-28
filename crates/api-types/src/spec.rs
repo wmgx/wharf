@@ -393,6 +393,8 @@ pub struct ServiceSpec {
   pub lan: Option<bool>,
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub extra_hosts: BTreeMap<String, std::net::IpAddr>,
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub self_refs: bool,
 }
 
 #[derive(
@@ -970,6 +972,16 @@ pub struct Fleet {
   pub bookmarks: BTreeMap<String, BookmarkSpec>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub routes: Vec<RouteSpec>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub vars: BTreeMap<String, String>,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct VarView {
+  pub name: String,
+  pub value: String,
 }
 
 /// 对期望状态的局部修改。CLI 的 `service deploy`、`route add` 等命令都生成它。
@@ -979,6 +991,13 @@ pub struct Fleet {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)] // 一次计划只有几个，装箱改动面太大
 pub enum Change {
+  UpsertVar {
+    name: String,
+    value: String,
+  },
+  RemoveVar {
+    name: String,
+  },
   /// id 为空时新建，否则修改已有书签。
   UpsertBookmark {
     id: Option<String>,

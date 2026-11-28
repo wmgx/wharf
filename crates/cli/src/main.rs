@@ -49,6 +49,7 @@ mod task_artifacts;
 mod token;
 mod top;
 mod tunnel;
+mod variables;
 mod view;
 mod wait;
 
@@ -391,6 +392,9 @@ pub enum Command {
   /// 首页书签。
   #[command(subcommand)]
   Bookmark(bookmark::BookmarkCmd),
+  /// 查看或修改全局变量。
+  #[command(subcommand)]
+  Var(variables::VarCmd),
   /// 密钥。服务的环境变量里用 `[[NAME]]` 引用。
   #[command(subcommand)]
   Secret(SecretCmd),
@@ -544,6 +548,10 @@ pub struct DeployOps {
   pub add_extra_host: Vec<String>,
   #[arg(long, value_name = "NAME")]
   pub rm_extra_host: Vec<String>,
+  #[arg(long, conflicts_with = "no_self_refs")]
+  pub self_refs: bool,
+  #[arg(long)]
+  pub no_self_refs: bool,
 }
 
 /// 看日志的公共参数。

@@ -29,6 +29,7 @@ pub const KIND_GATEWAY: &str = "gateway";
 pub const KIND_ROUTE: &str = "route";
 pub const KIND_EDGE: &str = "edge";
 pub const KIND_BOOKMARK: &str = "bookmark";
+pub const KIND_VAR: &str = "var";
 
 /// 网关的 compose project 名前缀，服务名不能用。
 pub const GATEWAY_PROJECT_PREFIX: &str = "wharf-gw-";
@@ -69,6 +70,12 @@ pub struct EdgeRow {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct VarRow {
+  pub value: String,
+  pub version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct BookmarkRow {
   pub spec: BookmarkSpec,
   pub version: u64,
@@ -102,6 +109,7 @@ pub struct World {
   pub gateways: BTreeMap<String, GatewayRow>,
   pub edge_apps: BTreeMap<String, EdgeRow>,
   pub bookmarks: BTreeMap<String, BookmarkRow>,
+  pub vars: BTreeMap<String, VarRow>,
   /// key 是 hostname。
   pub routes: BTreeMap<String, RouteRow>,
 }
@@ -211,6 +219,18 @@ impl World {
             },
           );
         }
+        KIND_VAR => {
+          world.vars.insert(
+            row.name,
+            VarRow {
+              value: serde_json::from_value(
+                row.spec["value"].clone(),
+              )
+              .map_err(json_err)?,
+              version,
+            },
+          );
+        }
         KIND_BOOKMARK => {
           world.bookmarks.insert(
             row.name,
@@ -258,6 +278,9 @@ impl World {
     for (id, r) in &self.bookmarks {
       out.insert(format!("{KIND_BOOKMARK}/{id}"), r.version);
     }
+    for (name, row) in &self.vars {
+      out.insert(format!("{KIND_VAR}/{name}"), row.version);
+    }
     out
   }
 
@@ -289,6 +312,22 @@ impl World {
     }
     for change in changes {
       match change {
+        Change::UpsertVar { name, value } => {
+          crate::variables::validate(name, value)?;
+          let version = self.vars.get(name).map_or(0, |r| r.version);
+          self.vars.insert(
+            name.clone(),
+            VarRow {
+              value: value.clone(),
+              version,
+            },
+          );
+        }
+        Change::RemoveVar { name } => {
+          if self.vars.remove(name).is_none() {
+            return Err(crate::variables::not_found(name));
+          }
+        }
         Change::UpsertBookmark { id, spec } => {
           let version = match id {
             Some(id) => {
@@ -751,6 +790,12 @@ impl World {
   ) -> Result<(), ApiError> {
     route_hosts(fleet)?;
     let mut changes = Vec::new();
+    for (name, value) in &fleet.vars {
+      changes.push(Change::UpsertVar {
+        name: name.clone(),
+        value: value.clone(),
+      });
+    }
     for (name, settings) in &fleet.servers {
       changes.push(Change::UpdateServer {
         name: name.clone(),
@@ -1688,6 +1733,13 @@ impl World {
       &self.edge_apps,
       KIND_EDGE,
       |r| (to_json(&r.spec), json!({})),
+      &mut out,
+    );
+    diff_map(
+      &current.vars,
+      &self.vars,
+      KIND_VAR,
+      |r| (json!({"value": r.value}), json!({})),
       &mut out,
     );
     diff_map(
@@ -2848,6 +2900,7 @@ mod tests {
       init_timeout_secs: None,
       lan: None,
       extra_hosts: Default::default(),
+      self_refs: false,
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {
