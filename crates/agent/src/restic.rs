@@ -141,13 +141,27 @@ impl Job<'_> {
         self.remove_container(&name).await;
         Err(e)
       }
-      Ok(Some(WRONG_PASSWORD)) => {
+      Ok((Some(WRONG_PASSWORD), _)) => {
         Err(ApiError::new(ErrorCode::Forbidden, "备份仓库口令不匹配"))
       }
-      Ok(Some(NO_REPO)) => {
+      Ok((Some(NO_REPO), _)) => {
         Err(ApiError::not_found("没有找到备份仓库"))
       }
-      Ok(Some(0)) => Ok(()),
+      Ok((Some(11), _)) => self
+        .check(
+          Output {
+            success: false,
+            code: Some(11),
+            stdout: String::new(),
+            stderr: String::new(),
+          },
+          "restic",
+        )
+        .map(|_| ()),
+      Ok((Some(0), _)) => Ok(()),
+      Ok((_, stderr)) if missing_snapshot(&stderr) => {
+        Err(ApiError::not_found("没有找到快照"))
+      }
       Ok(_) => Err(ApiError::new(
         ErrorCode::AgentFailed,
         "restic 无法读取快照",
@@ -669,6 +683,16 @@ fn prune_progress_matcher() -> impl FnMut(&str) -> bool {
     counter.clone_into(&mut previous);
     true
   }
+}
+
+fn missing_snapshot(stderr: &str) -> bool {
+  [
+    "no matching ID found for prefix",
+    "no snapshot found",
+    "no snapshots found",
+  ]
+  .iter()
+  .any(|marker| stderr.contains(marker))
 }
 
 fn restic_locked(out: &Output) -> bool {

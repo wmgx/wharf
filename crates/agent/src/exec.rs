@@ -260,17 +260,17 @@ impl Cmd {
     ctx: &Ctx,
     limit: u64,
     dest: &mut (impl tokio::io::AsyncWrite + Unpin),
-  ) -> Result<Option<i32>, ApiError> {
+  ) -> Result<(Option<i32>, String), ApiError> {
     let what = self.describe();
     if ctx.cancel.is_cancelled() {
       return Err(cancelled(&what));
     }
     let mut child = self
       .command()
-      .stderr(Stdio::null())
       .spawn()
       .map_err(|_| ApiError::internal("无法启动读取操作"))?;
     let pid = child.id();
+    let stderr = child.stderr.take();
     let mut stdout =
       child.stdout.take().expect("已接管 stdout").take(limit + 1);
     let read = async {
@@ -286,8 +286,13 @@ impl Cmd {
         .map(|status| status.code())
         .map_err(|_| ApiError::internal("读取命令未完成"))
     };
+    let streams = async {
+      tokio::try_join!(read, async {
+        Ok::<_, ApiError>(capture(stderr, None).await)
+      })
+    };
     let result = tokio::select! {
-      result = read => result,
+      result = streams => result,
       _ = tokio::time::sleep(self.timeout) => Err(ApiError::new(ErrorCode::Timeout, "读取备份超时")),
       _ = ctx.cancel.cancelled() => Err(cancelled(&what)),
     };

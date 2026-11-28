@@ -203,15 +203,15 @@ fn extract_node<'a>(
   nodes: &'a Index,
   path: &str,
 ) -> Result<&'a BackupFileEntry, ApiError> {
-  let mut ancestor = Path::new(path).parent();
-  while let Some(dir) = ancestor {
+  let ancestors: Vec<_> =
+    Path::new(path).ancestors().skip(1).collect();
+  for dir in ancestors.into_iter().rev() {
     let entry = nodes
       .get(text(dir)?)
       .ok_or_else(|| ApiError::not_found("未找到快照中的父目录"))?;
     if entry.kind != "dir" {
       return Err(ApiError::invalid("路径包含符号链接或非目录祖先"));
     }
-    ancestor = dir.parent();
   }
   let entry = nodes
     .get(path)
@@ -462,7 +462,7 @@ mod tests {
   #[test]
   fn extract_rejects_symlink_node_and_symlink_ancestor() {
     let nodes = fixture();
-    for path in ["link", "link/private"] {
+    for path in ["link", "link/private", "link/deep/private"] {
       assert_eq!(
         extract_node(&nodes, path).unwrap_err().code,
         ErrorCode::InvalidInput
