@@ -80,6 +80,45 @@ pub fn commands(prefix: &[String]) -> Value {
   let root = crate::Cli::command();
   let mut list = Vec::new();
   walk(&root, &mut Vec::new(), &mut list);
+  for item in &mut list {
+    let Some(name) = item["command"].as_str() else {
+      continue;
+    };
+    let (effect, perms, returns) = match name {
+      "wharf exec" => ("direct", &["host"][..], Some("host_exec")),
+      "wharf service exec" => {
+        ("direct", &["exec"][..], Some("service_exec"))
+      }
+      "wharf service render" => {
+        ("read", &["read"][..], Some("service_render"))
+      }
+      "wharf task enable" | "wharf task disable"
+      | "wharf task set" | "wharf task run" | "wharf task cancel" => {
+        ("direct", &["apply", "exec"][..], None)
+      }
+      _ => continue,
+    };
+    let remote = matches!(name, "wharf exec" | "wharf service exec");
+    let read = name == "wharf task set";
+    let dry_run = matches!(
+      name,
+      "wharf task enable" | "wharf task disable" | "wharf task set"
+    );
+    item["effect"] = json!(effect);
+    item["perms"] = json!(perms);
+    if let Some(returns) = returns {
+      item["returns"] = json!(returns);
+    }
+    if remote {
+      item["exit_code"] = json!("remote");
+    }
+    if read {
+      item["read_when_no_args"] = json!(true);
+    }
+    if dry_run {
+      item["dry_run"] = json!(true);
+    }
+  }
   if !prefix.is_empty() {
     let want = format!("wharf {}", prefix.join(" "));
     list.retain(|c| {

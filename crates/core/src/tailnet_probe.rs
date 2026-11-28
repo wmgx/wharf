@@ -237,6 +237,7 @@ async fn status(s: &AppState, server: &str) -> Option<Status> {
     .call::<HostExecOutcome>(
       server,
       AgentOp::HostExec(HostExecJob {
+        stream: false,
         command: command.into(),
         timeout_secs: 8,
         cwd: "/".into(),

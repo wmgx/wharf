@@ -261,6 +261,8 @@ fn fixed_items(
       Apply,
       None,
     ),
+    ("容器内执行命令", Method::POST, "/api/services/{svc}/exec", Exec, None),
+    ("预览服务配置", Method::GET, "/api/services/{svc}/render", Read, None),
     (
       "进容器终端",
       Method::GET,

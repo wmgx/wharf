@@ -1,6 +1,6 @@
 //! 各子命令的实现。
 
-use std::{collections::BTreeMap, io::Write, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 
 use serde_json::{Value, json};
 use wharf_api_types::{
@@ -18,10 +18,10 @@ use wharf_api_types::{
   view::{
     AccountView, AppAccountView, AutoUpdateResult, BackupsView,
     CheckStatus, DataView, DeploymentView, DoctorReport, GatewayView,
-    HostExecResponse, ImportPreview, ImportRequest, JoinInfo,
-    NetworkView, RestoreRequest, RollbackTarget, RouteView,
-    ScriptRuntime, SecretView, ServerView, ServiceView, ShellLog,
-    SsoStepResult, SsoTestResult, Status, Unmanaged,
+    ImportPreview, ImportRequest, JoinInfo, NetworkView,
+    RestoreRequest, RollbackTarget, RouteView, ScriptRuntime,
+    SecretView, ServerView, ServiceView, ShellLog, SsoStepResult,
+    SsoTestResult, Status, Unmanaged,
   },
 };
 
@@ -34,6 +34,7 @@ use crate::{
 };
 
 pub(crate) mod entry_protection;
+mod list_edits;
 
 pub async fn run(cli: Cli) -> CliResult<()> {
   let j = cli.json;
@@ -94,6 +95,9 @@ pub async fn run(cli: Cli) -> CliResult<()> {
     Command::Token(cmd) => {
       crate::token::run(cmd, cli.url, cli.token, j).await
     }
+    Command::Service(ServiceCmd::Logs { names, container: Some(_), .. }) if names.len() > 1 => {
+      Err(ApiError::invalid("--container 只能用于单个服务").into())
+    }
     Command::Service(ServiceCmd::Logs { names, follow: true, .. })
       if names.len() > 1 =>
     {
@@ -102,7 +106,7 @@ pub async fn run(cli: Cli) -> CliResult<()> {
       ).into())
     }
     command => {
-      let c = Client::new(cli.url, cli.token).await?;
+      let c = Client::new(cli.url, cli.token).await?.quiet(j);
       dispatch(&c, command, j).await
     }
   }
@@ -301,7 +305,10 @@ async fn dispatch(
       name,
       server,
       port,
+      add_port,
+      rm_port,
       env,
+      unset_env,
       build,
       ops,
       apply,
@@ -319,8 +326,12 @@ async fn dispatch(
         compose_url: None,
         server,
         port,
+        add_port,
+        rm_port,
+        clear_ports: false,
         env,
-        unset_env: vec![],
+        unset_env,
+        clear_env: false,
         start_timeout: None,
         health_path: None,
         volume: vec![],
@@ -467,10 +478,20 @@ async fn dispatch(
     }
     Command::Exec {
       server,
-      timeout,
-      cwd,
+      args,
       command,
-    } => host_exec(c, server, timeout, cwd, command, j).await,
+    } => {
+      crate::exec_command::run(
+        c,
+        &server,
+        false,
+        None,
+        args,
+        command.into_iter().collect(),
+        j,
+      )
+      .await
+    }
     Command::Audit { actor, kind, limit } => {
       crate::audit::audit(c, actor, kind, limit, j).await
     }
@@ -877,6 +898,12 @@ fn schema(resource: Option<&str>) -> CliResult<()> {
     ("fleet", schema_for!(spec::Fleet)),
     ("server", schema_for!(spec::ServerSettings)),
     ("service", schema_for!(spec::ServiceSpec)),
+    ("service_render", schema_for!(view::ServiceRenderView)),
+    ("service_exec", schema_for!(view::ServiceExecResponse)),
+    ("host_exec", schema_for!(view::HostExecResponse)),
+    ("exec_stream_event", schema_for!(view::ExecStreamEvent)),
+    ("task_view", schema_for!(view::TaskView)),
+    ("task_run_view", schema_for!(view::TaskRunView)),
     ("gateway", schema_for!(spec::GatewaySpec)),
     ("route", schema_for!(spec::RouteSpec)),
     ("change", schema_for!(spec::Change)),
@@ -1154,68 +1181,6 @@ pub(crate) async fn changes(
   .await
 }
 
-async fn host_exec(
-  c: &Client,
-  server: String,
-  timeout: Option<u64>,
-  cwd: Option<String>,
-  command: String,
-  j: bool,
-) -> CliResult<()> {
-  let timeout = timeout.unwrap_or(30);
-  let body = json!({
-    "command": command,
-    "timeout_secs": timeout,
-    "cwd": cwd,
-  });
-  enum Wait {
-    Done(CliResult<HostExecResponse>),
-    Interrupted,
-  }
-  let path = format!("/api/servers/{}/exec", seg(&server));
-  let wait = {
-    let request = c.post_timeout(
-      &path,
-      &body,
-      Duration::from_secs(timeout.saturating_add(45)),
-    );
-    tokio::pin!(request);
-    tokio::select! {
-      result = &mut request => Wait::Done(result),
-      _ = tokio::signal::ctrl_c() => Wait::Interrupted,
-    }
-  };
-  let result = match wait {
-    Wait::Done(result) => result?,
-    Wait::Interrupted => {
-      if !j {
-        eprintln!("\n正在取消，等待远端清理…");
-      }
-      // 关闭 HTTP 请求会触发控制面取消；agent 的独立清理预算是 10 秒。
-      tokio::time::sleep(Duration::from_secs(20)).await;
-      return Err(CliError::Exit(130));
-    }
-  };
-  if j {
-    print::json(&result);
-  } else {
-    std::io::stdout()
-      .write_all(result.stdout.as_bytes())
-      .map_err(anyhow::Error::from)?;
-    std::io::stderr()
-      .write_all(result.stderr.as_bytes())
-      .map_err(anyhow::Error::from)?;
-    if result.truncated {
-      eprintln!("\n[输出已截断]");
-    }
-  }
-  if result.exit_code == 0 {
-    Ok(())
-  } else {
-    Err(CliError::Exit(result.exit_code))
-  }
-}
-
 async fn shell_log(
   c: &Client,
   server: Option<String>,
@@ -1269,11 +1234,20 @@ async fn shell_log(
 }
 
 fn command_summary(command: &str) -> String {
-  command
+  let mut lines = command.lines();
+  let first: String = lines
+    .next()
+    .unwrap_or_default()
     .chars()
     .flat_map(char::escape_default)
     .take(100)
-    .collect()
+    .collect();
+  let count = 1 + lines.count();
+  if count > 1 {
+    format!("{first}（共 {count} 行）")
+  } else {
+    first
+  }
 }
 
 // SERVERS
@@ -1469,14 +1443,17 @@ async fn server(
       region,
       public_ip,
       mirror,
+      rm_mirror,
       clear_mirrors,
       mirrors_only,
       private_ip,
       network,
       mode,
       lan_ip,
+      rm_lan_ip,
       clear_lan_ips,
       build_env,
+      rm_build_env,
       clear_build_env,
       git_proxy,
       pull_proxy,
@@ -1513,6 +1490,13 @@ async fn server(
       if clear_mirrors {
         settings.registry_mirrors.clear();
       }
+      for key in rm_mirror {
+        if settings.registry_mirrors.remove(key.trim()).is_none() {
+          return Err(
+            ApiError::invalid(format!("镜像源 {key} 不存在")).into(),
+          );
+        }
+      }
       for m in mirror {
         let (registry, list) =
           m.split_once('=').ok_or_else(|| {
@@ -1539,6 +1523,14 @@ async fn server(
       }
       if clear_lan_ips {
         settings.lan_addrs.clear();
+      }
+      for ip in rm_lan_ip {
+        list_edits::remove_named(
+          &mut settings.lan_addrs,
+          ip.trim(),
+          "局域网地址",
+          String::as_str,
+        )?;
       }
       for ip in lan_ip {
         let ip = ip.trim().to_string();
@@ -1602,6 +1594,14 @@ async fn server(
         }
         settings.github_mirror =
           (!m.is_empty()).then(|| m.to_string());
+      }
+      for key in rm_build_env {
+        if settings.build_env.remove(key.trim()).is_none() {
+          return Err(
+            ApiError::invalid(format!("构建参数 {key} 不存在"))
+              .into(),
+          );
+        }
       }
       for e in &build_env {
         let (k, v) = parse_kv(e, "--build-env")?;
@@ -2289,20 +2289,50 @@ async fn service(
       });
       Ok(())
     }
+    ServiceCmd::Exec {
+      name,
+      container,
+      args,
+      command,
+    } => {
+      crate::exec_command::run(
+        c, &name, true, container, args, command, j,
+      )
+      .await
+    }
+    ServiceCmd::Render { name } => {
+      let v: wharf_api_types::view::ServiceRenderView = c
+        .get(&format!("/api/services/{}/render", seg(&name)))
+        .await?;
+      out(j, &v, |v| {
+        for warning in &v.warnings {
+          eprintln!("提醒：{warning}");
+        }
+        print!("{}", v.compose);
+        if let Some(init) = &v.init_cmd {
+          println!("# init_cmd:");
+          for line in init.lines() {
+            println!("# {line}");
+          }
+        }
+      });
+      Ok(())
+    }
     ServiceCmd::Logs {
       names,
       tail,
+      container,
       follow: true,
       ..
     } => {
-      follow_logs(
-        c,
-        &format!(
-          "/api/services/{}/logs/stream?tail={tail}",
-          seg(&names[0])
-        ),
-      )
-      .await
+      let mut path = format!(
+        "/api/services/{}/logs/stream?tail={tail}",
+        seg(&names[0])
+      );
+      if let Some(container) = container {
+        path.push_str(&format!("&container={}", seg(&container)));
+      }
+      follow_logs(c, &path).await
     }
     ServiceCmd::Discover { server } => {
       let v: Vec<Unmanaged> = c
@@ -2528,6 +2558,7 @@ async fn service(
       names,
       tail,
       follow: false,
+      container,
       previous,
       previous_list,
       since,
@@ -2582,6 +2613,8 @@ async fn service(
         let mut path = format!("/api/services/{}/logs", seg(name));
         if let Some(index) = previous {
           path.push_str(&format!("?previous={index}"));
+        } else if let Some(container) = container {
+          path.push_str(&format!("?container={}", seg(&container)));
         }
         path
       } else {
@@ -2624,11 +2657,12 @@ async fn service(
       )
       .await
     }
-    ServiceCmd::Restart { name } => {
+    ServiceCmd::Restart { name, container } => {
       let r: ApplyResponse = c
         .post(
           &format!("/api/services/{}/restart", seg(&name)),
-          &json!({}),
+          &container
+            .map_or_else(|| json!({}), |c| json!({"container": c})),
         )
         .await?;
       finish_task(c, &r.run_id, true, j).await
@@ -2672,8 +2706,12 @@ async fn service(
       compose_url,
       server,
       port,
+      add_port,
+      rm_port,
+      clear_ports,
       env,
       unset_env,
+      clear_env,
       start_timeout,
       health_path,
       volume,
@@ -2694,6 +2732,7 @@ async fn service(
       };
       let first_port = port
         .first()
+        .or_else(|| add_port.first())
         .map(|p| parse_port(p))
         .transpose()?
         .and_then(|p| p.container)
@@ -2840,12 +2879,16 @@ async fn service(
       if let Some(container) = container {
         spec.container = Some(container);
       }
-      if !port.is_empty() {
-        spec.ports = port
-          .iter()
-          .map(|p| parse_port(p))
-          .collect::<CliResult<_>>()?;
-      } else if (is_new && default_port.is_some() || was_compose)
+      list_edits::apply_port_edits(
+        &mut spec.ports,
+        &port,
+        &add_port,
+        &rm_port,
+        clear_ports,
+      )?;
+      if !clear_ports
+        && rm_port.is_empty()
+        && (is_new && default_port.is_some() || was_compose)
         && !matches!(spec.source, Source::Compose { .. })
         && spec.ports.is_empty()
         && from_run.is_none()
@@ -2858,6 +2901,9 @@ async fn service(
           host: None,
           udp: p.udp,
         }];
+      }
+      if clear_env {
+        spec.env.clear();
       }
       for e in &env {
         let (k, v) = parse_kv(e, "--env")?;
@@ -3866,6 +3912,8 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       no_auth,
       paths,
       no_paths,
+      add_path,
+      rm_path,
       tunnel,
       no_tunnel,
       internal,
@@ -3909,6 +3957,11 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         internal: flag(internal, no_internal),
       };
       let mut spec = route_add_spec(old, args)?;
+      list_edits::apply_path_edits(
+        &mut spec.paths,
+        &add_path,
+        &rm_path,
+      )?;
       protection.set(&mut spec);
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }
@@ -3916,6 +3969,10 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
       name,
       mode,
       skip,
+      add_skip,
+      rm_skip,
+      add_redirect,
+      rm_redirect,
       trust_internal,
       no_trust_internal,
       header,
@@ -3934,6 +3991,28 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         })?;
       let mut spec = route.spec;
       let Some(mode) = mode else {
+        if [&add_skip, &rm_skip, &add_redirect, &rm_redirect]
+          .iter()
+          .any(|v| !v.is_empty())
+        {
+          let sso = spec.sso.as_mut().ok_or_else(|| {
+            ApiError::invalid("请先用 --mode 设置门禁方式")
+          })?;
+          list_edits::apply_sso_list_edits(
+            sso,
+            &add_skip,
+            &rm_skip,
+            &add_redirect,
+            &rm_redirect,
+          )?;
+          return changes(
+            c,
+            vec![Change::UpsertRoute { spec }],
+            apply,
+            j,
+          )
+          .await;
+        }
         if !j
           && let Some(sso) = &spec.sso
           && sso.mode == SsoMode::Login
@@ -4049,8 +4128,20 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
         });
         return Ok(());
       };
-      spec.sso =
-        (mode != "off").then_some(wharf_api_types::spec::SsoSpec {
+      let previous = spec.sso.clone();
+      if mode == "off"
+        && [&add_skip, &rm_skip, &add_redirect, &rm_redirect]
+          .iter()
+          .any(|v| !v.is_empty())
+      {
+        return Err(
+          ApiError::invalid("关闭门禁时不能增删门禁设置").into(),
+        );
+      }
+      spec.sso = if mode == "off" {
+        None
+      } else {
+        Some(wharf_api_types::spec::SsoSpec {
           login: if mode == "login" {
             let file = file.ok_or_else(|| {
               ApiError::invalid("login 方式需要 --file")
@@ -4079,7 +4170,16 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
             None
           },
           oidc: if mode == "oidc" {
-            if redirect.is_empty() {
+            let redirect = if redirect.is_empty() {
+              previous
+                .as_ref()
+                .and_then(|s| s.oidc.as_ref())
+                .map(|o| o.redirect_uris.clone())
+                .unwrap_or_default()
+            } else {
+              redirect
+            };
+            if redirect.is_empty() && add_redirect.is_empty() {
               return Err(
                 ApiError::invalid("oidc 方式至少要一个 --redirect")
                   .with_hint("回调路径看应用的 OIDC 文档，例如 Grafana 是 /login/generic_oauth")
@@ -4091,7 +4191,8 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
             })
           } else if !redirect.is_empty() {
             return Err(
-              ApiError::invalid("只有 oidc 方式才能用 --redirect").into(),
+              ApiError::invalid("只有 oidc 方式才能用 --redirect")
+                .into(),
             );
           } else {
             None
@@ -4110,9 +4211,23 @@ async fn route(c: &Client, cmd: RouteCmd, j: bool) -> CliResult<()> {
             && !no_trust_internal
             && (trust_internal
               || spec.sso.as_ref().is_some_and(|s| s.trust_internal)),
-          skip_paths: skip,
+          skip_paths: if skip.is_empty() {
+            previous.map_or_else(Vec::new, |s| s.skip_paths)
+          } else {
+            skip
+          },
           public,
-        });
+        })
+      };
+      if let Some(sso) = spec.sso.as_mut() {
+        list_edits::apply_sso_list_edits(
+          sso,
+          &add_skip,
+          &rm_skip,
+          &add_redirect,
+          &rm_redirect,
+        )?;
+      }
       changes(c, vec![Change::UpsertRoute { spec }], apply, j).await
     }
     RouteCmd::Guard {
@@ -5405,7 +5520,7 @@ mod tests {
     let Command::Exec { command, .. } = cli.command else {
       panic!("不是 exec");
     };
-    assert_eq!(command, "printf '%s' hello");
+    assert_eq!(command.as_deref(), Some("printf '%s' hello"));
     assert_eq!(command_summary("a\x1b[31m"), r"a\u{1b}[31m");
     assert!(
       Cli::try_parse_from(["wharf", "exec", "s1", "--", "a", "b"])

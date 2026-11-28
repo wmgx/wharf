@@ -342,6 +342,7 @@ pub struct Client {
   /// 实际发请求的地址：本机加密通道的入口。
   endpoint: String,
   tunnel_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+  quiet: bool,
   token: Option<String>,
 }
 
@@ -353,6 +354,7 @@ impl Client {
       base: endpoint.clone(),
       endpoint,
       tunnel_error: Default::default(),
+      quiet: false,
       token: Some("fixture-token".into()),
     }
   }
@@ -402,8 +404,14 @@ impl Client {
       base,
       endpoint: tunnel.local,
       tunnel_error: tunnel.last_error,
+      quiet: false,
       token,
     })
+  }
+
+  pub(crate) fn quiet(mut self, quiet: bool) -> Self {
+    self.quiet = quiet;
+    self
   }
 
   pub(crate) fn is_for(&self, url: &str) -> bool {
@@ -412,6 +420,9 @@ impl Client {
 
   /// 控制面和本机 CLI 的构建号不一致时提醒一次（写 stderr，不影响 `--json`）。
   fn check_build(&self, headers: &reqwest::header::HeaderMap) {
+    if self.quiet {
+      return;
+    }
     static WARNED: std::sync::atomic::AtomicBool =
       std::sync::atomic::AtomicBool::new(false);
     let mine = env!("WHARF_CLI_BUILD");
@@ -648,6 +659,75 @@ impl Client {
         &serde_json::json!({"token": token, "cert": cert}),
       )
       .await
+  }
+
+  /// POST 执行流。旧控制面可能返回非流式 JSON，交给调用方处理。
+  pub async fn post_stream<B: Serialize>(
+    &self,
+    path: &str,
+    body: &B,
+    timeout: Duration,
+    mut on_line: impl FnMut(&str) -> CliResult<()>,
+  ) -> CliResult<Option<Vec<u8>>> {
+    let req = self
+      .http
+      .post(format!("{}{path}", self.endpoint))
+      .timeout(timeout)
+      .json(body);
+    let req = match &self.token {
+      Some(token) => req.bearer_auth(token),
+      None => req,
+    };
+    let mut resp =
+      req.send().await.map_err(|e| self.conn_error(e))?;
+    self.check_build(resp.headers());
+    if !resp.status().is_success() {
+      let status = resp.status();
+      let bytes = resp.bytes().await.unwrap_or_default();
+      return Err(
+        serde_json::from_slice::<ApiError>(&bytes)
+          .unwrap_or_else(|_| {
+            ApiError::internal(format!("执行请求失败：HTTP {status}"))
+          })
+          .into(),
+      );
+    }
+    if !resp
+      .headers()
+      .get("content-type")
+      .and_then(|v| v.to_str().ok())
+      .is_some_and(|v| v.starts_with("application/x-ndjson"))
+    {
+      return Ok(Some(
+        resp.bytes().await.map_err(|e| self.conn_error(e))?.to_vec(),
+      ));
+    }
+    let mut pending = Vec::new();
+    while let Some(chunk) =
+      resp.chunk().await.map_err(|e| self.conn_error(e))?
+    {
+      for part in chunk.split_inclusive(|&b| b == b'\n') {
+        if pending.len() + part.len() > 256 * 1024 {
+          return Err(
+            ApiError::internal("执行流事件超过大小上限").into(),
+          );
+        }
+        pending.extend_from_slice(part);
+        if part.last() == Some(&b'\n') {
+          let line =
+            std::str::from_utf8(&pending[..pending.len() - 1])
+              .map_err(|_| {
+                ApiError::internal("执行流事件不是 UTF-8")
+              })?;
+          on_line(line)?;
+          pending.clear();
+        }
+      }
+    }
+    if !pending.is_empty() {
+      return Err(ApiError::internal("执行流在事件中间断开").into());
+    }
+    Ok(None)
   }
 
   pub async fn post_timeout<B: Serialize, T: DeserializeOwned>(

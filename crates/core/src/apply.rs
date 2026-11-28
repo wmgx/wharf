@@ -1085,7 +1085,7 @@ async fn execute(
         | Step::Rebuild { service } => {
           crate::heal::clear(&state, service).await
         }
-        Step::ServiceRestart { service }
+        Step::ServiceRestart { service, .. }
           if !step
             .title
             .starts_with(crate::heal::AUTO_RESTART_TITLE) =>
@@ -1509,16 +1509,39 @@ async fn run_step_with_dns(
       )
       .await?;
     }
-    Step::ServiceRestart { service } => {
+    Step::ServiceRestart { service, container } => {
       let server = service_server(&snap, service)?;
+      if container.is_some()
+        && snap.pending.migrations.get(service).is_some_and(|m| {
+          m.phase != crate::pending::MigratePhase::UpDone
+            && m.payload.from == server
+            && m.payload.source_stopped
+        })
+      {
+        return Err(ApiError::new(
+          ErrorCode::Conflict,
+          format!(
+            "服务 {service} 正在迁移，源服务已停，不能单独重启子容器"
+          ),
+        ));
+      }
       crate::pending::source_changed(state, service).await?;
-      service_restart(state, &server, service, &progress, cancel)
-        .await?;
-      if snap.pending.migrations.get(service).is_some_and(|m| {
-        m.phase != crate::pending::MigratePhase::UpDone
-          && m.payload.from == server
-          && m.payload.source_stopped
-      }) {
+      service_restart(
+        state,
+        &server,
+        service,
+        container.as_deref(),
+        &progress,
+        cancel,
+      )
+      .await?;
+      if container.is_none()
+        && snap.pending.migrations.get(service).is_some_and(|m| {
+          m.phase != crate::pending::MigratePhase::UpDone
+            && m.payload.from == server
+            && m.payload.source_stopped
+        })
+      {
         crate::migrate::reset_after_restart(state, service).await?;
       }
     }
@@ -2201,49 +2224,74 @@ async fn service_restart(
   state: &AppState,
   server: &str,
   service: &str,
+  container: Option<&str>,
   progress: &ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
-  let result = if state.hub.supports_safe_gateway(server) {
-    state
-      .hub
-      .call(
-        server,
-        AgentOp::ProjectRestart {
-          project: service.into(),
-        },
-        Duration::from_secs(240),
-        Some(progress.clone()),
-        cancel,
+  let conn = container
+    .map(|_| state.hub.exec_v2_conn_id(server, "重启单个子容器"))
+    .transpose()?;
+  let mut result: ProjectUpResult =
+    if conn.is_some() || state.hub.supports_safe_gateway(server) {
+      state
+        .hub
+        .call_optional_bound(
+          server,
+          conn,
+          AgentOp::ProjectRestart {
+            project: service.into(),
+            container: container.map(str::to_string),
+          },
+          Duration::from_secs(240),
+          Some(progress.clone()),
+          cancel,
+        )
+        .await?
+    } else {
+      project_stop_start(
+        state, server, service, false, progress, cancel,
       )
-      .await?
-  } else {
-    project_stop_start(
-      state, server, service, false, progress, cancel,
-    )
-    .await?;
-    progress("已停止，正在重新启动".into());
-    let resume = CancellationToken::new();
-    project_stop_start(
-      state, server, service, true, progress, &resume,
-    )
-    .await?;
-    let mut status = snapshot::project_status(
-      &state.hub,
-      server,
-      vec![service.into()],
-      SHORT_TIMEOUT,
-    )
-    .await?;
-    ProjectUpResult {
-      containers: status
-        .remove(service)
-        .map_or_else(Vec::new, |s| s.containers),
-      images: vec![],
-      warnings: vec![],
-      retired: vec![],
+      .await?;
+      progress("已停止，正在重新启动".into());
+      let resume = CancellationToken::new();
+      project_stop_start(
+        state, server, service, true, progress, &resume,
+      )
+      .await?;
+      let mut status = snapshot::project_status(
+        &state.hub,
+        server,
+        vec![service.into()],
+        SHORT_TIMEOUT,
+      )
+      .await?;
+      ProjectUpResult {
+        containers: status
+          .remove(service)
+          .map_or_else(Vec::new, |s| s.containers),
+        images: vec![],
+        warnings: vec![],
+        retired: vec![],
+      }
+    };
+  if let Some(c) = container {
+    result
+      .containers
+      .retain(|info| info.service == c && !info.foreign);
+    if result.containers.is_empty()
+      || result.containers.iter().any(|info| !info.is_running())
+    {
+      return Err(
+        ApiError::new(
+          ErrorCode::AgentFailed,
+          format!("子容器 {service}/{c} 未进入运行态"),
+        )
+        .suggest(format!(
+          "wharf service logs {service} --container {c}"
+        )),
+      );
     }
-  };
+  }
   ensure_running(
     &result,
     service,
@@ -3723,6 +3771,7 @@ mod tests {
     );
     let restart = Step::ServiceRestart {
       service: "notes".into(),
+      container: None,
     };
     run_step(&state, "r2", &restart, progress, &cancel)
       .await
@@ -4178,7 +4227,7 @@ mod tests {
    {
     let state = crate::rules::tests::test_state();
     state.hub.mock_safe_gateway_agent("s1", |op| {
-      assert!(matches!(op, AgentOp::ProjectRestart { project } if project == "notes"));
+      assert!(matches!(op, AgentOp::ProjectRestart { project, container: None } if project == "notes"));
       Ok(serde_json::json!({"containers":[{"name":"notes-1","service":"notes","state":"exited"}],"images":[]}))
     });
     let progress: ProgressFn = Arc::new(|_| {});
@@ -4186,6 +4235,7 @@ mod tests {
       &state,
       "s1",
       "notes",
+      None,
       &progress,
       &CancellationToken::new(),
     )
@@ -4214,7 +4264,7 @@ mod tests {
         during_stop.cancel();
       }
     });
-    service_restart(&state, "s1", "notes", &progress, &cancel)
+    service_restart(&state, "s1", "notes", None, &progress, &cancel)
       .await
       .unwrap();
     assert!(cancel.is_cancelled());

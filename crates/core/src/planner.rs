@@ -248,6 +248,8 @@ pub enum Step {
   /// 重启服务的容器。单独发起，不来自计划。
   ServiceRestart {
     service: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    container: Option<String>,
   },
   /// 控制面自身备份。`user_key`：开启时输入的登录密码，加成仓库的恢复口令。
   CoreBackup {

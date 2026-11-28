@@ -103,3 +103,20 @@ mod tests {
     }
   }
 }
+
+/// 校验传给 Compose 的服务名。
+pub fn validate_container_name(name: &str) -> Result<(), ApiError> {
+  let mut bytes = name.bytes();
+  if name.len() <= 64
+    && bytes.next().is_some_and(|b| b.is_ascii_alphanumeric())
+    && bytes.all(|b| {
+      b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')
+    })
+  {
+    Ok(())
+  } else {
+    Err(ApiError::invalid(
+      "子容器名须以字母或数字开头，最多 64 个字符，只能包含 ASCII 字母、数字、点、下划线或连字符",
+    ))
+  }
+}

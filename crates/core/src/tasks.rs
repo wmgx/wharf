@@ -2,7 +2,7 @@
 //! 任务定义直接改。开启补跑的任务可在宽限期内补上最近一次计划。
 
 use std::{
-  collections::{BTreeMap, BTreeSet, HashMap},
+  collections::{BTreeMap, HashMap},
   sync::{Arc, LazyLock, Mutex, RwLock},
   time::Duration,
 };
@@ -48,7 +48,15 @@ const HOST_MAX: u64 = 600;
 const OTHER_MAX: u64 = 6 * 3600;
 
 /// 正在跑的任务，同一个任务不并发。
-static RUNNING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+static RUNNING: LazyLock<Mutex<HashMap<String, ActiveRun>>> =
+  LazyLock::new(Default::default);
+
+#[derive(Clone)]
+struct ActiveRun {
+  id: i64,
+  cancel: CancellationToken,
+}
+
 static HOOKS: LazyLock<Mutex<crate::notify_keys::RequestLimit>> =
   LazyLock::new(Default::default);
 static HOOK_FAILS: LazyLock<Mutex<crate::notify_keys::RequestLimit>> =
@@ -117,11 +125,26 @@ struct RunGuard(String);
 
 impl RunGuard {
   fn acquire(name: &str) -> Option<Self> {
-    RUNNING
-      .lock()
-      .unwrap_or_else(|e| e.into_inner())
-      .insert(name.to_string())
-      .then(|| Self(name.to_string()))
+    let mut running =
+      RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    let std::collections::hash_map::Entry::Vacant(slot) =
+      running.entry(name.into())
+    else {
+      return None;
+    };
+    slot.insert(ActiveRun {
+      id: 0,
+      cancel: CancellationToken::new(),
+    });
+    Some(Self(name.into()))
+  }
+
+  fn bind(&self, id: i64) -> CancellationToken {
+    let mut running =
+      RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    let run = running.get_mut(&self.0).expect("任务持有运行锁");
+    run.id = id;
+    run.cancel.clone()
   }
 }
 
@@ -235,6 +258,7 @@ async fn tick(
           "catch_up",
           None,
           Some(guard),
+          RunTaskRequest::default(),
         )
         .await?;
       }
@@ -441,6 +465,7 @@ async fn start(
     trigger,
     input,
     RunGuard::acquire(name),
+    RunTaskRequest::default(),
   )
   .await
 }
@@ -489,6 +514,7 @@ async fn start_with_guard(
   trigger: &str,
   input: Option<TaskInput>,
   guard: Option<RunGuard>,
+  mut request: RunTaskRequest,
 ) -> Result<(i64, bool), ApiError> {
   let snap = snapshot::load(&state.db).await?;
   let service = run_service(&spec, &snap);
@@ -496,6 +522,14 @@ async fn start_with_guard(
     .map_or(Ok(spec.server.as_str()), |(name, _)| {
       exec_target(&snap, name)
     });
+  if !request.env.is_empty()
+    && service.is_some()
+    && let Ok(server) = &target
+  {
+    request.conn = Some(
+      state.hub.exec_v2_conn_id(server, "容器内任务临时 --env")?,
+    );
+  }
   let skip = if guard.is_none() {
     Some("上一次还没跑完".to_string())
   } else {
@@ -514,11 +548,18 @@ async fn start_with_guard(
   let server = target.expect("可执行任务已有目标").to_string();
   let mut spec = spec;
   spec.server = server;
+  let cancel = guard.as_ref().expect("任务持有运行锁").bind(id);
   let state = state.clone();
   let name = name.to_string();
   tokio::spawn(async move {
     let (status, code, output, mem_peak) =
-      execute(&state, &name, &spec, &snap, input).await;
+      execute(&state, &name, &spec, &snap, input, &request, &cancel)
+        .await;
+    let (status, code, output) = if cancel.is_cancelled() {
+      (TaskStatus::Cancelled, None, "已手动取消".into())
+    } else {
+      (status, code, output)
+    };
     finish(&state, id, status, code, &output, mem_peak).await;
     drop(guard);
     notify_result(
@@ -543,7 +584,7 @@ pub(crate) async fn notify_result(
   output: &str,
   target: Option<&str>,
 ) {
-  if status == TaskStatus::Skipped {
+  if matches!(status, TaskStatus::Skipped | TaskStatus::Cancelled) {
     return;
   }
   let ok = status == TaskStatus::Succeeded;
@@ -606,6 +647,7 @@ fn status_text(s: TaskStatus) -> &'static str {
     TaskStatus::Failed => "失败",
     TaskStatus::TimedOut => "超时",
     TaskStatus::Skipped => "跳过",
+    TaskStatus::Cancelled => "已取消",
   }
 }
 
@@ -621,6 +663,8 @@ async fn execute(
   spec: &TaskSpec,
   snap: &snapshot::Snapshot,
   input: Option<TaskInput>,
+  request: &RunTaskRequest,
+  cancel: &CancellationToken,
 ) -> (TaskStatus, Option<i32>, String, Option<u64>) {
   if let Err(e) = crate::secret_policy::validate_task_restrictions(
     name,
@@ -631,11 +675,39 @@ async fn execute(
   }
   let secrets =
     crate::secret_policy::non_system_secrets(&snap.secrets);
-  let used = crate::secret_policy::redact_values(&secrets);
-  let redact =
-    |s: String| crate::log_redact::redact_text_with(&s, &used);
-  let result =
-    run_on_agent(state, name, spec, snap, &secrets, input).await;
+  if let Err(e) = crate::secret_policy::validate_task_env(
+    name,
+    request.env.values().map(String::as_str),
+    &snap.secret_restrictions,
+  ) {
+    return (TaskStatus::Failed, None, e.message, None);
+  }
+  let mut used = crate::secret_policy::redact_values(&secrets);
+  used.extend(
+    request
+      .env
+      .iter()
+      .filter(|(key, _)| crate::redact::is_sensitive_env_key(key))
+      .flat_map(|(_, value)| {
+        let resolved = render::substitute(value, Some(&secrets)).ok();
+        std::iter::once(value.clone()).chain(resolved)
+      }),
+  );
+  let redact = |s: String| {
+    crate::log_redact::redact_text(&wharf_api_types::mask_values(
+      &s, &used,
+    ))
+  };
+  let result = run_on_agent(
+    state,
+    name,
+    spec,
+    (snap, &secrets),
+    input,
+    request,
+    cancel,
+  )
+  .await;
   match result {
     Ok(r) => {
       let status = if r.timed_out {
@@ -648,7 +720,14 @@ async fn execute(
       (status, r.exit_code, redact(r.output), r.mem_peak)
     }
     Err(e) => {
-      let status = if e.code == ErrorCode::Timeout {
+      let status = if e.code == ErrorCode::Cancelled {
+        return (
+          TaskStatus::Cancelled,
+          None,
+          "已手动取消".into(),
+          None,
+        );
+      } else if e.code == ErrorCode::Timeout {
         TaskStatus::TimedOut
       } else {
         TaskStatus::Failed
@@ -662,11 +741,20 @@ async fn run_on_agent(
   state: &Arc<AppState>,
   name: &str,
   spec: &TaskSpec,
-  snap: &snapshot::Snapshot,
-  secrets: &BTreeMap<String, String>,
+  (snap, secrets): (&snapshot::Snapshot, &BTreeMap<String, String>),
   input: Option<TaskInput>,
+  request: &RunTaskRequest,
+  cancel: &CancellationToken,
 ) -> Result<TaskRunResult, ApiError> {
   let sub = |t: &str| render::substitute(t, Some(secrets));
+  let env_with_overrides = |env: &BTreeMap<String, String>| {
+    let mut merged = env.clone();
+    merged.extend(request.env.clone());
+    merged
+      .into_iter()
+      .map(|(k, v)| Ok((k, sub(&v)?)))
+      .collect::<Result<_, ApiError>>()
+  };
   let server = snap
     .world
     .servers
@@ -678,16 +766,18 @@ async fn run_on_agent(
     }
     TaskKind::Host { command } => {
       let job = HostExecJob {
+        stream: false,
         command: sub(command)?,
         timeout_secs: spec.timeout_secs,
         cwd: "/root".into(),
       };
-      let r = crate::shell::run_host_with_audit(
+      let r = crate::shell::run_host_cancellable(
         state.clone(),
         &format!("task:{name}"),
         spec.server.clone(),
         job,
         Some(command),
+        cancel.child_token(),
       )
       .await?;
       return Ok(TaskRunResult {
@@ -707,6 +797,8 @@ async fn run_on_agent(
       project: service.clone(),
       service: container.clone(),
       command: sub(command)?,
+      env: env_with_overrides(&BTreeMap::new())?,
+      cancellable: true,
     },
     TaskKind::Script {
       runtime,
@@ -723,10 +815,7 @@ async fn run_on_agent(
       code: code.clone(),
       deps: deps.clone(),
       mirrors: server.settings.build_env.clone(),
-      env: env
-        .iter()
-        .map(|(k, v)| Ok((k.clone(), sub(v)?)))
-        .collect::<Result<_, ApiError>>()?,
+      env: env_with_overrides(env)?,
     },
     TaskKind::Container {
       image,
@@ -736,10 +825,7 @@ async fn run_on_agent(
     } => TaskHow::Container {
       image: image.clone(),
       command: command.as_deref().map(&sub).transpose()?,
-      env: env
-        .iter()
-        .map(|(k, v)| Ok((k.clone(), sub(v)?)))
-        .collect::<Result<_, ApiError>>()?,
+      env: env_with_overrides(env)?,
       mounts: mounts.clone(),
     },
   };
@@ -775,12 +861,13 @@ async fn run_on_agent(
     && !state.hub.supports_build_v2(&spec.server);
   let mut result: TaskRunResult = state
     .hub
-    .call(
+    .call_optional_bound(
       &spec.server,
+      request.conn,
       AgentOp::TaskRun(job),
       wait,
       None,
-      &CancellationToken::new(),
+      cancel,
     )
     .await?;
   if old_agent {
@@ -928,7 +1015,7 @@ pub async fn issues(state: &AppState) -> Vec<Issue> {
       let mut stmt = c
         .prepare(
           "SELECT t.name, r.status FROM tasks t JOIN task_runs r ON r.id = (
-             SELECT id FROM task_runs WHERE task = t.name AND status NOT IN ('skipped', 'running')
+             SELECT id FROM task_runs WHERE task = t.name AND status NOT IN ('skipped', 'running', 'cancelled')
              ORDER BY id DESC LIMIT 1)
            WHERE r.status IN ('failed', 'timed_out')
              AND COALESCE(json_extract(t.spec, '$.enabled'), 1) = 1 ORDER BY t.name",
@@ -1329,11 +1416,53 @@ pub async fn remove(
   Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunTaskRequest {
+  #[serde(default)]
+  env: BTreeMap<String, String>,
+  #[serde(skip)]
+  conn: Option<u64>,
+}
+
+fn validate_run_env(
+  env: &BTreeMap<String, String>,
+) -> Result<(), ApiError> {
+  if env.len() > 64
+    || env.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>()
+      > 64 * 1024
+  {
+    return Err(ApiError::invalid(
+      "临时环境变量最多 64 个、共 64 KiB",
+    ));
+  }
+  for (key, value) in env {
+    let mut bytes = key.bytes();
+    if key.starts_with("WHARF_")
+      || !bytes
+        .next()
+        .is_some_and(|b| b == b'_' || b.is_ascii_alphabetic())
+      || !bytes.all(|b| b == b'_' || b.is_ascii_alphanumeric())
+    {
+      return Err(ApiError::invalid(
+        "临时环境变量名格式不正确，且不能以 WHARF_ 开头",
+      ));
+    }
+    if value.len() > 16 * 1024 || value.contains('\0') {
+      return Err(ApiError::invalid(
+        "临时环境变量值最多 16 KiB，且不能包含 NUL",
+      ));
+    }
+  }
+  Ok(())
+}
+
 /// `POST /api/tasks/{name}/run`：立即运行，返回运行记录 id。
 pub async fn run_now(
   State(s): State<Arc<AppState>>,
   auth: Auth,
   Path(name): Path<String>,
+  body: Option<Json<RunTaskRequest>>,
 ) -> ApiResult<serde_json::Value> {
   let spec = load_one(&s, &name).await?;
   let snap = snapshot::load(&s.db).await?;
@@ -1352,8 +1481,36 @@ pub async fn run_now(
       .into(),
     );
   }
-  let (id, _) = start(&s, &name, spec, "manual", None).await?;
-  Ok(Json(serde_json::json!({ "id": id })))
+  let request =
+    body.map_or_else(RunTaskRequest::default, |body| body.0);
+  if !request.env.is_empty() {
+    if matches!(spec.how, TaskKind::Host { .. }) {
+      return Err(
+        ApiError::invalid("宿主机任务不支持临时 --env")
+          .with_hint("将变量写进命令，或使用脚本/容器任务")
+          .into(),
+      );
+    }
+    validate_run_env(&request.env)?;
+    crate::secret_policy::validate_task_env(
+      &name,
+      request.env.values().map(String::as_str),
+      &snap.secret_restrictions,
+    )?;
+  }
+  let (id, busy) = start_with_guard(
+    &s,
+    &name,
+    spec,
+    "manual",
+    None,
+    RunGuard::acquire(&name),
+    request,
+  )
+  .await?;
+  Ok(Json(
+    serde_json::json!({ "id": id, "task": name, "status": if busy { "skipped" } else { "running" } }),
+  ))
 }
 
 #[derive(Deserialize)]
@@ -1373,22 +1530,7 @@ pub async fn runs(
   Path(name): Path<String>,
   Query(q): Query<RunsQuery>,
 ) -> ApiResult<Vec<TaskRunView>> {
-  auth.require(Perm::Read)?;
-  if let Some(allowed) = &auth.services {
-    match load_one(&s, &name).await {
-      Ok(spec) if matches!(&spec.how, TaskKind::Exec { service, .. } if allowed.contains(service)) =>
-        {}
-      Err(error) if error.code != ErrorCode::NotFound => {
-        return Err(error.into());
-      }
-      _ => {
-        return Err(
-          crate::token_scope::forbidden(&auth.name, allowed, "")
-            .into(),
-        );
-      }
-    }
-  }
+  check_run_scope(&s, &auth, &name).await?;
   let limit = q.limit.clamp(1, KEEP_RUNS);
   let visible = visible_services(&auth)?;
   let rows = s
@@ -1415,6 +1557,112 @@ fn visible_services(auth: &Auth) -> Result<Option<String>, ApiError> {
     .map(serde_json::to_string)
     .transpose()
     .map_err(db::json_err)
+}
+
+async fn check_run_scope(
+  s: &AppState,
+  auth: &Auth,
+  name: &str,
+) -> Result<(), crate::api::AppError> {
+  auth.require(Perm::Read)?;
+  if let Some(allowed) = &auth.services {
+    match load_one(s, name).await {
+      Ok(spec) if matches!(&spec.how, TaskKind::Exec { service, .. } if allowed.contains(service)) =>
+        {}
+      Err(error) if error.code != ErrorCode::NotFound => {
+        return Err(error.into());
+      }
+      _ => {
+        return Err(crate::token_scope::forbidden(
+          &auth.name, allowed, "",
+        ));
+      }
+    }
+  }
+  Ok(())
+}
+
+pub async fn run_detail(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path((name, id)): Path<(String, i64)>,
+) -> ApiResult<TaskRunView> {
+  check_run_scope(&s, &auth, &name).await?;
+  let visible = visible_services(&auth)?;
+  Ok(Json(s.db.call(move |c| {
+    c.query_row(
+      &format!("SELECT {RUN_COLS} FROM task_runs WHERE task = ?1 AND id = ?2 AND (?3 IS NULL OR service IN (SELECT value FROM json_each(?3)))"),
+      params![name, id, visible], run_view,
+    ).optional().map_err(sql_err)?.ok_or_else(|| {
+      ApiError::not_found(format!("定时任务 {name} 没有运行记录 #{id}"))
+        .with_hint(format!("只保留最近 50 条记录，查看列表：wharf task logs {name}"))
+    })
+  }).await?))
+}
+
+pub async fn cancel_run(
+  State(s): State<Arc<AppState>>,
+  auth: Auth,
+  Path(id): Path<i64>,
+) -> ApiResult<serde_json::Value> {
+  let (name, status): (String, String) = s
+    .db
+    .call(move |c| {
+      c.query_row(
+        "SELECT task, status FROM task_runs WHERE id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+      )
+      .optional()
+      .map_err(sql_err)?
+      .ok_or_else(|| {
+        ApiError::not_found(format!("没有运行记录 #{id}"))
+      })
+    })
+    .await?;
+  let spec = load_one(&s, &name).await?;
+  let snap = snapshot::load(&s.db).await?;
+  need_perm(
+    &auth,
+    &spec,
+    &snap.world,
+    crate::join::core_server_of(&snap).as_deref(),
+  )?;
+  if dec(&status) != TaskStatus::Running {
+    return Err(
+      ApiError::new(
+        ErrorCode::Conflict,
+        format!(
+          "运行记录 #{id} 已结束（{}），不能取消",
+          status_text(dec(&status))
+        ),
+      )
+      .into(),
+    );
+  }
+  let active = RUNNING
+    .lock()
+    .unwrap_or_else(|e| e.into_inner())
+    .get(&name)
+    .filter(|run| run.id == id)
+    .cloned();
+  if let Some(run) = active {
+    run.cancel.cancel();
+  } else {
+    s.db.call(move |c| {
+      let changed = c.execute(
+        "UPDATE task_runs SET status = 'cancelled', ended_at = ?2, output = '已手动取消' WHERE id = ?1 AND status = 'running'",
+        params![id, now_ms()],
+      ).map_err(sql_err)?;
+      if changed == 0 {
+        return Err(ApiError::new(ErrorCode::Conflict, format!("运行记录 #{id} 已结束")));
+      }
+      Ok(())
+    }).await?;
+  }
+  Ok(Json(
+    serde_json::json!({ "id": id, "task": name, "cancelled": true }),
+  ))
 }
 
 fn validate_schedule(spec: &TaskSpec) -> Result<(), ApiError> {
@@ -1521,6 +1769,7 @@ pub async fn hook(
     "hook",
     Some(input),
     Some(guard),
+    RunTaskRequest::default(),
   )
   .await?;
   Ok(
@@ -1820,6 +2069,7 @@ async fn host_task_keeps_command_template_in_shell_log() {
     .await
     .unwrap();
   let job = HostExecJob {
+    stream: false,
     command: "curl https://api.example.test/fixture-secret".into(),
     timeout_secs: 1,
     cwd: "/".into(),
@@ -1981,4 +2231,106 @@ async fn expired_schedule_does_not_hide_next_catch_up() {
     assert_eq!(count, 1);
     Ok(())
   }).await.unwrap();
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn cancelled_task_history_keeps_previous_failure() {
+  use crate::host_access::tests::auth;
+  let state = crate::rules::tests::test_state();
+  state.db.call(|c| {
+    c.execute("INSERT INTO tasks(name,spec,created_at,updated_at) VALUES ('cancel-fixture',?1,0,0)",
+      [serde_json::json!({"server":"s1", "kind":"exec", "service":"app", "command":"true", "schedule":"0 4 * * *"}).to_string()]
+    ).map_err(sql_err)?;
+    Ok(())
+  }).await.unwrap();
+  let failed = insert_run(
+    &state,
+    "cancel-fixture",
+    TaskStatus::Failed,
+    "manual",
+    None,
+  )
+  .await
+  .unwrap();
+  finish(
+    &state,
+    failed,
+    TaskStatus::Failed,
+    Some(1),
+    "上次失败",
+    None,
+  )
+  .await;
+  let guard = RunGuard::acquire("cancel-fixture").unwrap();
+  let id = insert_run(
+    &state,
+    "cancel-fixture",
+    TaskStatus::Running,
+    "manual",
+    None,
+  )
+  .await
+  .unwrap();
+  let token = guard.bind(id);
+  let permissions =
+    || auth([Perm::Read, Perm::Apply, Perm::Exec], false);
+  cancel_run(State(state.clone()), permissions(), Path(id))
+    .await
+    .unwrap();
+  assert!(token.is_cancelled());
+  finish(&state, id, TaskStatus::Cancelled, None, "已手动取消", None)
+    .await;
+  assert_eq!(
+    cancel_run(State(state.clone()), permissions(), Path(id))
+      .await
+      .unwrap_err()
+      .0
+      .code,
+    ErrorCode::Conflict
+  );
+  assert_eq!(
+    run_detail(
+      State(state.clone()),
+      permissions(),
+      Path(("cancel-fixture".into(), failed))
+    )
+    .await
+    .unwrap()
+    .0
+    .output,
+    "上次失败"
+  );
+  assert!(
+    issues(&state)
+      .await
+      .iter()
+      .any(|issue| issue.title.contains("cancel-fixture"))
+  );
+}
+
+#[cfg(test)]
+#[test]
+fn temporary_env_rejects_reserved_names_and_restricted_values() {
+  assert!(
+    validate_run_env(&BTreeMap::from([(
+      "WHARF_METHOD".into(),
+      "GET".into()
+    )]))
+    .is_err()
+  );
+  let restrictions = BTreeMap::from([(
+    "PRIVATE_KEY".into(),
+    ["svc".into()].into_iter().collect(),
+  )]);
+  for value in ["[[PRIVATE_KEY]]", "[[WHARF_INTERNAL]]"] {
+    assert!(
+      crate::secret_policy::validate_task_env(
+        "fixture",
+        [value].into_iter(),
+        &restrictions
+      )
+      .is_err()
+    );
+  }
 }
