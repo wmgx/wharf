@@ -1204,7 +1204,7 @@ async fn finish_prepared_plan(
     && j
   {
     let resp: ApplyResponse = c.post("/api/apply", &req).await?;
-    let mut run = wait_run(c, &resp.run_id, true).await?;
+    let mut run = wait_run(c, &resp.run_id, true, &[]).await?;
     if flags.brief {
       crate::plan_cmd::compact_run(&mut run);
     }

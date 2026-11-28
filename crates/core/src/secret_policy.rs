@@ -787,7 +787,7 @@ pub(crate) fn fleet_secret_refs(
   let mut warnings = Vec::new();
   for (name, spec) in &fleet.services {
     refs.extend(
-      template_refs(spec)
+      service_render_refs(spec)
         .chain(git_token(spec))
         .filter(|n| known.contains_key(*n))
         .map(str::to_string),

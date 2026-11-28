@@ -9,7 +9,9 @@ use axum::{
   Extension, Json,
   extract::{State, rejection::JsonRejection},
 };
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{
+  Connection, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde::Deserialize;
 use serde_json::json;
 use wharf_api_types::{
@@ -164,7 +166,7 @@ pub(crate) fn require_no_conflicts(
   if !summary.conflicts.is_empty() {
     return Err(ApiError::new(ErrorCode::Conflict, format!("已有同名密钥：{}", summary.conflicts.join("、")))
       .with_hint("加 --only-missing 保留已有密钥，或加 --overwrite 覆盖（默认保留旧值 7 天）")
-      .with_details(serde_json::json!({"conflicts": summary.conflicts})));
+      .with_details(json!({"conflicts": summary.conflicts})));
   }
   Ok(())
 }
@@ -228,7 +230,7 @@ pub(crate) async fn write_with(
 }
 
 fn write_in(
-  c: &Connection,
+  tx: &Transaction<'_>,
   key: &CredentialsKey,
   values: &BTreeMap<String, String>,
   mode: SecretImportMode,
@@ -237,7 +239,7 @@ fn write_in(
 ) -> Result<SecretChanges, ApiError> {
   let mut summary = SecretChanges::default();
   for name in values.keys() {
-    let exists = c
+    let exists = tx
       .query_row(
         "SELECT 1 FROM secrets WHERE name=?1",
         [name],
@@ -265,7 +267,14 @@ fn write_in(
   let until =
     (keep_days > 0).then(|| now + i64::from(keep_days) * 86_400_000);
   for name in summary.create.iter().chain(&summary.update) {
-    key.rotate_secret_in(c, name, &values[name], now, until, true)?;
+    key.rotate_secret_in(
+      tx,
+      name,
+      &values[name],
+      now,
+      until,
+      true,
+    )?;
   }
   Ok(summary)
 }
