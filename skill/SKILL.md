@@ -213,6 +213,5 @@ wharf service import <服务器> --project <compose 项目名> --json   # 或 --
 - 想看完整期望状态：`wharf export`；只改一个服务时 `wharf export --service <服务> -o x.toml`，改完 `wharf validate x.toml`（不连控制面），再 `wharf plan -f x.toml --partial`（只动文件里写到的对象；不加 `--partial` 会删掉文件里没写的）；
 - 想知道最近谁做了什么：`wharf audit --json`。
 
-`wharf service monitor <服务>`、`wharf service auto-update <服务>` 和 `wharf server watch-unit <服务器> <unit>` 无修改参数时只读查看。开启时加 `--on`，确认后可加 `--apply` 执行。关闭用 `--off`。例如，`wharf service auto-update <服务> --on --apply` 会开启自动更新。清除单个配置用 `--unset-<字段>`，例如 `wharf service monitor <服务> --unset-expect`。
-
-定时任务需要管道、重定向或展开变量时，把整段 shell 脚本作为 `--` 后的单个参数。多参数写法按参数边界转义，例如 `-- psql -c 'SELECT 1'`。网址触发用 `--no-hook` 关闭，用 `--rotate-token` 轮换网址触发或外部报到口令。
+- `wharf service monitor <服务>` 和 `wharf service auto-update <服务>` 无修改参数时只读查看。加 `--on` 开启或加 `--off` 关闭，确认后可加 `--apply` 执行。例如 `wharf service auto-update <服务> --on --apply`。用 `wharf service monitor <服务> --unset-expect` 清除预期状态码。
+- `wharf server watch-unit <服务器> <unit>` 无修改参数时只读查看。加 `--on` 开启或加 `--off` 关闭，直接生效。
