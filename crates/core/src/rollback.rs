@@ -200,6 +200,10 @@ fn merge_settings(
   spec.backup.clone_from(&current.backup);
   spec.stopped = current.stopped;
   spec.start_timeout_secs = current.start_timeout_secs;
+  spec.stop_grace_secs = current.stop_grace_secs;
+  spec.stop_signal.clone_from(&current.stop_signal);
+  spec.init_cmd.clone_from(&current.init_cmd);
+  spec.init_timeout_secs = current.init_timeout_secs;
   spec.limits.clone_from(&current.limits);
   spec.log_alerts.clone_from(&current.log_alerts);
   spec.heartbeat.clone_from(&current.heartbeat);
@@ -540,6 +544,31 @@ mod tests {
       merge_settings(old, &current, &mut vec![]).start_timeout_secs,
       None
     );
+  }
+
+  #[test]
+  fn rollback_preserves_current_stop_and_init_settings() {
+    let configured: ServiceSpec = serde_json::from_value(json!({
+      "server": "s1", "source": {"image": "app:2"},
+      "stop_grace_secs": 240, "stop_signal": "SIGINT",
+      "init_cmd": "echo prepare", "init_timeout_secs": 90
+    }))
+    .unwrap();
+    let defaults: ServiceSpec = serde_json::from_value(json!({
+      "server": "s1", "source": {"image": "app:1"}
+    }))
+    .unwrap();
+    for (historical, current) in
+      [(&defaults, &configured), (&configured, &defaults)]
+    {
+      let merged =
+        merge_settings(historical.clone(), current, &mut Vec::new());
+      assert_eq!(merged.source, historical.source);
+      assert_eq!(merged.stop_grace_secs, current.stop_grace_secs);
+      assert_eq!(merged.stop_signal, current.stop_signal);
+      assert_eq!(merged.init_cmd, current.init_cmd);
+      assert_eq!(merged.init_timeout_secs, current.init_timeout_secs);
+    }
   }
 
   #[test]
