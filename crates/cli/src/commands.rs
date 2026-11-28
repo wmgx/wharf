@@ -3272,6 +3272,72 @@ async fn service(
       };
       show_logs(c, &path, &args, j).await
     }
+    ServiceCmd::RestartSchedule {
+      name,
+      cron,
+      skip_if_stopped,
+      catch_up,
+      unset_catch_up,
+      off,
+      apply,
+    } => {
+      use wharf_api_types::{
+        spec::RestartSchedule, view::RestartScheduleView,
+      };
+      let base = format!("/api/services/{}", seg(&name));
+      if !(off
+        || cron.is_some()
+        || skip_if_stopped.is_some()
+        || catch_up.is_some()
+        || unset_catch_up)
+      {
+        apply.check_read_only()?;
+        let view: RestartScheduleView =
+          c.get(&format!("{base}/restart-schedule")).await?;
+        out(j, &view, pretty);
+        return Ok(());
+      }
+      let mut spec = c.get::<ServiceView>(&base).await?.spec;
+      if off {
+        spec.restart_schedule = None;
+      } else {
+        let mut schedule =
+          spec.restart_schedule.take().unwrap_or(RestartSchedule {
+            cron: String::new(),
+            skip_if_stopped: true,
+            catch_up_mins: None,
+          });
+        if let Some(cron) = cron {
+          schedule.cron = cron;
+        }
+        if schedule.cron.is_empty() {
+          return Err(
+            ApiError::invalid("用 --cron 设置重启时间表").into(),
+          );
+        }
+        if let Some(skip) = skip_if_stopped {
+          schedule.skip_if_stopped = skip;
+        }
+        if catch_up.is_some() || unset_catch_up {
+          schedule.catch_up_mins = catch_up;
+        }
+        spec.restart_schedule = Some(schedule);
+      }
+      changes(
+        c,
+        vec![Change::UpsertService {
+          name,
+          spec,
+          adopt: None,
+          pins: None,
+          commit: None,
+          migrate: None,
+        }],
+        apply,
+        j,
+      )
+      .await
+    }
     ServiceCmd::Env(args) => crate::env_sync::run(c, args, j).await,
     ServiceCmd::Files { cmd: Some(cmd), .. } => {
       crate::files::run(c, cmd, j).await
@@ -3425,7 +3491,12 @@ async fn service(
           || ops.init_timeout.is_some()
           || !ops.add_extra_log.is_empty()
           || !ops.rm_extra_log.is_empty()
-          || ops.clear_extra_logs)
+          || ops.clear_extra_logs
+          || !ops.add_wait_for.is_empty()
+          || !ops.rm_wait_for.is_empty()
+          || ops.clear_wait_for
+          || ops.wait_for_timeout.is_some()
+          || ops.unset_wait_for_timeout)
       {
         apply.check_read_only()?;
         wharf_api_types::filter_note(
@@ -3541,6 +3612,9 @@ async fn service(
             init_cmd: None,
             init_timeout_secs: None,
             extra_logs: Vec::new(),
+            wait_for: Default::default(),
+            wait_for_timeout_secs: None,
+            restart_schedule: None,
           }
         }
       };
@@ -3577,6 +3651,52 @@ async fn service(
           )?)
         };
       }
+      spec.wait_for.retain(|key, _| {
+        !ops.clear_wait_for && !ops.rm_wait_for.contains(key)
+      });
+      for key in &ops.rm_wait_for {
+        wharf_api_types::validate_name("等待条件", key)?;
+      }
+      for raw in &ops.add_wait_for {
+        use wharf_api_types::spec::WaitCondition;
+        let invalid = || {
+          ApiError::invalid(
+            "等待条件须写成 KEY=service:NAME、KEY=tcp:NAME.PORT 或 KEY=dns:HOST",
+          )
+        };
+        let (key, value) = raw.split_once('=').ok_or_else(invalid)?;
+        let (kind, value) =
+          value.split_once(':').ok_or_else(invalid)?;
+        if ops.rm_wait_for.iter().any(|removed| removed == key) {
+          return Err(
+            ApiError::invalid(format!(
+              "不能同时添加和删除等待条件 {key}"
+            ))
+            .into(),
+          );
+        }
+        let condition = match kind {
+          "service" => WaitCondition::Service {
+            service: value.into(),
+          },
+          "tcp" => {
+            let (service, port) =
+              value.split_once('.').ok_or_else(invalid)?;
+            WaitCondition::Tcp {
+              service: service.into(),
+              port: port.into(),
+            }
+          }
+          "dns" => WaitCondition::Dns { host: value.into() },
+          _ => return Err(invalid().into()),
+        };
+        spec.wait_for.insert(key.into(), condition);
+      }
+      if ops.unset_wait_for_timeout || ops.wait_for_timeout.is_some()
+      {
+        spec.wait_for_timeout_secs = ops.wait_for_timeout;
+      }
+      wharf_api_types::spec::validate_wait_for(&spec)?;
       for path in ops.add_extra_log.iter().chain(&ops.rm_extra_log) {
         wharf_api_types::spec::validate_extra_log_path(path)?;
       }

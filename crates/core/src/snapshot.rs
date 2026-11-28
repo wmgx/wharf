@@ -1359,6 +1359,20 @@ mod tests {
       serde_json::json!({"compose": {"content": raw}}),
     )
     .unwrap();
+    let before = serde_json::to_value(&*spec).unwrap();
+    let mut legacy = before.clone();
+    let object = legacy.as_object_mut().unwrap();
+    for key in [
+      "wait_for",
+      "wait_for_timeout_secs",
+      "restart_schedule",
+      "extra_logs",
+    ] {
+      assert!(object.remove(key).is_none());
+    }
+    let restored: wharf_api_types::spec::ServiceSpec =
+      serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(restored).unwrap(), legacy);
     let legacy_compose = raw.replace("[[KEY]]", "ok123");
     let legacy_hash = render::hash(&legacy_compose);
     assert_eq!(

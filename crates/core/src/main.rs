@@ -44,6 +44,7 @@ mod data_cleanup;
 mod data_sync_api;
 mod db;
 mod db_snapshot;
+mod dependent_confirm;
 mod disk;
 mod disk_forecast;
 mod dns_check;
@@ -157,6 +158,7 @@ mod updates;
 mod uploads;
 mod vendor_checks;
 mod views;
+mod wait_for;
 mod web;
 mod world;
 

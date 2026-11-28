@@ -525,6 +525,27 @@ impl Hub {
     })
   }
 
+  pub(crate) fn scheduled_restart_conn_id(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.safe_gateway {
+      return Err(
+        ApiError::new(
+          ErrorCode::Conflict,
+          format!("服务器 {server} 的 agent 不支持定时温和重启"),
+        )
+        .with_hint("运行 wharf upgrade"),
+      );
+    }
+    Ok(conn.conn_id)
+  }
+
   pub fn supports_safe_gateway(&self, server: &str) -> bool {
     lock(&self.conns)
       .get(server)
@@ -571,9 +592,21 @@ impl Hub {
     server: &str,
     container: bool,
   ) -> Result<(), ApiError> {
+    self.net_probe_conn_id(server, container).map(|_| ())
+  }
+
+  pub(crate) fn net_probe_conn_id(
+    &self,
+    server: &str,
+    container: bool,
+  ) -> Result<u64, ApiError> {
     let conns = lock(&self.conns);
-    let conn = conns.get(server).ok_or_else(|| offline(server))?;
-    conn.check_net_probe(server, container)
+    let conn = conns
+      .get(server)
+      .filter(|c| !c.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    conn.check_net_probe(server, container)?;
+    Ok(conn.conn_id)
   }
 
   pub fn log_watches(

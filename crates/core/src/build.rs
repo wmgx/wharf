@@ -492,6 +492,7 @@ pub async fn restart_now(
       title,
       crate::planner::Step::ServiceRestart {
         service: name,
+        scheduled: None,
         container,
       },
       Some(crate::apply::format_actor(&auth)),

@@ -275,6 +275,9 @@ pub enum Step {
     service: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     container: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scheduled:
+      Option<crate::tasks::restart_schedule::RestartIdentity>,
   },
   /// 控制面自身备份。`user_key`：开启时输入的登录密码，加成仓库的恢复口令。
   CoreBackup {
@@ -451,6 +454,9 @@ impl Builder {
       reason: reason.into(),
       changes,
       host_access: vec![],
+      dependents: vec![],
+      hidden_dependents: 0,
+      stopping_service: false,
     });
     id
   }
@@ -634,14 +640,30 @@ pub(crate) async fn make_plan_inner(
   desired.validate_against(&current)?;
   crate::link::validate_new_admin_port_bindings(&current, &desired)?;
   for (name, row) in &desired.services {
-    if current
-      .services
-      .get(name)
-      .is_none_or(|old| old.spec != row.spec)
-    {
+    let before = current.services.get(name).map(|old| &old.spec);
+    if before != Some(&row.spec) {
       crate::monitor::require_agent(state, &row.spec)?;
-      if !row.spec.extra_logs.is_empty() {
-        state.hub.extra_logs_conn_id(&row.spec.server)?;
+      let server = &row.spec.server;
+      if row.spec.restart_schedule.is_some()
+        && before.is_none_or(|old| {
+          old.server != *server
+            || old.restart_schedule != row.spec.restart_schedule
+        })
+      {
+        state.hub.scheduled_restart_conn_id(server)?;
+      }
+      if before.is_none_or(|old| {
+        old.server != *server || old.wait_for != row.spec.wait_for
+      }) {
+        crate::wait_for::require_agent(state, server, &row.spec)?;
+      }
+      if !row.spec.extra_logs.is_empty()
+        && before.is_none_or(|old| {
+          old.server != *server
+            || old.extra_logs != row.spec.extra_logs
+        })
+      {
+        state.hub.extra_logs_conn_id(server)?;
       }
     }
   }
@@ -1184,6 +1206,7 @@ pub(crate) async fn make_plan_inner(
     timing.join("，")
   );
 
+  crate::wait_for::validate_steps(&desired, &b.steps)?;
   Ok(finish_plan(
     &snap,
     &desired,
@@ -1237,6 +1260,12 @@ fn finish_plan(
       }
     }
   }
+  crate::dependent_confirm::mark(
+    &snap.world,
+    desired,
+    &mut b.items,
+    &b.steps,
+  );
   let (needs_host, host_requirements) = crate::host_access::mark_plan(
     &snap.world,
     desired,

@@ -538,6 +538,17 @@ pub enum CoreSnapshotCmd {
 
 #[derive(Args)]
 pub struct DeployOps {
+  /// 启动前等待，写作 KEY=service:NAME、KEY=tcp:NAME.PORT 或 KEY=dns:HOST。
+  #[arg(long, conflicts_with = "clear_wait_for")]
+  pub add_wait_for: Vec<String>,
+  #[arg(long, conflicts_with = "clear_wait_for")]
+  pub rm_wait_for: Vec<String>,
+  #[arg(long)]
+  pub clear_wait_for: bool,
+  #[arg(long, conflicts_with = "unset_wait_for_timeout")]
+  pub wait_for_timeout: Option<u32>,
+  #[arg(long)]
+  pub unset_wait_for_timeout: bool,
   /// 声明服务托管目录中的日志文件，可多次使用。
   #[arg(long, conflicts_with = "clear_extra_logs")]
   pub add_extra_log: Vec<String>,
@@ -1138,6 +1149,22 @@ pub enum ServiceCmd {
   /// 预览展开后的 Compose，密钥自动打码。
   Render {
     name: String,
+  },
+  /// 查看或修改服务的定时重启。
+  RestartSchedule {
+    name: String,
+    #[arg(long, conflicts_with = "off")]
+    cron: Option<String>,
+    #[arg(long, action = clap::ArgAction::Set, conflicts_with = "off")]
+    skip_if_stopped: Option<bool>,
+    #[arg(long, conflicts_with_all = ["off", "unset_catch_up"])]
+    catch_up: Option<u32>,
+    #[arg(long, conflicts_with = "off")]
+    unset_catch_up: bool,
+    #[arg(long)]
+    off: bool,
+    #[command(flatten)]
+    apply: ApplyFlags,
   },
   /// 看日志。可以给多个服务，按时间合在一起看。支持按时间、关键字筛和用 `--errors` 合并同类报错。
   /// 例：`wharf service logs blog --since 2h --errors`、`wharf service logs blog --grep timeout --tail 50`。

@@ -115,8 +115,15 @@ pub fn validate_service(
 
 pub fn validate_world(world: &World) -> Result<(), ApiError> {
   let mut owned = BTreeMap::new();
+  let mut has_wait = false;
   let mut dependencies = BTreeMap::<&str, BTreeSet<&str>>::new();
   for (name, row) in &world.services {
+    for wait in row.spec.wait_for.values() {
+      if let Some(owner) = wait.service() {
+        has_wait = true;
+        dependencies.entry(name).or_default().insert(owner);
+      }
+    }
     for v in &row.spec.volumes {
       let Some(raw) = &v.from_service else { continue };
       let (owner, vol) = parse_ref(raw)?;
@@ -168,6 +175,27 @@ pub fn validate_world(world: &World) -> Result<(), ApiError> {
       .map(|(&service, _)| service)
       .collect();
     if ready.is_empty() {
+      if has_wait {
+        let mut chain = Vec::new();
+        let mut next = *dependencies.keys().next().unwrap();
+        loop {
+          if let Some(start) = chain.iter().position(|&n| n == next) {
+            chain.push(next);
+            return Err(
+              ApiError::invalid(format!(
+                "启动等待成环：{}",
+                chain[start..].join(" → ")
+              ))
+              .with_hint("移除一条启动等待关系"),
+            );
+          }
+          chain.push(next);
+          next = *dependencies[next]
+            .iter()
+            .find(|&&n| dependencies.contains_key(n))
+            .unwrap();
+        }
+      }
       let services =
         dependencies.keys().copied().collect::<Vec<_>>().join("、");
       return Err(
@@ -236,14 +264,25 @@ pub fn sort_steps(
       .collect();
     let mut deps: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for (_, service) in &slots {
+      if down {
+        for dep in crate::catalog::direct_dependents(world, service) {
+          if let Some((_, name)) = slots.iter().find(|(_, name)| {
+            dep.address.strip_prefix("service/")
+              == Some(name.as_str())
+          }) {
+            deps.entry(service).or_default().insert(name);
+          }
+        }
+        continue;
+      }
       if let Some(row) = world.services.get(service) {
-        for owner in owners(&row.spec) {
-          let (before, after) = if down {
-            (service.as_str(), owner)
-          } else {
-            (owner, service.as_str())
-          };
-          deps.entry(after).or_default().insert(before);
+        let waits = row
+          .spec
+          .wait_for
+          .values()
+          .filter_map(|wait| wait.service());
+        for owner in owners(&row.spec).chain(waits) {
+          deps.entry(service).or_default().insert(owner);
         }
       }
     }
@@ -302,6 +341,58 @@ mod tests {
       }]).unwrap();
     }
     world
+  }
+
+  #[test]
+  fn wait_edges_order_startup_and_reject_cycles_with_shared_volumes()
+  {
+    use wharf_api_types::spec::WaitCondition;
+    let mut world = shared_world();
+    let mut steps: Vec<StepPlan> = ["reader", "photos"]
+      .into_iter()
+      .map(|service| StepPlan {
+        items: vec![],
+        title: service.into(),
+        step: Step::ServiceUp {
+          service: service.into(),
+          instance_id: None,
+          expect: None,
+        },
+      })
+      .collect();
+    world
+      .services
+      .get_mut("reader")
+      .unwrap()
+      .spec
+      .wait_for
+      .insert(
+        "available".into(),
+        WaitCondition::Service {
+          service: "photos".into(),
+        },
+      );
+    validate_world(&world).unwrap();
+    sort_steps(&mut steps, &World::default(), &world);
+    assert_eq!(steps[0].title, "photos");
+    world
+      .services
+      .get_mut("photos")
+      .unwrap()
+      .spec
+      .wait_for
+      .insert(
+        "reader".into(),
+        WaitCondition::Service {
+          service: "reader".into(),
+        },
+      );
+    assert!(
+      validate_world(&world)
+        .unwrap_err()
+        .message
+        .contains("photos → reader → photos")
+    );
   }
 
   #[test]

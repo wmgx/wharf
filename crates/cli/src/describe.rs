@@ -154,6 +154,7 @@ fn read_when_no_args(command: &str) -> bool {
       | "service heartbeat"
       | "service note"
       | "service log-alert"
+      | "service restart-schedule"
       | "service update-ignore"
       | "service file"
       | "service deploy"
@@ -382,6 +383,7 @@ fn returns(command: &str) -> Option<&'static str> {
     "exec" => "host_exec",
     "service exec" => "service_exec",
     "service render" => "service_render",
+    "service restart-schedule" => "restart_schedule",
     "backup list" => "backup",
     "backup ls" => "backup_ls",
     "backup extract" => "backup_extract",

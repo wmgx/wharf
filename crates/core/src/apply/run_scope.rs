@@ -76,7 +76,21 @@ pub async fn load_plan_for(
     )
     .map_err(|_| token_scope::forbidden(&auth.name, allowed, ""))?;
   }
-  Ok(stored.body.plan)
+  let mut plan = stored.body.plan;
+  if let Some(allowed) = auth.services.as_ref() {
+    let snap = crate::snapshot::load_inner(&state.db).await?;
+    let routes = crate::dependent_confirm::visible_routes(
+      &snap.world,
+      &plan,
+      allowed,
+    );
+    crate::dependent_confirm::project(
+      &mut plan,
+      Some(allowed),
+      &routes,
+    );
+  }
+  Ok(plan)
 }
 
 pub async fn list_plans(

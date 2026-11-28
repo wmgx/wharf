@@ -860,16 +860,32 @@ pub fn apply_write(
       .execute(
         "INSERT INTO resources (kind, name, spec, meta, version, created_at, updated_at)
          VALUES (?1, ?2, ?3,
-           CASE WHEN ?1 = 'service' AND COALESCE(json_extract(?4, '$.instance_id'), '') = ''
-             THEN json_set(?4, '$.instance_id', 'svc_' || lower(hex(randomblob(8)))) ELSE ?4 END,
+           CASE WHEN ?1 = 'service' THEN json_patch(
+             json_set(?4, '$.instance_id', COALESCE(NULLIF(json_extract(?4, '$.instance_id'), ''),
+               'svc_' || lower(hex(randomblob(8))))),
+             CASE WHEN json_type(?3, '$.restart_schedule') = 'object' THEN
+               json_object('restart_revision', lower(hex(randomblob(16))), 'restart_since', ?5)
+             ELSE '{}' END)
+           ELSE ?4 END,
            1, ?5, ?5)
          ON CONFLICT (kind, name) DO UPDATE SET
            spec = excluded.spec, meta = CASE WHEN excluded.kind = 'service' THEN
-             json_set(excluded.meta, '$.instance_id', COALESCE(
-               NULLIF(json_extract(?4, '$.instance_id'), ''),
-               NULLIF(json_extract(resources.meta, '$.instance_id'), ''),
-               json_extract(excluded.meta, '$.instance_id')
-             ))
+             json_set(
+               CASE WHEN json_type(?3, '$.restart_schedule') = 'object'
+                 AND json_extract(resources.spec, '$.restart_schedule') = json_extract(?3, '$.restart_schedule')
+                 AND json_extract(resources.meta, '$.restart_revision') IS NOT NULL
+                 AND COALESCE(NULLIF(json_extract(?4, '$.instance_id'), ''), json_extract(resources.meta, '$.instance_id'))
+                   = json_extract(resources.meta, '$.instance_id')
+               THEN json_set(excluded.meta,
+                 '$.restart_revision', json_extract(resources.meta, '$.restart_revision'),
+                 '$.restart_since', json_extract(resources.meta, '$.restart_since'))
+               ELSE excluded.meta END,
+               '$.instance_id', COALESCE(
+                 NULLIF(json_extract(?4, '$.instance_id'), ''),
+                 NULLIF(json_extract(resources.meta, '$.instance_id'), ''),
+                 json_extract(excluded.meta, '$.instance_id')
+               )
+             )
              ELSE excluded.meta END,
            version = resources.version + 1, updated_at = excluded.updated_at",
         params![kind, name, spec.to_string(), meta.to_string(), now],

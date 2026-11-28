@@ -11,6 +11,8 @@ fn entries() -> BTreeMap<&'static str, Schema> {
     ("fleet", schema_for!(spec::Fleet)),
     ("server", schema_for!(spec::ServerSettings)),
     ("service", schema_for!(spec::ServiceSpec)),
+    ("wait_condition", schema_for!(spec::WaitCondition)),
+    ("restart_schedule", schema_for!(view::RestartScheduleView)),
     ("gateway", schema_for!(spec::GatewaySpec)),
     ("route", schema_for!(spec::RouteSpec)),
     ("change", schema_for!(spec::Change)),

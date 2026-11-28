@@ -237,6 +237,27 @@ pub(crate) fn collect_plan_missing(
       &source,
       desired.servers.contains_key(&spec.server),
     );
+    for (key, wait) in &spec.wait_for {
+      if let Some(dep) = wait.service() {
+        let at = format!("{source} wait_for.{key}");
+        let target = desired.services.get(dep);
+        add("service", dep, &at, target.is_some());
+        if let (
+          Some(row),
+          wharf_api_types::spec::WaitCondition::Tcp { port, .. },
+        ) = (target, wait)
+        {
+          add(
+            "port",
+            &format!("{dep}.{port}"),
+            &at,
+            wharf_api_types::spec::WaitCondition::valid_port(
+              &row.spec, port,
+            ) && row.host_ports.contains_key(port),
+          );
+        }
+      }
+    }
     if let Some(b) = &spec.backup {
       add(
         "server",

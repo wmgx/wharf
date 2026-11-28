@@ -391,6 +391,10 @@ pub fn router(state: Arc<AppState>) -> Router {
     )
     .route("/api/services/{name}/logs", get(service_logs))
     .route(
+      "/api/services/{name}/restart-schedule",
+      get(crate::tasks::restart_schedule::show),
+    )
+    .route(
       "/api/services/{name}/probe",
       post(crate::net_probe::service_probe),
     )
@@ -2968,6 +2972,11 @@ async fn make_plan(
     planned.plan.plan_id
   ));
   let mut plan = planned.plan;
+  crate::dependent_confirm::project(
+    &mut plan,
+    auth.services.as_ref(),
+    &visible_routes,
+  );
   if query.brief() {
     planner::compact_plan(&mut plan);
   }

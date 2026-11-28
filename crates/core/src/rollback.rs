@@ -201,6 +201,9 @@ fn merge_settings(
   spec.stopped = current.stopped;
   spec.start_timeout_secs = current.start_timeout_secs;
   spec.extra_logs.clone_from(&current.extra_logs);
+  spec.wait_for.clone_from(&current.wait_for);
+  spec.wait_for_timeout_secs = current.wait_for_timeout_secs;
+  spec.restart_schedule.clone_from(&current.restart_schedule);
   spec.stop_grace_secs = current.stop_grace_secs;
   spec.stop_signal.clone_from(&current.stop_signal);
   spec.init_cmd.clone_from(&current.init_cmd);

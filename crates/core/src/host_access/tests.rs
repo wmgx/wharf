@@ -70,6 +70,9 @@ fn plan(
     reason: String::new(),
     changes: vec![],
     host_access: vec![],
+    dependents: vec![],
+    hidden_dependents: 0,
+    stopping_service: false,
   }];
   let (needs_host, _) =
     mark_plan(current, desired, &mut items, steps);

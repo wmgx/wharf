@@ -2149,6 +2149,10 @@ fn validate_service(
   }
   crate::shared_volumes::validate_service(name, spec)?;
   crate::data::validate_extra_logs(name, spec)?;
+  wharf_api_types::spec::validate_wait_for(spec)?;
+  if let Some(schedule) = &spec.restart_schedule {
+    crate::tasks::restart_schedule::validate(schedule)?;
+  }
   let mut volume_names = BTreeSet::new();
   for volume in &spec.volumes {
     validate_name("数据卷", &volume.name)?;
@@ -2824,6 +2828,9 @@ mod tests {
       init_cmd: None,
       init_timeout_secs: None,
       extra_logs: Vec::new(),
+      wait_for: Default::default(),
+      wait_for_timeout_secs: None,
+      restart_schedule: None,
       server: server.into(),
       source: Source::Image("traefik/whoami".into()),
       ports: vec![PortSpec {

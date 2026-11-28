@@ -281,6 +281,10 @@ pub(crate) async fn start_with_actor(
       let spec =
         serde_json::from_value(spec.clone()).map_err(json_err)?;
       crate::monitor::require_agent(&state, &spec)?;
+      if spec.restart_schedule.is_some() {
+        state.hub.scheduled_restart_conn_id(&spec.server)?;
+      }
+      crate::wait_for::require_agent(&state, &spec.server, &spec)?;
       if !spec.extra_logs.is_empty() {
         state.hub.extra_logs_conn_id(&spec.server)?;
       }
@@ -345,6 +349,24 @@ pub(crate) async fn start_with_actor(
       .suggest("wharf plan"),
     );
   }
+  crate::dependent_confirm::check_apply(
+    state.as_ref(),
+    plan,
+    &stored.steps,
+    &stored.writes,
+  )
+  .await?;
+  let visible_routes = if let Some(allowed) =
+    auth.and_then(|auth| auth.services.as_ref())
+  {
+    crate::dependent_confirm::visible_routes(
+      &snapshot::load_inner(&state.db).await?.world,
+      plan,
+      allowed,
+    )
+  } else {
+    BTreeSet::new()
+  };
   let human = auth.is_some_and(|auth| auth.human);
   let requirements = stored.body.host_requirements.as_deref();
   if requirements.is_none()
@@ -412,8 +434,30 @@ pub(crate) async fn start_with_actor(
       .iter()
       .filter(|address| !req.confirm.contains(address))
       .collect();
+    let mut visible = plan.clone();
+    crate::dependent_confirm::project(
+      &mut visible,
+      auth.and_then(|auth| auth.services.as_ref()),
+      &visible_routes,
+    );
+    let error = if visible.items.iter().any(|item| {
+      item.stopping_service && missing.contains(&&item.address)
+    }) {
+      let address =
+        missing.first().map(String::as_str).unwrap_or_default();
+      ApiError::new(
+        ErrorCode::ConfirmRequired,
+        format!("停止 {address} 会影响其他对象，需要确认"),
+      )
+      .with_hint(format!(
+        "查看计划影响后执行 wharf apply {} --confirm {address}",
+        plan.plan_id
+      ))
+    } else {
+      error
+    };
     error.with_details(wharf_api_types::plan::confirm_details(
-      plan, &missing,
+      &visible, &missing,
     ))
   })?;
 
@@ -784,7 +828,7 @@ pub async fn start_task_by(
   start_task_locked(state, title, step, actor, guard).await
 }
 
-async fn lock_task(
+pub(crate) async fn lock_task(
   state: &AppState,
   step: &Step,
   title: &str,
@@ -887,7 +931,7 @@ pub(crate) async fn run_cleanup_archive(
   Ok(())
 }
 
-async fn spawn_task(
+pub(crate) async fn spawn_task(
   state: Arc<AppState>,
   title: String,
   step: Step,
@@ -1570,6 +1614,7 @@ async fn run_step_with_dns(
         || crate::shared_volumes::consumers_on(world, service, to)
           .next()
           .is_some();
+      crate::wait_for::run(state, world, service, to, cancel).await?;
       crate::migrate::volume_sync(
         state,
         &net,
@@ -1706,8 +1751,19 @@ async fn run_step_with_dns(
       )
       .await?;
     }
-    Step::ServiceRestart { service, container } => {
-      let server = service_server(&snap, service)?;
+    Step::ServiceRestart {
+      service,
+      container,
+      scheduled,
+    } => {
+      let server = if let Some(identity) = scheduled {
+        crate::tasks::restart_schedule::ready(
+          state, &snap, service, identity, cancel,
+        )
+        .await?
+      } else {
+        service_server(&snap, service)?
+      };
       if container.is_some()
         && snap.pending.migrations.get(service).is_some_and(|m| {
           m.phase != crate::pending::MigratePhase::UpDone
@@ -1722,16 +1778,23 @@ async fn run_step_with_dns(
           ),
         ));
       }
+      crate::wait_for::run(state, world, service, &server, cancel)
+        .await?;
       crate::pending::source_changed(state, service).await?;
-      service_restart(
-        state,
-        &server,
-        service,
-        container.as_deref(),
-        &progress,
-        cancel,
-      )
-      .await?;
+      if scheduled.is_some() {
+        scheduled_restart(state, &server, service, &progress, cancel)
+          .await?;
+      } else {
+        service_restart(
+          state,
+          &server,
+          service,
+          container.as_deref(),
+          &progress,
+          cancel,
+        )
+        .await?;
+      }
       if container.is_none()
         && snap.pending.migrations.get(service).is_some_and(|m| {
           m.phase != crate::pending::MigratePhase::UpDone
@@ -2422,6 +2485,43 @@ async fn gateway_down(
   Ok(())
 }
 
+async fn scheduled_restart(
+  state: &AppState,
+  server: &str,
+  service: &str,
+  progress: &ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
+  let conn = state.hub.scheduled_restart_conn_id(server)?;
+  let grace = project_grace(state, server, service).await?;
+  if grace.is_some_and(|n| n > 150)
+    && state
+      .hub
+      .deploy_v2_conn_id(server, "超过 150 秒的优雅停机超时")?
+      != conn
+  {
+    return Err(crate::hub::offline(server));
+  }
+  let result: ProjectUpResult = state
+    .hub
+    .call_bound(
+      (server, conn),
+      AgentOp::ProjectRestart {
+        project: service.into(),
+        container: None,
+      },
+      stop_rpc_timeout(Duration::from_secs(240), grace),
+      Some(progress.clone()),
+      cancel,
+    )
+    .await?;
+  ensure_running(
+    &result,
+    service,
+    &format!("wharf service logs {service}"),
+  )
+}
+
 async fn service_restart(
   state: &AppState,
   server: &str,
@@ -2820,6 +2920,7 @@ async fn service_up(
     )
   })?;
   let server = &row.spec.server;
+  crate::wait_for::run(state, world, service, server, cancel).await?;
   crate::monitor::require_agent(state, &row.spec)?;
   if !row.spec.extra_logs.is_empty() {
     state.hub.extra_logs_conn_id(&row.spec.server)?;
@@ -3976,6 +4077,7 @@ mod tests {
     );
     let restart = Step::ServiceRestart {
       service: "notes".into(),
+      scheduled: None,
       container: None,
     };
     run_step(&state, "r2", &restart, progress, &cancel)
@@ -4571,6 +4673,9 @@ mod tests {
         reason: "修改配置".into(),
         changes: vec![],
         host_access: vec![],
+        dependents: vec![],
+        hidden_dependents: 0,
+        stopping_service: false,
       }],
       warnings: vec![],
       needs_host: vec![],

@@ -360,6 +360,21 @@ pub fn validate(path: &Path) -> serde_json::Value {
   }
   let mut referenced_secrets = BTreeSet::new();
   for (name, svc) in &fleet.services {
+    if let Err(e) = wharf_api_types::spec::validate_wait_for(svc) {
+      errors.push(format!("服务 {name}：{}", e.message));
+    }
+    for (key, wait) in &svc.wait_for {
+      if let Some(dep) = wait.service() {
+        match fleet.services.get(dep) {
+          None => missing.push(format!("服务 {name} 的等待条件 {key} 引用 {dep}，目标服务文件里没有")),
+          Some(target) if matches!(wait, wharf_api_types::spec::WaitCondition::Tcp { port, .. }
+            if !wharf_api_types::spec::WaitCondition::valid_port(target, port)) => {
+            errors.push(format!("服务 {name} 的等待条件 {key} 引用了不存在的 TCP 端口"));
+          }
+          _ => {}
+        }
+      }
+    }
     let compose = match &svc.source {
       Source::Compose { content, .. } => content.as_deref(),
       _ => None,

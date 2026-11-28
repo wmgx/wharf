@@ -184,6 +184,13 @@ function Steps({ stage }: { stage: Stage }) {
   );
 }
 
+const DEPENDENT_STATUS = {
+  retained: "仍在引用",
+  detached: "本次解除",
+  removed: "本次删除",
+  stopping: "本次停止",
+} as const;
+
 function PlanReview({ plan, confirmed, setConfirmed }: { plan: Plan; confirmed: Set<string>; setConfirmed: (s: Set<string>) => void }) {
   const needs = plan.needs_confirm ?? [];
   const toggle = (a: string) => {
@@ -226,8 +233,12 @@ function PlanReview({ plan, confirmed, setConfirmed }: { plan: Plan; confirmed: 
         <div className="rounded-lg border border-primary/30 bg-primary/5 p-3.5">
           <div className="mb-2 text-sm font-medium">以下操作需要确认</div>
           <div className="grid gap-2">
-            {needs.map((a) => (
-              <label className="flex cursor-pointer items-center gap-2.5 text-sm" key={a}>
+            {needs.map((a) => {
+              const items = plan.items.filter((item) => item.address === a);
+              const affected = items.find((item) => item.dependents?.length || item.hidden_dependents);
+              return (
+              <div key={a}>
+              <label className="flex cursor-pointer items-center gap-2.5 text-sm">
                 <Checkbox checked={confirmed.has(a)} onCheckedChange={() => toggle(a)} />
                 <span className="font-mono text-xs">{a}</span>
                 <span className="text-xs text-muted-foreground">
@@ -236,7 +247,18 @@ function PlanReview({ plan, confirmed, setConfirmed }: { plan: Plan; confirmed: 
                     .join("、")}
                 </span>
               </label>
-            ))}
+              {affected && (
+                <ul className="ml-6 mt-1 text-xs text-muted-foreground">
+                  {affected.dependents?.map((dep) => (
+                    <li key={JSON.stringify([dep.address, dep.kind, dep.field])}>
+                      <span className="font-mono">{dep.address}</span> {dep.field} · {DEPENDENT_STATUS[dep.disposition]}
+                    </li>
+                  ))}
+                  {!!affected.hidden_dependents && <li>{affected.hidden_dependents} 项不可见</li>}
+                </ul>
+              )}
+              </div>
+            );})}
           </div>
         </div>
       )}

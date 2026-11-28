@@ -978,6 +978,15 @@ export interface DeploymentView {
   started: boolean;
 }
 
+export interface Dependent {
+  address: string;
+  disposition: DependentDisposition;
+  field: string;
+  kind: string;
+}
+
+export type DependentDisposition = "retained" | "detached" | "removed" | "stopping";
+
 export interface Disk {
   free: number;
   total: number;
@@ -2270,6 +2279,8 @@ export interface PlanItem {
    * 修改时具体改了哪些字段，由 `before`、`after` 算出。旧计划里没有。
    */
   changes?: FieldChange[];
+  dependents?: Dependent[];
+  hidden_dependents?: number;
   /**
    * 触达宿主机的原因；非空时 apply 阶段需要 host 权限且目标服务器开启对应开关。旧计划里没有。
    */
@@ -2281,6 +2292,7 @@ export interface PlanItem {
   impacts: Impact[];
   layer: Layer;
   reason: string;
+  stopping_service?: boolean;
 }
 
 export type PlanStatus = "pending" | "applied" | "expired";
@@ -2476,6 +2488,12 @@ export interface ResolvedImage {
    * 镜像支持的平台，例如 `linux/amd64`。
    */
   platforms?: string[] | null;
+}
+
+export interface RestartSchedule {
+  catch_up_mins?: number | null;
+  cron: string;
+  skip_if_stopped: boolean;
 }
 
 /**
@@ -3112,6 +3130,7 @@ export interface ServiceSpec {
   monitor?: MonitorSpec | null;
   port_checks?: Record<string, PortCheckSpec>;
   ports?: PortSpec[];
+  restart_schedule?: RestartSchedule | null;
   /**
    * 运行在哪台服务器上。
    */
@@ -3138,6 +3157,8 @@ export interface ServiceSpec {
    */
   update_ignore?: UpdateIgnoreSpec[];
   volumes?: VolumeSpec[];
+  wait_for?: Record<string, WaitCondition>;
+  wait_for_timeout_secs?: number | null;
 }
 
 /**
@@ -3726,3 +3747,15 @@ export interface VolumeSpec {
   read_only?: boolean;
   target: string;
 }
+
+export type WaitCondition = {
+  kind: "service";
+  service: string;
+} | {
+  kind: "tcp";
+  port: string;
+  service: string;
+} | {
+  host: string;
+  kind: "dns";
+};

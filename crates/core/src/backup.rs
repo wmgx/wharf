@@ -993,6 +993,14 @@ pub async fn restore(
   let snap = snapshot::load(&state.db).await?;
   let target = restore_target(state, &snap, service, target).await?;
   let w = location(&snap, service, target);
+  crate::wait_for::run(
+    state,
+    &snap.world,
+    service,
+    &w.server,
+    cancel,
+  )
+  .await?;
   check_location(
     state,
     &snap,

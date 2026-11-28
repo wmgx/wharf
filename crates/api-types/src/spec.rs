@@ -394,6 +394,96 @@ pub struct ServiceSpec {
   pub init_timeout_secs: Option<u32>,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub extra_logs: Vec<String>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub wait_for: BTreeMap<String, WaitCondition>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub wait_for_timeout_secs: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub restart_schedule: Option<RestartSchedule>,
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+pub struct RestartSchedule {
+  pub cron: String,
+  #[serde(default = "skip_stopped_by_default")]
+  pub skip_if_stopped: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub catch_up_mins: Option<u32>,
+}
+
+fn skip_stopped_by_default() -> bool {
+  true
+}
+
+#[derive(
+  Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WaitCondition {
+  Service { service: String },
+  Tcp { service: String, port: String },
+  Dns { host: String },
+}
+
+impl WaitCondition {
+  pub fn service(&self) -> Option<&str> {
+    match self {
+      Self::Service { service } | Self::Tcp { service, .. } => {
+        Some(service)
+      }
+      Self::Dns { .. } => None,
+    }
+  }
+
+  pub fn valid_port(spec: &ServiceSpec, port: &str) -> bool {
+    spec.ports.iter().any(|p| p.name == port && !p.udp)
+  }
+}
+
+pub fn validate_wait_for(
+  spec: &ServiceSpec,
+) -> Result<(), crate::ApiError> {
+  if spec.wait_for.len() > 16 {
+    return Err(crate::ApiError::invalid(
+      "最多配置 16 项启动前等待条件",
+    ));
+  }
+  if spec
+    .wait_for_timeout_secs
+    .is_some_and(|s| !(1..=1800).contains(&s))
+  {
+    return Err(crate::ApiError::invalid(
+      "启动前等待上限需在 1 到 1800 秒之间",
+    ));
+  }
+  for (name, condition) in &spec.wait_for {
+    crate::validate_name("等待条件", name)?;
+    if let Some(service) = condition.service() {
+      crate::validate_name("服务", service)?;
+    }
+    match condition {
+      WaitCondition::Tcp { port, .. } => {
+        crate::validate_name("端口", port)?
+      }
+      WaitCondition::Dns { host }
+        if host.len() > 253
+          || host.parse::<std::net::IpAddr>().is_ok()
+          || !crate::net_probe::dns_target(host)
+          || host
+            .trim_end_matches('.')
+            .split('.')
+            .all(|part| part.bytes().all(|b| b.is_ascii_digit())) =>
+      {
+        return Err(crate::ApiError::invalid(
+          "DNS 等待目标必须是域名",
+        ));
+      }
+      _ => {}
+    }
+  }
+  Ok(())
 }
 
 pub fn validate_extra_log_path(

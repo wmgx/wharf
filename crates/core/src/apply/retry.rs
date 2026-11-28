@@ -246,6 +246,12 @@ async fn require_retry_access(
   if !original.plan_id.is_empty() {
     let stored = stored_plan(state, &original.plan_id).await?;
     let mut plan = stored.body.plan;
+    crate::dependent_confirm::check_retry(
+      &snap.world,
+      &plan,
+      steps,
+      &stored.body.base_instances,
+    )?;
     let items: BTreeSet<_> =
       steps.iter().flat_map(|s| s.items.iter().copied()).collect();
     let needs_confirm: BTreeSet<_> = plan
@@ -544,6 +550,7 @@ async fn run_retry_reruns_only_failed_and_skipped_and_rejects_stale()
   let service = "notes".to_string();
   let restart = Step::ServiceRestart {
     service: service.clone(),
+    scheduled: None,
     container: None,
   };
   let steps: Vec<_> = [
