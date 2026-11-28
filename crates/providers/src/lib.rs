@@ -243,6 +243,7 @@ pub struct EdgeProject {
 pub struct EdgeVersion {
   pub id: String,
   pub created_at: String,
+  pub last_deployed_at: Option<String>,
   pub source: Option<String>,
   pub message: Option<String>,
   pub active: bool,
@@ -304,7 +305,7 @@ pub trait EdgeProvider: Send + Sync {
     kind: EdgeKind,
     name: &'a str,
     version: &'a str,
-  ) -> BoxFut<'a, ()>;
+  ) -> BoxFut<'a, String>;
 
   /// Custom hostnames bound to the project.
   fn domains<'a>(

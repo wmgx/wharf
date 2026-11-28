@@ -615,6 +615,8 @@ pub struct EdgeProjectView {
 pub struct EdgeVersionView {
   pub id: String,
   pub created_at: String,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub last_deployed_at: Option<String>,
   /// `wrangler`、`dashboard`、`api` 等。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub source: Option<String>,
@@ -712,13 +714,19 @@ pub struct DeploymentView {
   pub commit: Option<String>,
 }
 
-/// 回滚到某次部署时要提交的服务配置。image 来源会固定到当时的镜像 digest。
+/// 回滚到某次部署时要提交的服务配置和版本。
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RollbackTarget {
   pub service: String,
   pub deployment_id: i64,
   pub deployed_at: DateTime<Utc>,
   pub spec: ServiceSpec,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub pins: Option<BTreeMap<String, String>>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub commit: Option<String>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub warnings: Vec<String>,
 }
 
 #[derive(

@@ -903,6 +903,10 @@ pub enum Change {
     /// 导入时接管的现有容器：第一次部署前停掉它们，失败时恢复。部署成功后记进导入记录，不再起作用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     adopt: Option<AdoptSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pins: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    commit: Option<String>,
   },
   RemoveService {
     name: String,

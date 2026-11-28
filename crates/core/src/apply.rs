@@ -1492,6 +1492,29 @@ pub(crate) async fn run_step(
         &r.fingerprint(),
         &format!("网关 {gateway}"),
       )?;
+      if !state.hub.supports_safe_rollback(server) {
+        let observed = state
+          .hub
+          .call::<Vec<wharf_api_types::agent::ProjectState>>(
+            server,
+            AgentOp::ProjectStatus {
+              projects: vec![gateway_project(gateway)],
+            },
+            SHORT_TIMEOUT,
+            None,
+            cancel,
+          )
+          .await
+          .ok();
+        if observed.as_deref().and_then(|p| p.first()).is_none_or(
+          |p| {
+            p.hash.as_deref() != Some(r.compose_hash.as_str())
+              || !p.all_running()
+          },
+        ) {
+          progress(safe_rollback_warning(server));
+        }
+      }
       let r = gateway::caddyfile_for_apply(
         state, run_id, world, &net, gateway, r,
       )
@@ -1601,7 +1624,7 @@ pub(crate) async fn run_step(
             pull: snapshot::pull_policy(&world.servers[server]),
             pull_missing_only: false,
             retire: None,
-            rollback: false,
+            rollback: true,
             pins: Default::default(),
             expected_images: Default::default(),
             no_start: false,
@@ -1934,6 +1957,42 @@ fn service_progress(
   })
 }
 
+pub(crate) fn can_rollback_service(spec: &ServiceSpec) -> bool {
+  !spec.stopped
+    && spec.init_cmd.is_none()
+    && spec.volumes.is_empty()
+    && match &spec.source {
+      Source::Compose { content, .. } => {
+        !crate::import::compose_has_volumes(
+          content.as_deref().unwrap_or_default(),
+        )
+      }
+      _ => true,
+    }
+}
+
+pub(crate) fn safe_rollback_warning(server: &str) -> String {
+  format!(
+    "服务器 {server} 的 agent 版本旧，部署或网关重建失败时无法自动回滚，建议先运行 wharf upgrade"
+  )
+}
+
+#[cfg(test)]
+#[test]
+fn volumeless_compose_enables_rollback_without_trial() {
+  for (service, rollback) in [
+    ("{image: 'app:1'}", true),
+    ("{image: 'app:1', volumes: ['store:/data']}", false),
+  ] {
+    let spec: ServiceSpec = serde_json::from_value(serde_json::json!({
+      "server":"s1", "source":{"compose":{"content":format!("services: {{app: {service}}}")}},
+      "ports":[{"name":"http","host":8080}]
+    })).unwrap();
+    assert_eq!(can_rollback_service(&spec), rollback);
+    assert!(!should_trial(&spec, rollback, true, false));
+  }
+}
+
 fn should_trial(
   spec: &ServiceSpec,
   rollback: bool,
@@ -1941,6 +2000,7 @@ fn should_trial(
   has_trial_collision: bool,
 ) -> bool {
   rollback
+    && !matches!(spec.source, Source::Compose { .. })
     && !spec.stopped
     && !spec.ports.is_empty()
     && has_deployed
@@ -2051,15 +2111,14 @@ async fn service_up(
       rename_containers: a.rename_containers.clone(),
       expected_services: a.expected_services.clone(),
     });
-  // 起不来时自动换回上一版：只对没有数据的服务做，新版本可能已经改了数据，
-  // 旧版本不一定认。compose 来源看不出有没有数据，不做。
-  let rollback = row.spec.volumes.is_empty()
-    && retire.is_none()
-    && row.spec.init_cmd.is_none()
-    && !matches!(row.spec.source, Source::Compose { .. });
+  // 有卷的服务可能已经迁移了数据，不能自动降级。
+  let rollback = can_rollback_service(&row.spec)
+    && !pull_missing_only
+    && retire.is_none();
+  let is_compose = matches!(row.spec.source, Source::Compose { .. });
   // 先试跑再替换：和自动换回上一版的条件一样，另外要已经部署过、不是要保持停止的。
   let has_deployed = rollback
-    && !row.spec.stopped
+    && !is_compose
     && !row.spec.ports.is_empty()
     && has_deployment(state, service, &row.instance_id).await?;
   let trial = if should_trial(
@@ -2079,6 +2138,12 @@ async fn service_up(
   } else {
     None
   };
+  if rollback
+    && is_compose
+    && !state.hub.supports_safe_rollback(server)
+  {
+    progress(safe_rollback_warning(server));
+  }
   let readiness = row
     .spec
     .monitor
@@ -2105,8 +2170,13 @@ async fn service_up(
     pull: snapshot::pull_policy(&world.servers[server]),
     pull_missing_only,
     retire,
-    rollback: rollback && !row.spec.stopped,
-    pins: row.pins.clone(),
+    rollback,
+    pins: row
+      .pins
+      .iter()
+      .filter(|(image, _)| !image.contains('@'))
+      .map(|(image, digest)| (image.clone(), digest.clone()))
+      .collect(),
     expected_images: row
       .import
       .as_ref()

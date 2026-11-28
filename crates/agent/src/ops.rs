@@ -1,7 +1,7 @@
 //! 请求分发。修改同一个 project 的请求串行执行。
 
 use std::{
-  collections::HashMap,
+  collections::{BTreeMap, HashMap},
   path::Path,
   sync::{Arc, Mutex},
   time::Duration,
@@ -591,7 +591,10 @@ impl Ops {
     ctx: &Ctx,
     warnings: &mut Vec<String>,
   ) -> Result<Vec<String>, ApiError> {
-    let images = self.docker.images(&up.project, ctx).await?;
+    let images = self
+      .docker
+      .images_for_compose(&up.project, &up.compose, ctx)
+      .await?;
     for image in &images {
       if up.expected_images.contains_key(image) {
         continue;
@@ -611,7 +614,9 @@ impl Ops {
         }
         continue;
       }
-      if let Some(digest) = up.pins.get(image) {
+      if !image.contains('@')
+        && let Some(digest) = up.pins.get(image)
+      {
         if !self.docker.has_digest(image, digest, ctx).await {
           self
             .docker
@@ -666,84 +671,119 @@ impl Ops {
       ctx,
     )
     .await;
-    self
-      .up_with_crash_logs(
-        &up.project,
-        up.no_start,
-        previous_grace,
-        ctx,
-      )
-      .await?;
-    let state = if up.no_start {
-      let mut state =
-        self.docker.one_status(&up.project, ctx).await?;
-      // --no-start leaves unchanged containers running.
-      if !up.pull_missing_only
-        && state.containers.iter().any(|c| c.state == "running")
-      {
-        self.docker.stop_start(&up.project, false, ctx).await?;
-        state = self.docker.one_status(&up.project, ctx).await?;
-      }
-      if state.containers.is_empty()
-        || state.containers.iter().any(|c| c.state == "running")
-      {
-        return Err(ApiError::new(
-          ErrorCode::AgentFailed,
-          "创建后没有容器或容器仍在运行",
-        ));
-      }
-      state
-    } else {
-      match crate::settle::watch(
-        &self.docker,
-        &up.project,
-        crate::settle::WatchOptions {
-          max_watch: crate::settle::max_watch(up.start_timeout_secs),
-          readiness: up.readiness.as_ref(),
-        },
-        ctx,
-      )
-      .await
-      {
-        Ok(state) => state,
-        Err(e) => {
-          let Some(prev) = previous else { return Err(e) };
-          if e.code == ErrorCode::Cancelled {
-            return Err(e);
-          }
-          crate::prev_logs::capture(
-            &self.docker,
-            &up.project,
-            "rollback",
-            ctx,
-          )
-          .await;
-          ctx.say(format!("{}，换回上一版", e.message));
-          self.restore_image(&prev, ctx).await?;
-          self.docker.write_compose(&up.project, &prev.compose)?;
-          self.docker.write_hash(&up.project, &prev.hash)?;
-          let grace =
-            wharf_api_types::compose::parse_compose_max_grace_secs(
-              &up.compose,
-            );
-          self.docker.up(&up.project, false, grace, ctx).await?;
-          return Err(
-            ApiError::new(
-              ErrorCode::AgentFailed,
-              format!("{}，已换回上一版", e.message),
-            )
-            .with_hint("配置还是新版本，修好后重新部署；先看日志"),
-          );
+    let result = async {
+      self.docker.write_compose(&up.project, &up.compose)?;
+      self
+        .up_with_crash_logs(
+          &up.project,
+          up.no_start,
+          previous_grace,
+          ctx,
+        )
+        .await?;
+      let state = if up.no_start {
+        let mut state =
+          self.docker.one_status(&up.project, ctx).await?;
+        // --no-start leaves unchanged containers running.
+        if !up.pull_missing_only
+          && state.containers.iter().any(|c| c.state == "running")
+        {
+          self.docker.stop_start(&up.project, false, ctx).await?;
+          state = self.docker.one_status(&up.project, ctx).await?;
         }
+        if state.containers.is_empty()
+          || state.containers.iter().any(|c| c.state == "running")
+        {
+          return Err(ApiError::new(
+            ErrorCode::AgentFailed,
+            "创建后没有容器或容器仍在运行",
+          ));
+        }
+        state
+      } else {
+        crate::settle::watch(
+          &self.docker,
+          &up.project,
+          crate::settle::WatchOptions {
+            max_watch: crate::settle::max_watch(
+              up.start_timeout_secs,
+            ),
+            readiness: up.readiness.as_ref(),
+          },
+          ctx,
+        )
+        .await?
+      };
+      self.docker.write_hash(&up.project, &up.hash)?;
+      Ok::<_, ApiError>(state)
+    }
+    .await;
+    let state = match (result, previous) {
+      (Ok(state), _) => state,
+      (Err(error), None) => return Err(error),
+      (Err(error), Some(prev)) => {
+        let recover = ctx.detached_with_progress();
+        crate::prev_logs::capture(
+          &self.docker,
+          &up.project,
+          "rollback",
+          &recover,
+        )
+        .await;
+        ctx.say(format!("{}，换回上一版", error.message));
+        return Err(
+          self
+            .restore_project(
+              &up.project,
+              &prev,
+              &recover,
+              error,
+              "上一版",
+              wharf_api_types::compose::parse_compose_max_grace_secs(
+                &up.compose,
+              ),
+            )
+            .await,
+        );
       }
     };
-    self.docker.write_hash(&up.project, &up.hash)?;
     Ok(ProjectUpResult {
       containers: state.containers,
       images: self.docker.image_info(images, ctx).await,
       warnings,
       retired: vec![],
     })
+  }
+
+  async fn previous_for_rollback(
+    &self,
+    project: &str,
+    ctx: &Ctx,
+    warnings: &mut Vec<String>,
+  ) -> Result<Option<Previous>, ApiError> {
+    let Some(mut previous) = self.docker.previous(project) else {
+      return Ok(None);
+    };
+    let images = async {
+      let names = self.docker.images(project, ctx).await?;
+      self.docker.running_images(project, &names, ctx).await
+    }
+    .await;
+    match images {
+      Ok(images) => previous.images = images,
+      Err(error) if error.code == ErrorCode::Cancelled => {
+        return Err(error);
+      }
+      Err(error) => {
+        let warning = format!(
+          "无法记录 {project} 的旧镜像，失败时可能无法恢复原镜像：{}",
+          error.message
+        );
+        ctx.say(warning.clone());
+        warnings.push(warning);
+      }
+    }
+    Ok(Some(previous))
   }
 
   async fn project_up(
@@ -762,20 +802,14 @@ impl Ops {
     {
       ctx.say(format!("清理上次试跑失败：{}", e.message));
     }
+    let mut warnings = Vec::new();
     let mut previous = if up.rollback {
-      self.docker.previous(&up.project)
+      self
+        .previous_for_rollback(&up.project, ctx, &mut warnings)
+        .await?
     } else {
       None
     };
-    if let Some(prev) = &mut previous {
-      let images = self.docker.images(&up.project, ctx).await?;
-      if let [image] = images.as_slice()
-        && let Some(id) =
-          self.docker.running_image(&up.project, ctx).await
-      {
-        prev.image = Some((image.clone(), id));
-      }
-    }
     let had_compose =
       self.docker.read_compose(&up.project).map_err(|e| {
         ApiError::internal(format!("读取原 compose 失败：{e}"))
@@ -786,80 +820,110 @@ impl Ops {
     );
     let saved_images = if up.init.is_some() && had_compose.is_some() {
       let images = self.docker.images(&up.project, ctx).await?;
-      let mut saved = self.docker.image_info(&images, ctx).await;
-      if let [image] = saved.as_mut_slice()
-        && let Some(id) =
-          self.docker.running_image(&up.project, ctx).await
+      let mut saved: BTreeMap<_, _> = self
+        .docker
+        .image_info(&images, ctx)
+        .await
+        .into_iter()
+        .filter(|i| !i.id.is_empty())
+        .map(|i| (i.image, i.id))
+        .collect();
+      if let Ok(running) =
+        self.docker.running_images(&up.project, &images, ctx).await
       {
-        image.id = id;
+        saved.extend(running);
       }
       saved
     } else {
-      vec![]
+      BTreeMap::new()
     };
-    self.docker.write_compose(&up.project, &up.compose)?;
-    let mut warnings = Vec::new();
     let prepared = async {
       let images = self.pull_all(up, ctx, &mut warnings).await?;
-      if let Some(init) = &up.init {
-        crate::adopt::verify_expected_images(
-          &self.docker,
-          &up.expected_images,
-          ctx,
-        )
-        .await?;
-        self.docker.run_init(&up.project, init, ctx).await?;
+      if up.trial.is_some() {
+        self.trial_run(up, &mut warnings, ctx).await?;
       }
-      Ok(images)
+      // 镜像拉好之后再停原来的容器，中断只有切换的那几秒。
+      crate::adopt::verify_expected_images(
+        &self.docker,
+        &up.expected_images,
+        ctx,
+      )
+      .await?;
+      Ok::<_, ApiError>(images)
     }
     .await;
     let images = match prepared {
       Ok(images) => images,
-      Err(e) => {
-        if up.init.is_some() {
-          self
-            .restore_init(
-              &up.project,
-              had_compose.as_deref(),
-              &saved_images,
-              ctx,
-            )
-            .await;
+      Err(error) => {
+        if let Err(back) = self
+          .restore_images(
+            &saved_images,
+            &ctx.detached_with_progress(),
+          )
+          .await
+        {
+          ctx.say(format!("恢复原镜像标签失败：{}", back.message));
         }
-        return Err(e);
+        return Err(
+          self.restore_before_up(previous.as_ref(), ctx, error).await,
+        );
       }
     };
     if let Some(prev) = &previous {
-      let now = match &prev.image {
-        Some((image, _)) => self
-          .docker
-          .image_info(std::slice::from_ref(image), ctx)
-          .await
-          .into_iter()
-          .next()
-          .filter(|i| !i.id.is_empty())
-          .map(|i| i.id),
-        None => None,
-      };
-      if !has_previous(
-        &prev.hash,
-        &up.hash,
-        prev.image.as_ref().map(|(_, id)| id.as_str()),
-        now.as_deref(),
-      ) {
+      let old: Vec<_> = prev.images.keys().cloned().collect();
+      let now = self
+        .docker
+        .image_info(&old, ctx)
+        .await
+        .into_iter()
+        .filter(|i| !i.id.is_empty())
+        .map(|i| (i.image, i.id))
+        .collect();
+      if !has_previous(&prev.hash, &up.hash, &prev.images, &now)
+        && !ctx.cancel.is_cancelled()
+      {
         previous = None;
       }
     }
-    if up.trial.is_some() {
-      self.trial_run(up, previous.as_ref(), ctx).await?;
+    if ctx.cancel.is_cancelled() {
+      let error = ApiError::new(ErrorCode::Cancelled, "已取消");
+      return Err(
+        self.restore_before_up(previous.as_ref(), ctx, error).await,
+      );
     }
-    // 镜像拉好之后再停原来的容器，中断只有切换的那几秒。
-    crate::adopt::verify_expected_images(
-      &self.docker,
-      &up.expected_images,
-      ctx,
-    )
-    .await?;
+    if let Some(init) = &up.init {
+      self.docker.write_compose(&up.project, &up.compose)?;
+      if let Err(error) =
+        self.docker.run_init(&up.project, init, ctx).await
+      {
+        let restored = match had_compose.as_deref() {
+          Some(compose) => {
+            self.docker.write_compose(&up.project, compose)
+          }
+          None => {
+            let file = self
+              .docker
+              .project_dir(&up.project)
+              .join("compose.yaml");
+            std::fs::remove_file(&file)
+              .map_err(crate::docker::io_err(&file))
+          }
+        };
+        if let Err(back) = restored {
+          ctx.say(format!("恢复原 compose 失败：{}", back.message));
+        }
+        if let Err(back) = self
+          .restore_images(
+            &saved_images,
+            &ctx.detached_with_progress(),
+          )
+          .await
+        {
+          ctx.say(format!("恢复原镜像标签失败：{}", back.message));
+        }
+        return Err(error);
+      }
+    }
     let retired = match &up.retire {
       Some(r) if r.service == up.project => {
         crate::adopt::retire(&self.docker, r, ctx).await?
@@ -892,78 +956,108 @@ impl Ops {
     }
   }
 
-  async fn restore_init(
+  async fn restore_images(
     &self,
-    project: &str,
-    compose: Option<&str>,
-    images: &[wharf_api_types::agent::ImageInfo],
-    ctx: &Ctx,
-  ) {
-    let restored = match compose {
-      Some(compose) => self.docker.write_compose(project, compose),
-      None => {
-        let file =
-          self.docker.project_dir(project).join("compose.yaml");
-        std::fs::remove_file(&file)
-          .map_err(crate::docker::io_err(&file))
-      }
-    };
-    if let Err(e) = restored {
-      ctx.say(format!("恢复原 compose 失败：{}", e.message));
-    }
-    let recover = ctx.detached_with_progress();
-    for image in images {
-      if let Err(e) =
-        self.restore_tag(&image.image, &image.id, &recover).await
-      {
-        ctx.say(format!("恢复原镜像标签失败：{}", e.message));
-      }
-    }
-  }
-
-  async fn restore_image(
-    &self,
-    previous: &Previous,
+    previous: &BTreeMap<String, String>,
     ctx: &Ctx,
   ) -> Result<(), ApiError> {
-    if let Some((image, id)) = &previous.image {
-      self.restore_tag(image, id, ctx).await?;
-    }
-    Ok(())
-  }
-
-  async fn restore_tag(
-    &self,
-    image: &str,
-    id: &str,
-    ctx: &Ctx,
-  ) -> Result<(), ApiError> {
-    if !id.is_empty()
-      && self.docker.image_info(&[image.to_string()], ctx).await[0].id
-        != id
-    {
-      self
+    let images: Vec<_> = previous.keys().cloned().collect();
+    let mut errors = Vec::new();
+    for info in self.docker.image_info(&images, ctx).await {
+      let id = &previous[&info.image];
+      if info.id == *id || info.image.contains('@') {
+        continue;
+      }
+      let tagged = self
         .docker
         .cmd()
-        .args(["tag", id, image])
+        .args(["tag", id, &info.image])
         .timeout(Duration::from_secs(15))
         .run(ctx)
-        .await?
-        .check("docker tag")?;
+        .await
+        .and_then(|out| out.check("docker tag"));
+      if let Err(error) = tagged {
+        errors.push(error.message);
+      }
     }
-    Ok(())
+    if errors.is_empty() {
+      Ok(())
+    } else {
+      Err(ApiError::new(ErrorCode::AgentFailed, errors.join("；")))
+    }
+  }
+
+  async fn restore_before_up(
+    &self,
+    previous: Option<&Previous>,
+    ctx: &Ctx,
+    error: ApiError,
+  ) -> ApiError {
+    if let Some(previous) = previous
+      && let Err(back) = self
+        .restore_images(
+          &previous.images,
+          &ctx.detached_with_progress(),
+        )
+        .await
+    {
+      return recovery_error(error, back, "镜像标签");
+    }
+    error
+  }
+
+  async fn restore_project(
+    &self,
+    project: &str,
+    previous: &Previous,
+    ctx: &Ctx,
+    error: ApiError,
+    target: &str,
+    previous_grace: u64,
+  ) -> ApiError {
+    let restored = async {
+      self.restore_images(&previous.images, ctx).await?;
+      self.docker.write_compose(project, &previous.compose)?;
+      self.docker.write_hash(project, &previous.hash)?;
+      self.docker.up(project, false, previous_grace, ctx).await?;
+      let status = self.docker.one_status(project, ctx).await?;
+      if !status.all_running() {
+        return Err(ApiError::new(
+          ErrorCode::AgentFailed,
+          "恢复后容器未正常运行",
+        ));
+      }
+      Ok(())
+    }
+    .await;
+    match restored {
+      Ok(()) => {
+        let done = if target == "上一版" {
+          "已换回上一版".into()
+        } else {
+          format!("已恢复{target}")
+        };
+        ctx.say(&done);
+        ApiError::new(
+          error.code,
+          format!("{}，{done}", error.message),
+        )
+        .with_hint("期望配置还是新版本，修好后重新部署；先看日志")
+      }
+      Err(back) => recovery_error(error, back, target),
+    }
   }
 
   async fn trial_run(
     &self,
     up: &ProjectUp,
-    previous: Option<&Previous>,
+    warnings: &mut Vec<String>,
     ctx: &Ctx,
   ) -> Result<(), ApiError> {
     let project = format!("{TRIAL_PROJECT_PREFIX}{}", up.project);
     let trial = up.trial.as_ref().unwrap();
     ctx.say("试跑新版本");
-    let result = async {
+    let result: Result<(), ApiError> = async {
       self.docker.write_compose(&project, trial)?;
       self.up_with_crash_logs(&project, false, 10, ctx).await?;
       crate::settle::watch(
@@ -979,25 +1073,18 @@ impl Ops {
       Ok(())
     }
     .await;
-    let cleanup =
-      self.docker.down_trial(&project, &Ctx::detached()).await;
-    if let Err(e) = &cleanup {
-      ctx.say(format!("清理试跑失败：{}", e.message));
+    let recover = ctx.detached_with_progress();
+    if let Err(e) = self.docker.down_trial(&project, &recover).await {
+      let warning = format!("清理试跑失败：{}", e.message);
+      recover.say(&warning);
+      warnings.push(warning);
     }
-    match result.and(cleanup) {
+    match result {
       Ok(()) => {
         ctx.say("试跑通过，替换线上的容器");
         Ok(())
       }
       Err(e) => {
-        if let Some(prev) = previous {
-          self.docker.write_compose(&up.project, &prev.compose)?;
-          if let Err(back) =
-            self.restore_image(prev, &Ctx::detached()).await
-          {
-            ctx.say(format!("恢复镜像标签失败：{}", back.message));
-          }
-        }
         if e.code == ErrorCode::Cancelled {
           return Err(e);
         }
@@ -1018,6 +1105,18 @@ impl Ops {
   }
 }
 
+fn recovery_error(
+  error: ApiError,
+  back: ApiError,
+  target: &str,
+) -> ApiError {
+  ApiError::new(
+    error.code,
+    format!("{}；恢复{target}失败：{}", error.message, back.message),
+  )
+  .with_hint("请检查容器和镜像，手动恢复上一版")
+}
+
 fn to_value<T: serde::Serialize>(v: T) -> Result<Value, ApiError> {
   serde_json::to_value(v)
     .map_err(|e| ApiError::internal(e.to_string()))
@@ -1027,11 +1126,13 @@ fn to_value<T: serde::Serialize>(v: T) -> Result<Value, ApiError> {
 fn has_previous(
   old_hash: &str,
   new_hash: &str,
-  old_image: Option<&str>,
-  now_image: Option<&str>,
+  old_images: &BTreeMap<String, String>,
+  now_images: &BTreeMap<String, String>,
 ) -> bool {
   old_hash != new_hash
-    || (old_image.is_some() && old_image != now_image)
+    || old_images.iter().any(|(image, old_id)| {
+      now_images.get(image).is_some_and(|id| id != old_id)
+    })
 }
 
 #[cfg(test)]
@@ -1226,11 +1327,176 @@ esac
     );
   }
 
+  #[tokio::test]
+  async fn deploy_continues_when_previous_images_cannot_be_collected()
+  {
+    let (dir, docker) = crate::docker::fake_docker(
+      r#"
+case "$1:$2:$6" in
+  compose:-p:config)
+    if grep -q BROKEN "$5"; then echo 'invalid old compose' >&2; exit 1; fi
+    echo app:1;;
+  ps:-aq:*) echo gone-container;;
+  inspect:--format:*) echo 'no such container' >&2; exit 1;;
+  ps:-a:*) echo '{"Names":"app-1","Labels":"com.docker.compose.project=app","State":"created"}';;
+  compose:-p:up) grep -q NEW "$5";;
+  pull:*|compose:-p:logs) ;;
+  image:inspect:*) echo 'new-image|[]';;
+  *) exit 2;;
+esac
+"#,
+    );
+    let ops = Ops::new(
+      docker.clone(),
+      Reporter::new(docker.clone(), None),
+      String::new(),
+      HostShell::prepare(docker.clone(), "s1".into()).await,
+      dir.path().into(),
+    );
+    let up: ProjectUp = serde_json::from_value(serde_json::json!({
+      "project":"app", "compose":"NEW", "hash":"new",
+      "rollback":true, "no_start":true,
+      "pull":{"mirrors":{},"mirrors_only":false,"attempt_timeout_secs":1}
+    })).unwrap();
+    for (old, failure) in [
+      ("BROKEN", "invalid old compose"),
+      ("OLD", "no such container"),
+    ] {
+      docker.write_compose("app", old).unwrap();
+      docker.write_hash("app", "old").unwrap();
+      let result =
+        ops.project_up(&up, &Ctx::detached()).await.unwrap();
+      assert!(result.warnings.iter().any(|w| w.contains(failure)));
+      let current = docker.previous("app").unwrap();
+      assert_eq!((&*current.compose, &*current.hash), ("NEW", "new"));
+    }
+  }
+
+  #[tokio::test]
+  async fn pull_failure_keeps_live_compose_and_cancel_does_not_abort_recovery()
+   {
+    let (dir, docker) = crate::docker::fake_docker(
+      r#"
+case "$1:$6" in
+  compose:config) if grep -q NEW "$5"; then exit 1; fi; echo app:1;;
+  ps:*) echo container-id;;
+  inspect:*) echo 'app:1|old-image';;
+  image:*) echo 'new-image|[]';;
+  tag:*) [ "$2" = old-image ] && [ "$3" = app:1 ] && touch restored;;
+  *) exit 2;;
+esac
+"#,
+    );
+    let ops = Ops::new(
+      docker.clone(),
+      Reporter::new(docker.clone(), None),
+      String::new(),
+      HostShell::prepare(docker.clone(), "s1".into()).await,
+      dir.path().into(),
+    );
+    docker.write_compose("app", "OLD").unwrap();
+    docker.write_hash("app", "old").unwrap();
+    let up: ProjectUp = serde_json::from_value(serde_json::json!({
+      "project":"app", "compose":"NEW", "hash":"new", "rollback":true,
+      "pull":{"mirrors":{},"mirrors_only":false,"attempt_timeout_secs":1}
+    })).unwrap();
+    let ctx = Ctx::detached();
+    assert!(ops.project_up(&up, &ctx).await.is_err());
+    let mut previous = docker.previous("app").unwrap();
+    assert_eq!((&*previous.compose, &*previous.hash), ("OLD", "old"));
+    assert!(
+      !docker.project_dir("app").join("compose.yaml.next").exists()
+    );
+    std::fs::remove_file(dir.path().join("restored")).unwrap();
+    previous.images.insert("app:1".into(), "old-image".into());
+    ctx.cancel.cancel();
+    let error = ApiError::new(ErrorCode::Cancelled, "已取消");
+    assert_eq!(
+      ops
+        .restore_before_up(Some(&previous), &ctx, error)
+        .await
+        .code,
+      ErrorCode::Cancelled
+    );
+    assert!(dir.path().join("restored").is_file());
+  }
+
+  #[tokio::test]
+  async fn successful_trial_retains_result_when_cleanup_fails() {
+    let (dir, docker) = crate::docker::fake_docker(
+      r#"
+case "$1:$6" in
+  compose:up) ;;
+  compose:down) echo 'cleanup failed' >&2; exit 1;;
+  ps:*) echo '{"Names":"trial-app-1","Labels":"com.docker.compose.project=wharf-try-app","State":"running"}';;
+  inspect:*) echo '/trial-app-1 0';;
+  logs:*) touch logged;;
+  *) exit 2;;
+esac
+"#,
+    );
+    let ops = Ops::new(
+      docker.clone(),
+      Reporter::new(docker.clone(), None),
+      String::new(),
+      HostShell::prepare(docker, "s1".into()).await,
+      dir.path().into(),
+    );
+    let up: ProjectUp = serde_json::from_value(serde_json::json!({
+      "project":"app","compose":"","hash":"h","trial":"services: {}","start_timeout_secs":1,
+      "pull":{"mirrors":{},"mirrors_only":false,"attempt_timeout_secs":1}
+    })).unwrap();
+    let mut warnings = Vec::new();
+    ops
+      .trial_run(&up, &mut warnings, &Ctx::detached())
+      .await
+      .unwrap();
+    assert!(warnings[0].contains("cleanup failed"));
+    assert!(!dir.path().join("logged").exists());
+  }
+
+  #[tokio::test]
+  async fn pull_all_skips_pins_for_digest_ref() {
+    let (dir, docker) = crate::docker::fake_docker(
+      r#"
+case "$1:$6" in
+  compose:config) echo 'app@sha256:fixed';;
+  pull:*) [ "$2" = 'app@sha256:fixed' ] && touch pulled;;
+  *) touch unexpected; exit 2;;
+esac
+"#,
+    );
+    let ops = Ops::new(
+      docker.clone(),
+      Reporter::new(docker.clone(), None),
+      String::new(),
+      HostShell::prepare(docker, "s1".into()).await,
+      dir.path().into(),
+    );
+    let up: ProjectUp = serde_json::from_value(serde_json::json!({
+      "project":"app", "compose":"services: {}", "hash":"h",
+      "pins":{"app@sha256:fixed":"sha256:old"},
+      "pull":{"mirrors":{},"mirrors_only":false,"attempt_timeout_secs":1}
+    })).unwrap();
+    let images = ops
+      .pull_all(&up, &Ctx::detached(), &mut vec![])
+      .await
+      .unwrap();
+    assert_eq!(images, ["app@sha256:fixed"]);
+    assert!(dir.path().join("pulled").is_file());
+    assert!(!dir.path().join("unexpected").exists());
+  }
+
   #[test]
-  fn previous_tracks_config_or_image_change() {
-    assert!(has_previous("a", "b", None, None));
-    assert!(has_previous("a", "a", Some("old"), Some("new")));
-    assert!(!has_previous("a", "a", Some("old"), Some("old")));
-    assert!(!has_previous("a", "a", None, None));
+  fn has_previous_detects_any_changed_image_in_compose() {
+    let old = BTreeMap::from([
+      ("web:1".into(), "old-web".into()),
+      ("worker:1".into(), "worker".into()),
+    ]);
+    let mut now = old.clone();
+    assert!(!has_previous("a", "a", &old, &now));
+    assert!(has_previous("a", "b", &old, &now));
+    now.insert("web:1".into(), "new-web".into());
+    assert!(has_previous("a", "a", &old, &now));
   }
 }

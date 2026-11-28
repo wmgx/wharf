@@ -101,6 +101,14 @@ async fn build_in(
     ctx,
   )
   .await?;
+  if let Some(expected) = job.expected_commit.as_deref()
+    && !commit_matches(expected, commit.as_deref())
+  {
+    return Err(ApiError::new(
+      ErrorCode::AgentFailed,
+      "取到的代码与固定的 Git commit 不一致",
+    ));
+  }
 
   let context = checked_subdir(&src, job.path.as_deref())?;
   let (dockerfile, images) = dockerfile(job, &context, work, ctx)?;
@@ -1079,7 +1087,13 @@ fn should_skip_build(
   expected: Option<&str>,
   actual: Option<&str>,
 ) -> bool {
-  !force && exists && (expected.is_none() || expected == actual)
+  !force
+    && exists
+    && expected.is_none_or(|sha| commit_matches(sha, actual))
+}
+
+fn commit_matches(expected: &str, actual: Option<&str>) -> bool {
+  actual.is_some_and(|sha| sha.starts_with(expected))
 }
 
 #[test]
@@ -1087,6 +1101,12 @@ fn should_skip_build_requires_matching_commit_label() {
   assert!(!should_skip_build(false, true, Some("bbb"), Some("aaa")));
   assert!(!should_skip_build(false, true, Some("bbb"), None));
   assert!(should_skip_build(false, true, Some("bbb"), Some("bbb")));
+  assert!(should_skip_build(
+    false,
+    true,
+    Some("bbbbbbb"),
+    Some("bbbbbbbb")
+  ));
 }
 
 #[cfg(test)]

@@ -160,6 +160,8 @@ pub enum AgentMsg {
     #[serde(default)]
     build_v2: bool,
     #[serde(default)]
+    safe_rollback: bool,
+    #[serde(default)]
     key_rotation: bool,
   },
   KeyReady {

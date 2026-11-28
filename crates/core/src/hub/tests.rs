@@ -34,6 +34,7 @@ fn old_hello_has_no_host_shell_capability() {
     safe_migrate,
     safe_backup,
     build_v2,
+    safe_rollback,
     key_rotation,
     ..
   } = hello
@@ -51,6 +52,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!safe_migrate);
   assert!(!safe_backup);
   assert!(!build_v2);
+  assert!(!safe_rollback);
   assert!(!key_rotation);
 }
 
@@ -97,6 +99,7 @@ fn old_core_ignores_new_hello_capability() {
     safe_backup: true,
     build_v2: true,
     deploy_v2: false,
+    safe_rollback: true,
     key_rotation: true,
   };
   let json = serde_json::to_string(&hello).unwrap();
@@ -247,6 +250,7 @@ impl Hub {
         safe_backup: false,
         build_v2: false,
         deploy_v2: false,
+        safe_rollback: false,
         upgrade_only: false,
       },
     );
@@ -385,6 +389,7 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     safe_backup: false,
     build_v2: false,
     deploy_v2: false,
+    safe_rollback: false,
     upgrade_only: true,
   };
   state.hub.register("s1", conn.clone());
@@ -449,6 +454,7 @@ fn probe_connection(
     safe_backup: false,
     build_v2: false,
     deploy_v2: false,
+    safe_rollback: false,
     upgrade_only: false,
   };
   (conn, rx)

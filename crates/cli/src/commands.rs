@@ -2344,6 +2344,8 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          pins: None,
+          commit: None,
           name: v.name,
           spec: v.spec,
           adopt: v.adopt,
@@ -2385,6 +2387,8 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          pins: None,
+          commit: None,
           name,
           spec,
           adopt: None,
@@ -2425,13 +2429,18 @@ async fn service(
         Ok(())
       }
     }
-    ServiceCmd::Rollback { name, to, apply } => {
-      let path = match to {
-        Some(id) => {
-          format!("/api/services/{}/rollback?to={id}", seg(&name))
-        }
-        None => format!("/api/services/{}/rollback", seg(&name)),
-      };
+    ServiceCmd::Rollback {
+      name,
+      to,
+      apply,
+      allow_unpinned,
+    } => {
+      let path = format!(
+        "/api/services/{}/rollback?{}allow_unpinned={}",
+        seg(&name),
+        to.map(|id| format!("to={id}&")).unwrap_or_default(),
+        u8::from(allow_unpinned)
+      );
       let target: RollbackTarget = c.get(&path).await?;
       if !j {
         println!(
@@ -2442,18 +2451,24 @@ async fn service(
             .with_timezone(&chrono::Local)
             .format("%m-%d %H:%M")
         );
+        for warning in &target.warnings {
+          eprintln!("提醒：{warning}");
+        }
       }
-      changes(
-        c,
-        vec![Change::UpsertService {
-          name,
-          spec: target.spec,
-          adopt: None,
-        }],
-        apply,
-        j,
-      )
-      .await
+      let refresh = allow_unpinned
+        && target.commit.is_none()
+        && matches!(&target.spec.source, Source::Build(build) if build.git.is_some());
+      let mut edits = vec![Change::UpsertService {
+        name: name.clone(),
+        spec: target.spec,
+        adopt: None,
+        pins: target.pins,
+        commit: target.commit,
+      }];
+      if refresh {
+        edits.push(Change::RefreshImages { name, image: None });
+      }
+      changes(c, edits, apply, j).await
     }
     ServiceCmd::Timeline {
       name,
@@ -2576,6 +2591,8 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          pins: None,
+          commit: None,
           name,
           spec,
           adopt: None,
@@ -2614,7 +2631,11 @@ async fn service(
             d.created_at.format("%m-%d %H:%M"),
             d.server,
             d.run_id,
-            images.join(" ")
+            if d.started {
+              images.join(" ")
+            } else {
+              format!("未启动 {}", images.join(" "))
+            }
           );
         }
       });
@@ -2851,6 +2872,8 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          pins: None,
+          commit: None,
           name,
           spec,
           adopt: None,
@@ -2895,6 +2918,8 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          pins: None,
+          commit: None,
           name,
           spec,
           adopt: None,
@@ -2951,6 +2976,8 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          pins: None,
+          commit: None,
           name,
           spec,
           adopt: None,
@@ -2999,6 +3026,8 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          pins: None,
+          commit: None,
           name,
           spec,
           adopt: None,
@@ -3086,6 +3115,8 @@ async fn service(
       changes(
         c,
         vec![Change::UpsertService {
+          pins: None,
+          commit: None,
           name,
           spec,
           adopt: None,
@@ -4654,6 +4685,8 @@ async fn backup(
       .spec;
     spec.backup = backup;
     Ok::<_, CliError>(Change::UpsertService {
+      pins: None,
+      commit: None,
       name,
       spec,
       adopt: None,

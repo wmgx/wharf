@@ -1045,6 +1045,9 @@ pub enum ServiceCmd {
     /// 部署记录 id，见 `wharf service history`。
     #[arg(long)]
     to: Option<i64>,
+    /// 允许缺少 digest 或 commit 时按标签或分支回滚。
+    #[arg(long)]
+    allow_unpinned: bool,
     #[command(flatten)]
     apply: ApplyFlags,
   },
