@@ -780,8 +780,10 @@ mod tests {
     });
 
     let auth = crate::host_access::tests::auth([Perm::Plan], false);
-    let Json(before) =
-      check_now(State(state.clone()), auth).await.unwrap();
+    let Json(before) = check_now(State(state.clone()), auth)
+      .await
+      .map_err(|e| e.0)
+      .unwrap();
     assert!(!before.services["app"].newer);
 
     pushed.store(true, Ordering::Relaxed);
