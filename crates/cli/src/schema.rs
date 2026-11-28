@@ -287,26 +287,104 @@ fn paths(root: &Value) -> Vec<Value> {
   rows.into_values().collect()
 }
 
+fn command_output_schema(
+  command: &Value,
+  mut schema: Value,
+) -> Value {
+  if !matches!(
+    command.as_str(),
+    Some(
+      "wharf plan list"
+        | "wharf run list"
+        | "wharf server list"
+        | "wharf service list"
+        | "wharf service files"
+        | "wharf service files ls"
+        | "wharf service history"
+        | "wharf gateway list"
+        | "wharf route list"
+        | "wharf ops account list"
+        | "wharf ops task ls"
+        | "wharf ops task logs"
+        | "wharf ops token list"
+        | "wharf network edge list"
+        | "wharf network external list"
+        | "wharf config"
+        | "wharf config list"
+        | "wharf config var list"
+        | "wharf secret list"
+        | "wharf secret unused"
+        | "wharf inspect audit"
+        | "wharf inspect top"
+    )
+  ) {
+    return schema;
+  }
+  let mut array = json!({"type": "array"});
+  if let Some(item) = schema.as_object_mut() {
+    for key in ["$schema", "$defs"] {
+      if let Some(value) = item.remove(key) {
+        array[key] = value;
+      }
+    }
+  }
+  array["items"] = schema;
+  array
+}
+
 pub fn run(
-  resource: Option<&str>,
+  resource: &[String],
+  command_query: bool,
   flat: bool,
   j: bool,
 ) -> CliResult<()> {
   let all = entries();
-  let Some(name) = resource else {
-    print::json(&all);
-    return Ok(());
-  };
-  let schema = if name == "web" {
-    wharf_api_types::web_schema::web_schema()
-  } else {
-    let schema = all.get(name).ok_or_else(|| {
-      ApiError::invalid(format!(
-        "没有 {name}，可选：{}、web",
-        all.keys().copied().collect::<Vec<_>>().join("、")
-      ))
-    })?;
-    serde_json::to_value(schema).map_err(anyhow::Error::from)?
+  let schema = match resource {
+    [] => {
+      print::json(&all);
+      return Ok(());
+    }
+    [name] if !command_query && name == "web" => {
+      wharf_api_types::web_schema::web_schema()
+    }
+    [name] if !command_query && all.contains_key(name.as_str()) => {
+      serde_json::to_value(&all[name.as_str()])
+        .map_err(anyhow::Error::from)?
+    }
+    _ => {
+      let mut description = crate::describe::lookup(resource)
+        .ok_or_else(|| {
+          let name = resource.join(" ");
+          if resource.len() == 1 && !command_query {
+            ApiError::invalid(format!(
+              "没有 {name}，可选：{}、web",
+              all.keys().copied().collect::<Vec<_>>().join("、")
+            ))
+          } else {
+            ApiError::invalid(format!("没有命令 wharf {name}"))
+          }
+        })?;
+      let schema = description["returns"]
+        .as_str()
+        .and_then(|name| all.get(name))
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(anyhow::Error::from)?
+        .map(|schema| {
+          command_output_schema(&description["command"], schema)
+        });
+      if !flat {
+        description["schema"] = schema.unwrap_or(Value::Null);
+        print::json(&description);
+        return Ok(());
+      }
+      schema.ok_or_else(|| {
+          let command = description["command"].as_str().unwrap_or_default();
+          ApiError::invalid(format!(
+            "{command} 没有已登记的默认返回类型，去掉 --paths 可查看命令说明"
+          ))
+        })?
+    }
   };
   if flat {
     out(j, &paths(&schema), |paths| {

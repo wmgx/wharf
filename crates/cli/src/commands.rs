@@ -49,7 +49,7 @@ pub async fn run(cli: Cli) -> CliResult<()> {
   let j = cli.json;
   match cli.command {
     Command::Login { url, core_key, token_file, token_cmd } => login(url, core_key, token_file, token_cmd, j).await,
-    Command::Schema { resource, paths } => crate::schema::run(resource.as_deref(), paths, j),
+    Command::Schema { resource, paths, command_query } => crate::schema::run(&resource, command_query, paths, j),
     Command::Validate { file } => {
       let v = fleet::validate(&file);
       out(j, &v, |v| {

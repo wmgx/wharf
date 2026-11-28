@@ -15,6 +15,7 @@ mod bookmark;
 mod bundle;
 mod catalog;
 mod client;
+mod command_paths;
 mod commands;
 mod config_cmd;
 mod connect;
@@ -488,8 +489,11 @@ pub enum Command {
   Validate { file: std::path::PathBuf },
   /// 输出字段说明（JSON Schema），不需要连接控制面。
   Schema {
-    /// fleet、service、gateway、route、server、change、plan、run、status、error。不填则列出全部。
-    resource: Option<String>,
+    /// 类型名或命令路径。不填则列出全部类型。
+    resource: Vec<String>,
+    /// 同名时查询命令，例如 schema --command plan。
+    #[arg(long = "command", requires = "resource")]
+    command_query: bool,
     #[arg(long, requires = "resource")]
     paths: bool,
   },
@@ -2569,6 +2573,7 @@ fn quiet_supported(
     cmd = cmd.find_subcommand(sub).expect("已解析的子命令");
     args = nested;
   }
+  let path = command_paths::business_path(&path);
   let flag = |id| {
     args
       .try_get_one::<bool>(id)
@@ -2581,7 +2586,7 @@ fn quiet_supported(
     return false;
   }
   if path == ["gateway", "rotate-link"]
-    || matches!(path.as_slice(), ["secret", "rotate" | "rollback"])
+    || matches!(path, ["secret", "rotate" | "rollback"])
   {
     return flag("apply");
   }
@@ -2592,7 +2597,7 @@ fn quiet_supported(
   }
   (path == ["backup", "core"] && flag("run"))
     || matches!(
-      path.as_slice(),
+      path,
       ["apply"]
         | ["wait", _]
         | ["run", "list" | "retry" | "wait"]
@@ -2623,16 +2628,13 @@ fn quiet_supported(
 
 #[tokio::main]
 async fn main() {
-  use clap::{CommandFactory, FromArgMatches};
-  let app = Cli::command();
-  let parse = app.clone().try_get_matches().and_then(|matches| {
-    let cli = Cli::from_arg_matches(&matches)?;
-    Ok((cli, matches))
-  });
+  use clap::error::ErrorKind;
+  let app = command_paths::app();
+  let argv: Vec<_> = std::env::args_os().collect();
+  let parse = command_paths::parse(&app, &argv);
   let (mut cli, matches) = match parse {
     Ok(parsed) => parsed,
     Err(err) => {
-      use clap::error::ErrorKind;
       if matches!(
         err.kind(),
         ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
@@ -2693,6 +2695,14 @@ async fn main() {
     cli.include_volatile,
   );
   let as_json = cli.json;
+  if !as_json && !cli.quiet {
+    let path = command_paths::matched_path(&matches);
+    if let Some(group) =
+      path.first().and_then(|name| command_paths::group(name))
+    {
+      eprintln!("请改用 wharf {group} {}。", path.join(" "));
+    }
+  }
   let code = match commands::run(cli).await {
     Ok(()) => 0,
     Err(client::CliError::Exit(code)) => code,
@@ -2788,6 +2798,60 @@ fn limits_autoupdate_serverset_watchunit_readonly() {
 #[cfg(test)]
 mod quiet_arg_tests {
   use clap::CommandFactory;
+
+  #[test]
+  fn grouped_commands_keep_quiet_rules_and_exec_arguments() {
+    use super::{Command, command_paths};
+    let app = command_paths::app();
+    for (words, quiet) in [
+      (&["-q", "task", "list"][..], true),
+      (&["ops", "task", "ls", "-q"][..], true),
+      (&["backup", "core", "--run", "-q"][..], true),
+      (&["data", "backup", "core", "--run", "-q"][..], true),
+      (&["data", "backup", "core", "-q"][..], false),
+      (&["ops", "core", "snapshot", "list", "-q"][..], true),
+    ] {
+      let argv: Vec<_> = std::iter::once("wharf")
+        .chain(words.iter().copied())
+        .collect();
+      let (cli, matches) = command_paths::parse(&app, &argv).unwrap();
+      assert!(cli.quiet);
+      assert_eq!(
+        super::quiet_supported(&app, &matches),
+        quiet,
+        "{words:?}"
+      );
+    }
+    for group in [&[][..], &["config"][..]] {
+      for edit in [&[][..], &["--timezone", "UTC"][..]] {
+        let argv: Vec<_> = std::iter::once("wharf")
+          .chain(group.iter().copied())
+          .chain(["defaults", "--server", "s1"])
+          .chain(edit.iter().copied())
+          .collect();
+        assert!(matches!(
+          command_paths::parse(&app, &argv).unwrap().0.command,
+          Command::Defaults(_)
+        ));
+      }
+    }
+    for group in [&[][..], &["server"][..]] {
+      let parse = |tail: &[&str]| {
+        let argv: Vec<_> = std::iter::once("wharf")
+          .chain(group.iter().chain(tail).copied())
+          .collect();
+        command_paths::parse(&app, &argv).unwrap().0.command
+      };
+      assert!(matches!(
+        parse(&["exec", "s1", "--script", "-"]),
+        Command::Exec { command: None, .. }
+      ));
+      assert!(matches!(
+        parse(&["exec", "s1", "--", "--quiet"]),
+        Command::Exec { command: Some(command), .. } if command == "--quiet"
+      ));
+    }
+  }
 
   #[test]
   fn quiet_support_for_21_2_commands() {

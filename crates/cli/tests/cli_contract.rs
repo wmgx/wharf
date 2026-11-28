@@ -47,6 +47,8 @@ fn new_commands_explicitly_reject_quiet_with_one_json_error() {
     &["task", "cancel", "1"],
     &["service", "exec", "fixture", "--script", "fixture"],
     &["exec", "s1", "--script", "fixture"],
+    &["task", "list"],
+    &["ops", "task", "ls"],
     &["service", "env", "sync", "fixture", ".env"],
     &["task", "artifacts", "fixture"],
   ] {
@@ -61,4 +63,176 @@ fn new_commands_explicitly_reject_quiet_with_one_json_error() {
       serde_json::from_slice(&result.stdout).unwrap();
     assert_eq!(error["code"], "InvalidInput");
   }
+}
+
+#[test]
+fn validate_paths_preserve_output_errors_and_changed_history() {
+  let dir = tempfile::tempdir().unwrap();
+  let run = |args: &[&str]| {
+    Command::new(env!("CARGO_BIN_EXE_wharf"))
+      .current_dir(dir.path())
+      .env("XDG_CACHE_HOME", dir.path())
+      .args(args)
+      .output()
+      .unwrap()
+  };
+  use serde_json::Value;
+  for (content, code) in [("", 0), ("[invalid", 1)] {
+    std::fs::write(dir.path().join("app.toml"), content).unwrap();
+    let old = run(&["validate", "app.toml"]);
+    let new = run(&["plan", "validate", "app.toml"]);
+    assert_eq!(old.status.code(), Some(code));
+    assert_eq!(old.status, new.status);
+    assert_eq!(old.stdout, new.stdout);
+    assert_eq!(
+      old.stderr,
+      "请改用 wharf plan validate。\n".as_bytes()
+    );
+    assert!(new.stderr.is_empty());
+
+    let old = run(&["validate", "app.toml", "--json"]);
+    let new = run(&["--json", "plan", "validate", "app.toml"]);
+    assert_eq!(old.status.code(), Some(code));
+    assert_eq!(old.status, new.status);
+    assert_eq!(old.stdout, new.stdout);
+    assert!(old.stderr.is_empty() && new.stderr.is_empty());
+    let body: Value = serde_json::from_slice(&old.stdout).unwrap();
+    assert_eq!(body["ok"], code == 0);
+  }
+
+  let help = run(&["validate", "--help"]);
+  assert!(help.status.success() && help.stderr.is_empty());
+  assert!(
+    String::from_utf8_lossy(&help.stdout)
+      .contains("Usage: wharf validate")
+  );
+  let error = run(&["validate", "--bad-flag", "--json"]);
+  assert_eq!(error.status.code(), Some(1));
+  assert!(error.stderr.is_empty());
+  let body: Value = serde_json::from_slice(&error.stdout).unwrap();
+  assert_eq!(body["code"], "InvalidInput");
+
+  let error = run(&["--json", "--comman", "refs", "schema"]);
+  assert_eq!(error.status.code(), Some(1));
+  assert!(error.stderr.is_empty());
+  let body: Value = serde_json::from_slice(&error.stdout).unwrap();
+  assert_eq!(body["code"], "InvalidInput");
+  assert!(body["hint"].is_null());
+
+  std::fs::write(dir.path().join("app.toml"), "").unwrap();
+  for (args, first) in [
+    (&["validate", "app.toml", "--changed"][..], true),
+    (&["plan", "validate", "app.toml", "--changed"][..], true),
+    (&["validate", "app.toml", "--changed"][..], false),
+  ] {
+    let output = run(args);
+    assert!(output.status.success() && output.stderr.is_empty());
+    let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["first_run"], first);
+  }
+}
+
+#[test]
+fn schema_finds_commands_types_and_hidden_aliases() {
+  use serde_json::Value;
+  let schema = |words: &[&str]| {
+    let output = Command::new(env!("CARGO_BIN_EXE_wharf"))
+      .args(["schema", "--json"])
+      .args(words)
+      .output()
+      .unwrap();
+    assert!(output.stderr.is_empty(), "{words:?}");
+    (
+      output.status.code().unwrap(),
+      serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+    )
+  };
+  let lookup = |words: &[&str]| {
+    let (code, result) = schema(words);
+    assert_eq!(code, 0, "{words:?}");
+    result
+  };
+  let backup = lookup(&["data", "backup", "list"]);
+  assert_eq!(backup, lookup(&["backup", "list"]));
+  assert_eq!(backup["command"], "wharf data backup list");
+  assert_eq!(backup["returns"], "backup");
+  assert!(backup["schema"].is_object());
+  assert_eq!(lookup(&["backup"])["type"], "object");
+  assert_eq!(
+    lookup(&["--command", "backup"])["command"],
+    "wharf data backup"
+  );
+  for name in ["migrate", "cleanup-legacy"] {
+    assert!(
+      lookup(&["data", "backup"])["subcommands"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::from(name))
+    );
+    assert_eq!(
+      lookup(&["data", "backup", name])["command"],
+      format!("wharf data backup {name}")
+    );
+  }
+  let restore = lookup(&["data", "backup", "restore"]);
+  assert_eq!(restore["command"], "wharf data backup restore");
+  assert_eq!(restore["effect"], "direct");
+  assert_eq!(
+    lookup(&["task", "list"])["command"],
+    "wharf ops task ls"
+  );
+  assert!(lookup(&["plan", "validate"])["returns"].is_null());
+  let (code, error) = schema(&["plan", "validate", "--paths"]);
+  assert_eq!(code, 1);
+  assert_eq!(error["code"], "InvalidInput");
+  let fields = lookup(&["service_view", "--paths"]);
+  assert_eq!(fields, lookup(&["service", "show", "--paths"]));
+  assert!(
+    fields
+      .as_array()
+      .unwrap()
+      .iter()
+      .any(|row| row["path"] == "status.actual")
+  );
+  for (command, ty, field) in [
+    (["plan", "list"], "plan_summary", "plan_id"),
+    (["service", "list"], "service_view", "status"),
+  ] {
+    let schema = &lookup(&command)["schema"];
+    let item = lookup(&[ty]);
+    assert_eq!(schema["type"], "array");
+    assert_eq!(item["type"], "object");
+    assert_eq!(
+      schema["items"]["properties"][field],
+      item["properties"][field]
+    );
+    assert_eq!(schema["$defs"], item["$defs"]);
+  }
+  assert_eq!(
+    lookup(&["service", "show"])["schema"]["type"],
+    "object"
+  );
+  assert!(
+    lookup(&["service", "list", "--paths"])
+      .as_array()
+      .unwrap()
+      .iter()
+      .any(|row| row["path"] == "[].status.actual")
+  );
+}
+
+#[test]
+fn skill_labels_immediate_restart_and_links_to_read_only_checks() {
+  let skill = include_str!("../../../skill/SKILL.md");
+  let restart = skill
+    .lines()
+    .find(|line| line.contains("`wharf service restart app --json`"))
+    .unwrap();
+  assert!(
+    restart.contains("立即重启")
+      && restart.contains("省略 `--apply` 也会执行")
+  );
+  assert!(restart.contains("`wharf service show app --json`"));
+  assert!(skill.contains("`wharf schema data backup restore`"));
+  assert!(skill.lines().count() <= 120);
 }
