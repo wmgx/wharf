@@ -17,7 +17,9 @@ use crate::{
 )]
 #[serde(deny_unknown_fields)]
 pub struct PlanRequest {
-  /// 局部修改。`changes`、`fleet`、`partial` 只能给一个；都不给时只检查漂移。
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub service_action: Option<ServiceAction>,
+  /// 局部修改。与 fleet、partial、service_action 互斥。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub changes: Vec<Change>,
   /// 完整期望状态，文件里没有的服务、网关、路由会被计划删除。
@@ -32,6 +34,67 @@ pub struct PlanRequest {
   /// 计划备注，随计划保存，执行时记进操作记录。
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(
+  tag = "action",
+  rename_all = "snake_case",
+  deny_unknown_fields
+)]
+pub enum ServiceAction {
+  Restart {
+    tag: String,
+  },
+  Stop {
+    tag: String,
+  },
+  Update {
+    tag: String,
+  },
+  ResumeProtected {
+    service: String,
+  },
+  Rename {
+    source: String,
+    target: String,
+  },
+  Clone {
+    source: String,
+    target: String,
+    #[serde(default)]
+    server: Option<String>,
+    #[serde(default)]
+    copy_data: bool,
+  },
+}
+
+#[derive(
+  Debug,
+  Clone,
+  Copy,
+  PartialEq,
+  Eq,
+  Serialize,
+  Deserialize,
+  JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceActionKind {
+  Restart,
+  Stop,
+  Update,
+  Clone,
+  Rename,
+  ResumeProtected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PlannedServiceAction {
+  pub action: ServiceActionKind,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub tag: Option<String>,
+  pub targets: Vec<String>,
 }
 
 #[derive(
@@ -379,6 +442,8 @@ pub struct Plan {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub inputs: Option<String>,
   pub items: Vec<PlanItem>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub service_action: Option<PlannedServiceAction>,
   /// 不阻止 apply 的提醒，例如某台服务器离线，查不到现状。
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub warnings: Vec<String>,

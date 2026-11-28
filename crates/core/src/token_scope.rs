@@ -140,6 +140,7 @@ pub fn check_service_scope(
       | ["", "api", "data", "cleanup", "policy"]
       | ["", "api", "logs", "services"]
       | ["", "api", "metrics"]
+      | ["", "api", "metrics", "limits-suggest"]
       | ["", "api", "routes", _, "cert" | "dns-check" | "failover"]
       | ["", "api", "tasks", _]
       | ["", "api", "tasks", _, "runs" | "artifacts"]
@@ -320,6 +321,14 @@ pub fn check_plan_scope(
       !allowed
     })
     .map(|item| item.address.clone())
+    .chain(
+      plan
+        .service_action
+        .iter()
+        .flat_map(|action| &action.targets)
+        .filter(|name| !services.contains(*name))
+        .map(|name| format!("service/{name}")),
+    )
     .collect();
   if blocked.is_empty() {
     Ok(())
@@ -500,6 +509,8 @@ pub fn require_plan_request(
   for change in &req.changes {
     let address = match change {
       Change::AdoptData { service: name, .. }
+      | Change::EditServiceTags { name, .. }
+      | Change::SetCrashGuard { name, .. }
       | Change::UpsertService { name, .. }
       | Change::RemoveService { name, .. }
       | Change::RefreshImages { name, .. }
@@ -548,6 +559,18 @@ pub fn require_plan_request(
         blocked.into_iter().collect::<Vec<_>>().join("、")
       ),
     ))
+  }
+}
+
+pub(crate) fn redact_plan_baseline(auth: &Auth, plan: &mut Plan) {
+  if plan.service_action.is_some()
+    && let Some(services) = &auth.services
+  {
+    plan.base_versions.retain(|address, _| {
+      address
+        .strip_prefix("service/")
+        .is_some_and(|name| services.contains(name))
+    });
   }
 }
 

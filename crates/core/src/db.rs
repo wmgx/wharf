@@ -395,6 +395,8 @@ CREATE INDEX task_runs_service_started ON task_runs (service, started_at DESC);
    UPDATE cleanups SET created_at = due_at - 604800000 WHERE created_at IS NULL;
    ALTER TABLE cleanups ADD COLUMN blocked_reason TEXT;
    ALTER TABLE cleanups ADD COLUMN next_retry_at INTEGER;",
+  "ALTER TABLE deployments ADD COLUMN original_service TEXT;",
+  crate::crash_guard::MIGRATION,
 ];
 
 const PENDING_STEPS_MIGRATION: &str = r#"
@@ -830,7 +832,9 @@ pub fn all_resources(
 }
 
 /// 配置写入，在 apply 的事务里执行。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(
+  Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize,
+)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Write {
   Upsert {

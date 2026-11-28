@@ -43,6 +43,7 @@ fn test_plan(address: &str, impact: Impact) -> Plan {
     created_at: Utc::now(),
     expires_at: Utc::now() + chrono::TimeDelta::minutes(5),
     base_versions: Default::default(),
+    service_action: None,
     inputs: None,
     items: vec![item],
     warnings: vec![],

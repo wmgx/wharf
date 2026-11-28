@@ -1,6 +1,6 @@
 use clap::{Args, ValueEnum};
 use wharf_api_types::{
-  resources::{ImagesView, UsageKind, UsageRow},
+  resources::{ImagesView, LimitSuggestion, UsageKind, UsageRow},
   view::ServerView,
 };
 
@@ -15,20 +15,21 @@ use crate::{
   long_about = "按最近一次资源采样排列各服务器的服务、网关和 agent，或用 --images 现查镜像体积。\nserver usage 看单台机器最近 10 分钟的平均用量，server disk 看服务的目录、日志和卷，server host 看宿主机概况。"
 )]
 pub struct TopArgs {
-  /// CPU、内存或网络收发合计。
-  #[arg(
-    long,
-    value_enum,
-    default_value = "cpu",
-    conflicts_with = "images"
-  )]
-  by: Sort,
+  /// CPU、内存或网络收发合计，默认按 CPU 排。
+  #[arg(long, value_enum, conflicts_with_all = ["images", "suggest_limits"])]
+  by: Option<Sort>,
+  /// 根据历史样本估算服务资源上限。
+  #[arg(long, conflicts_with = "images")]
+  suggest_limits: bool,
+  /// 历史窗口，1 到 14 天，默认 14。
+  #[arg(long, requires = "suggest_limits")]
+  days: Option<i64>,
   /// 只看指定服务器。
   #[arg(long)]
   server: Option<String>,
   #[arg(long, conflicts_with = "images")]
   service: Option<String>,
-  #[arg(long, requires = "service", conflicts_with = "images")]
+  #[arg(long, requires = "service", conflicts_with_all = ["images", "suggest_limits"])]
   containers: bool,
   /// 现查镜像大小和占用它的容器，按体积排序。
   #[arg(long)]
@@ -100,7 +101,50 @@ pub async fn run(
       args.containers
     ));
   }
-  if args.images {
+  if args.suggest_limits {
+    let days = args.days.unwrap_or(14);
+    let rows: Vec<LimitSuggestion> = c
+      .get(&format!(
+        "/api/metrics/limits-suggest?{filter}&days={days}"
+      ))
+      .await?;
+    out(json, &rows, |rows| {
+      for row in rows {
+        println!(
+          "{}	{}	{}	{} 小时	OOM 采样点 {}",
+          row.name,
+          row.server,
+          row.memory_class,
+          row.memory.hours,
+          row.oom_points
+        );
+        for reason in [&row.skip, &row.memory_reason, &row.cpu_reason]
+          .into_iter()
+          .flatten()
+        {
+          println!("  {reason}");
+        }
+        if row.memory_mb.is_some() || row.cpu_milli.is_some() {
+          let memory = row
+            .memory_mb
+            .map_or_else(String::new, |mb| format!(" --memory {mb}"));
+          let cpu = row.cpu_milli.map_or_else(String::new, |m| {
+            format!(" --cpus {}", f64::from(m) / 1000.0)
+          });
+          let container = row
+            .container
+            .as_deref()
+            .map_or_else(String::new, |name| {
+              format!(" --container {name}")
+            });
+          println!(
+            "  wharf service limits {}{container}{memory}{cpu}",
+            row.name
+          );
+        }
+      }
+    });
+  } else if args.images {
     let view: ImagesView =
       c.get(&format!("/api/metrics/images?{filter}")).await?;
     out(json, &view, |v| {
@@ -138,7 +182,7 @@ pub async fn run(
   } else {
     let mut rows: Vec<UsageRow> =
       c.get(&format!("/api/metrics/top?{filter}")).await?;
-    match args.by {
+    match args.by.unwrap_or(Sort::Cpu) {
       Sort::Cpu => rows.sort_by(|a, b| {
         b.cpu
           .partial_cmp(&a.cpu)

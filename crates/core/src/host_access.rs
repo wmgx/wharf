@@ -29,7 +29,7 @@ pub use policy::{
   require_plan_host, require_with,
 };
 
-use compose::compose_host_reasons;
+pub(crate) use compose::compose_host_reasons;
 pub use compose::{
   compose_published_ports, has_new_public_bind,
   validate_service_ports,

@@ -37,6 +37,7 @@ struct Record {
   /// 已经因为次数用完而放弃，只提醒一次。
   gave_up: bool,
   pending_run: Option<String>,
+  crashes: crate::crash_guard::Observations,
 }
 
 pub const AUTO_RESTART_TITLE: &str = "自动重启 ";
@@ -141,6 +142,8 @@ async fn tick(
     .await?;
   let net = snap.net(&snap.world);
   let live = cached_live(state, &snap.world).await;
+  crate::crash_guard::retry_stops(state, &snap).await;
+  crate::crash_guard::repair::sweep(state, &snap).await;
   for name in std::mem::take(&mut *CLEARED.lock().unwrap()) {
     records.remove(&name);
     notices.remove(&name);
@@ -182,6 +185,9 @@ async fn tick(
     let busy = state.is_service_busy(name);
     let observed = snapshot::service_runtime_server(&snap, name)
       .and_then(|server| live.get(server));
+    if busy || observed.is_none_or(Result::is_err) {
+      rec.crashes.clear();
+    }
     if !ready_to_observe(
       rec,
       busy,
@@ -209,8 +215,23 @@ async fn tick(
       || p.containers.iter().all(|c| c.foreign)
     {
       rec.strikes = 0;
+      rec.crashes.clear();
       continue;
     }
+    if row.spec.crash_guard
+      && state.hub.crash_guard_conn_id(&row.spec.server).is_ok()
+    {
+      crate::crash_guard::observe(
+        state,
+        &snap,
+        name,
+        p,
+        &mut rec.crashes,
+      )
+      .await;
+      continue;
+    }
+    rec.crashes.clear();
     let was_notified = notices.get(name).is_some_and(|s| s == "fail");
     let Some(why) = broken(p) else {
       rec.strikes = 0;

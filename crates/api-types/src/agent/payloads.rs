@@ -192,6 +192,83 @@ pub enum SyncKind {
   ServiceData,
   BackupRepo,
   CoreBackupRepo,
+  CloneData,
+  CloneSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RestartPolicy {
+  pub id: String,
+  pub policy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum CrashGuardOp {
+  Policies {
+    service: String,
+  },
+  Disable {
+    service: String,
+    policies: Vec<RestartPolicy>,
+  },
+  Restore {
+    service: String,
+    policies: Vec<RestartPolicy>,
+  },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairLease {
+  pub service: String,
+  pub instance: String,
+  pub id: String,
+  pub hash: String,
+  pub expires_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum ServiceRepairOp {
+  Start {
+    lease: RepairLease,
+  },
+  Exec {
+    lease: RepairLease,
+    command: String,
+    timeout_secs: u64,
+  },
+  End {
+    lease: RepairLease,
+  },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum ServiceCopy {
+  CheckBackup {
+    service: String,
+  },
+  Archive {
+    service: String,
+    receipt: String,
+  },
+  Check {
+    target: String,
+  },
+  Stage {
+    target: String,
+    receipt: String,
+  },
+  Local {
+    source: String,
+    target: String,
+    receipt: String,
+  },
+  Commit {
+    target: String,
+    receipt: String,
+  },
 }
 
 impl SyncKind {
@@ -729,6 +806,12 @@ pub struct GatewayApply {
   Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
 pub struct ContainerInfo {
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub container_id: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub restart_count: Option<u32>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub restart_observed_at: Option<i64>,
   /// compose 里的服务名。
   pub service: String,
   pub name: String,

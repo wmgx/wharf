@@ -47,6 +47,7 @@ pub struct Snapshot {
   /// 每个服务最近一次成功部署在哪台服务器上。和配置里的服务器不同，说明迁移还没完成。
   pub deployed: BTreeMap<String, String>,
   pub pending: crate::pending::PendingState,
+  pub recovery: BTreeMap<String, crate::crash_guard::Recovery>,
   /// cloudflare_tunnel 网关已经创建的隧道。
   pub tunnels: BTreeMap<String, db::TunnelRow>,
   /// 已绑定到边缘应用的自定义域名。
@@ -216,6 +217,7 @@ pub(crate) async fn load_inner(
     }
     Ok(
       Snapshot {
+        recovery: crate::crash_guard::load(c, &world)?,
         world,
         global_defaults: crate::service_defaults::load(c)?,
         container_timezone: db::setting(c, "core.timezone")?,
@@ -1523,6 +1525,12 @@ mod tests {
     let restored: wharf_api_types::spec::ServiceSpec =
       serde_json::from_value(legacy.clone()).unwrap();
     assert_eq!(serde_json::to_value(restored).unwrap(), legacy);
+    assert!(
+      legacy.get("tags").is_none()
+        && legacy.get("crash_guard").is_none()
+    );
+    spec.tags.insert("试验".into());
+    spec.crash_guard = true;
     let legacy_compose = raw.replace("[[KEY]]", "ok123");
     let legacy_hash = render::hash(&legacy_compose);
     assert_eq!(
@@ -1816,6 +1824,99 @@ mod tests {
     assert_eq!(
       service_hash(&world, &net, "app", &secrets, None).unwrap(),
       new
+    );
+  }
+
+  #[tokio::test]
+  async fn old_services_and_old_agent_stay_unchanged_in_global_plan()
+  {
+    use serde_json::json;
+    use wharf_api_types::{agent::AgentOp, plan::PlanRequest};
+    let state = crate::rules::tests::test_state();
+    let mut world = world(21000);
+    world.servers.get_mut("s1").unwrap().settings.private_addr = Some(
+      serde_json::from_value(
+        json!({"ip":"fd00:23:4::1","network":"overlay"}),
+      )
+      .unwrap(),
+    );
+    let row = world.services.remove("app").unwrap();
+    for (i, name) in ["image", "compose", "stopped", "v6"]
+      .into_iter()
+      .enumerate()
+    {
+      let mut current = row.clone();
+      current.instance_id = format!("instance-{name}");
+      current.host_ports.insert("http".into(), 21000 + i as u16);
+      current.pins.insert(
+        "nginx:1".into(),
+        format!("sha256:{}", "a".repeat(64)),
+      );
+      if name == "compose" {
+        current.spec.source=serde_json::from_value(json!({"compose":{"content":"services:\n  web:\n    image: nginx:1\n"}})).unwrap();
+        current.spec.ports.clear();
+        current.host_ports.clear();
+      } else if name == "stopped" {
+        current.spec.stopped = true;
+      } else if name == "v6" {
+        current
+          .spec
+          .env
+          .insert("APP_HOST".into(), "[[@image:host]]".into());
+      }
+      let old = serde_json::to_value(&current.spec).unwrap();
+      assert!(
+        old.get("tags").is_none() && old.get("crash_guard").is_none()
+      );
+      world.services.insert(name.into(), current);
+    }
+    let mut snap = Snapshot {
+      world,
+      ..Default::default()
+    };
+    let net = snap.net(&snap.world);
+    let mut live = Vec::new();
+    for name in ["image", "compose", "stopped", "v6"] {
+      let values = Default::default();
+      let (_, hash) = resolve_service(
+        &snap.world,
+        &net,
+        name,
+        &values,
+        name == "v6",
+      )
+      .unwrap();
+      let component = if name == "compose" { "web" } else { name };
+      let state = if name == "stopped" {
+        "exited"
+      } else {
+        "running"
+      };
+      live.push(json!({"project":name,"hash":hash,"containers":[{"service":component,"name":format!("{name}-1"),"state":state}]}));
+      snap.deployed.insert(name.into(), "s1".into());
+    }
+    state.hub.mock_agent("s1", false, move |op| match op {
+      AgentOp::ProjectStatus { .. } => Ok(json!(live)),
+      _ => panic!("旧服务的普通 plan 不应执行额外操作"),
+    });
+    let result = crate::planner::make_plan_inner(
+      &state,
+      PlanRequest::default(),
+      snap,
+      false,
+      true,
+    )
+    .await
+    .unwrap();
+    assert!(result.writes.is_empty() && result.steps.is_empty());
+    assert!(result.plan.items.is_empty(), "{:?}", result.plan.items);
+    let mut saved = serde_json::to_value(result.plan).unwrap();
+    saved.as_object_mut().unwrap().remove("service_action");
+    assert!(
+      serde_json::from_value::<wharf_api_types::plan::Plan>(saved)
+        .unwrap()
+        .service_action
+        .is_none()
     );
   }
 

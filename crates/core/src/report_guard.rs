@@ -207,6 +207,7 @@ pub fn sanitize_report(r: &mut AgentReport) {
 
 pub(crate) fn sanitize_metrics(m: &mut Metrics) {
   m.cpu = nonnegative(m.cpu).min(100.0);
+  m.cpu_cores = m.cpu_cores.filter(|n| (1..=65536).contains(n));
   m.agent_cpu = m.agent_cpu.map(|n| nonnegative(n).min(100.0));
   for project in m.projects.values_mut() {
     project.cpu = nonnegative(project.cpu).min(100.0);

@@ -26,6 +26,9 @@ use crate::{
   exec::{Cmd, Ctx},
 };
 
+mod service_copy;
+pub(crate) use service_copy::run as service_copy;
+
 const SERVE_TIMEOUT: Duration = Duration::from_secs(8 * 3600);
 const PUSH_TIMEOUT: Duration = Duration::from_secs(4 * 3600);
 const READY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -40,7 +43,10 @@ fn sync_root(
 ) -> Result<&'static Path, ApiError> {
   validate_name("service", service)?;
   match kind {
-    SyncKind::ServiceData => Ok(Path::new("/srv")),
+    SyncKind::ServiceData | SyncKind::CloneSource => {
+      Ok(Path::new("/srv"))
+    }
+    SyncKind::CloneData => Ok(Path::new(service_copy::ROOT)),
     SyncKind::BackupRepo => Ok(Path::new(BACKUP_ROOT)),
     SyncKind::CoreBackupRepo if service == "wharf-core" => {
       Ok(Path::new(CORE_BACKUP_ROOT))
@@ -117,13 +123,20 @@ pub async fn serve(
 ) -> Result<Value, ApiError> {
   let base = sync_root(s.kind, &s.service)?;
   let root = base.join(&s.service);
-  if !s.kind.is_service_data() {
+  if s.kind == SyncKind::CloneData {
+    if s.preserve_existing {
+      return Err(ApiError::invalid("复制只能写到本次暂存目录"));
+    }
+    crate::dirfd::DirFd::open_service_root(base, &s.service)?;
+  } else if !s.kind.is_service_data() {
     let relative = base.strip_prefix("/srv").expect("固定备份根目录");
     crate::dirfd::ensure_beneath(Path::new("/srv"), relative)?;
   }
   let bind = parse_ip("监听地址", &s.bind)?;
   let allow = parse_ip("发送端地址", &s.allow)?;
-  crate::dirfd::ensure_beneath(base, Path::new(&s.service))?;
+  if s.kind != SyncKind::CloneData {
+    crate::dirfd::ensure_beneath(base, Path::new(&s.service))?;
+  }
   if s.require_empty
     && std::fs::read_dir(&root)
       .map_err(io_err(&root))?
@@ -253,24 +266,39 @@ pub async fn push(
   p: &SyncPush,
   ctx: &Ctx,
 ) -> Result<Value, ApiError> {
+  if p.kind == SyncKind::CloneData {
+    return Err(ApiError::invalid("复制暂存目录只能作为接收端"));
+  }
   let base = sync_root(p.kind, &p.service)?;
   let root = base.join(&p.service);
   let host = parse_ip("接收端地址", &p.host)?;
-  match crate::dirfd::DirFd::open_service_root(base, &p.service) {
-    Err(e) if e.code == ErrorCode::NotFound => {
-      return Err(
-        ApiError::not_found(format!(
-          "源服务器上的数据目录 {} 不存在，中止迁移",
-          root.display()
-        ))
-        .with_hint(
-          "检查源机 /srv 目录是否被改名或卸载；确认后再重试",
-        ),
-      );
-    }
-    Err(e) => return Err(e),
-    Ok(_) => {}
+  let opened =
+    match crate::dirfd::DirFd::open_service_root(base, &p.service) {
+      Err(e) if e.code == ErrorCode::NotFound => {
+        return Err(
+          ApiError::not_found(format!(
+            "源服务器上的数据目录 {} 不存在，中止迁移",
+            root.display()
+          ))
+          .with_hint(
+            "检查源机 /srv 目录是否被改名或卸载；确认后再重试",
+          ),
+        );
+      }
+      Err(e) => return Err(e),
+      Ok(dir) => dir,
+    };
+  if p.kind == SyncKind::CloneSource {
+    crate::dirfd::validate_tree(&opened, true)?;
   }
+  let source = if p.kind == SyncKind::CloneSource {
+    Path::new("/proc")
+      .join(std::process::id().to_string())
+      .join("fd")
+      .join(opened.fd_path().file_name().expect("fd"))
+  } else {
+    root.clone()
+  };
   let host = match host {
     IpAddr::V6(v6) => format!("[{v6}]"),
     IpAddr::V4(v4) => v4.to_string(),
@@ -281,7 +309,7 @@ pub async fn push(
   loop {
     let result = Cmd::new("rsync")
       .args(rsync_args(p.pass, p.kind, p.bwlimit_kbps))
-      .arg(format!("{}/", root.display()))
+      .arg(format!("{}/", source.display()))
       .arg(format!("rsync://{USER}@{host}:{}/{MODULE}/", p.port))
       // 口令走环境变量，不出现在命令行里。
       .env("RSYNC_PASSWORD", &p.password.0)
@@ -350,7 +378,9 @@ fn rsync_args(
   bwlimit_kbps: Option<u32>,
 ) -> Vec<String> {
   let mut args = vec!["-aH", "--numeric-ids"];
-  if !kind.is_service_data() {
+  if kind == SyncKind::CloneSource {
+    args.extend(["--delete", "--checksum", "--one-file-system"]);
+  } else if !kind.is_service_data() {
     args.extend([
       "--partial",
       "--delete-after",

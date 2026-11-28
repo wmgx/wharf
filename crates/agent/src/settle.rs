@@ -543,6 +543,9 @@ esac
       finished_at: None,
       exit_code: None,
       restart_policy: None,
+      container_id: None,
+      restart_count: None,
+      restart_observed_at: None,
     }
   }
 

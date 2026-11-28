@@ -304,6 +304,17 @@ pub(crate) async fn start_with_actor(
   let auth = caller.as_ref().map(|(auth, _)| *auth);
   let stored = stored_plan(&state, &req.plan_id).await?;
   let plan = &stored.body.plan;
+  if plan.service_action.as_ref().is_some_and(|action| {
+    action.action == wharf_api_types::plan::ServiceActionKind::Rename
+  }) {
+    crate::auth::require_perm(perms, Perm::Admin)?;
+    if auth.is_some_and(|auth| auth.services.is_some()) {
+      return Err(ApiError::new(
+        ErrorCode::Forbidden,
+        "服务改名需要不限制服务范围的管理员令牌",
+      ));
+    }
+  }
   if let Some(auth) = auth {
     crate::token_scope::require_plan(
       auth,
@@ -359,6 +370,20 @@ pub(crate) async fn start_with_actor(
           .is_none_or(|before| before.extra_logs != spec.extra_logs)
       {
         state.hub.extra_logs_conn_id(&spec.server)?;
+      }
+      if spec.crash_guard
+        && plan.items.iter().any(|item| {
+          item.layer == wharf_api_types::plan::Layer::Config
+            && item.address == format!("service/{name}")
+            && item
+              .before
+              .as_ref()
+              .and_then(|before| before.get("crash_guard"))
+              .and_then(serde_json::Value::as_bool)
+              != Some(true)
+        })
+      {
+        state.hub.crash_guard_conn_id(&spec.server)?;
       }
       bind_sources.extend(
         crate::data::mounts(name, &spec).into_iter().filter_map(
@@ -698,6 +723,8 @@ pub(crate) async fn start_with_actor(
     let checked_plan = plan.clone();
     let refs = stored.body.account_refs.clone();
     let base_instances = stored.body.base_instances.clone();
+    let checked_state = state.clone();
+    let checked_steps = stored.steps.clone();
     state
       .db
       .call_credentials(move |c, key| {
@@ -707,7 +734,8 @@ pub(crate) async fn start_with_actor(
           &checked_plan,
           refs.as_ref(),
           base_instances.as_ref(),
-        )
+        )?;
+        check_service_action_agents(&checked_state, c, &checked_steps)
       })
       .await
       .map_err(scope_freshness_error)?;
@@ -798,7 +826,7 @@ pub(crate) async fn start_with_actor(
     };
     let run_id = run_id.clone();
     crate::rules::ensure_loaded(&state).await;
-    let capabilities = state.clone();
+    let checked_state = state.clone();
     let removed_firing = state
       .db
       .call_credentials(move |c, key| {
@@ -810,7 +838,8 @@ pub(crate) async fn start_with_actor(
           account_refs.as_ref(),
           base_instances.as_ref(),
         )?;
-        let alert_changes = apply_writes(&tx, &policy_plan, &writes, admin, (&capabilities, &step_plans))?;
+        check_service_action_agents(&checked_state, &tx, &step_plans)?;
+        let alert_changes = apply_writes(&tx, &policy_plan, &writes, admin, Some((&checked_state, &step_plans)))?;
         if let Some(dns_gateways) = dns_gateways.filter(|m| !m.is_empty()) {
           let world = crate::world::World::from_rows(db::all_resources(&tx)?)?;
           let active = crate::failover::load_active_from_conn(&tx)?;
@@ -887,6 +916,44 @@ pub(crate) async fn start_with_actor(
   Ok(ApplyResponse { run_id })
 }
 
+fn check_service_action_agents(
+  state: &AppState,
+  c: &rusqlite::Connection,
+  steps: &[StepPlan],
+) -> Result<(), ApiError> {
+  for entry in steps {
+    match &entry.step {
+      Step::CloneData { job } => job.check_agents(state)?,
+      Step::RenameService { job } => {
+        let world =
+          crate::world::World::from_rows(db::all_resources(c)?)?;
+        for server in world.servers.keys() {
+          state.hub.service_copy_conn_id(server)?;
+        }
+        let row =
+          world.services.get(&job.source).ok_or_else(|| {
+            crate::api::service_not_found(&job.source)
+          })?;
+        state.hub.require_safe_migrate(&job.server)?;
+        if row.spec.uses_runtime_options() {
+          state.hub.runtime_options_conn_id(&job.server)?;
+        }
+      }
+      Step::ResumeProtected { service, .. } => {
+        let world =
+          crate::world::World::from_rows(db::all_resources(c)?)?;
+        let row = world
+          .services
+          .get(service)
+          .ok_or_else(|| crate::api::service_not_found(service))?;
+        state.hub.crash_guard_conn_id(&row.spec.server)?;
+      }
+      _ => {}
+    }
+  }
+  Ok(())
+}
+
 pub(crate) fn require_fresh(
   c: &rusqlite::Connection,
   key: &db::CredentialsKey,
@@ -915,6 +982,15 @@ pub(crate) fn require_fresh(
     .into_iter()
     .collect::<Vec<_>>();
   if !stale.is_empty() {
+    if plan.service_action.is_some() {
+      return Err(
+        ApiError::new(
+          ErrorCode::PlanStale,
+          "服务操作的计划基线发生变化",
+        )
+        .with_hint("重新执行原命令生成计划"),
+      );
+    }
     return Err(
       ApiError::new(
         ErrorCode::PlanStale,
@@ -974,17 +1050,28 @@ fn check_base_instances(
   Ok(())
 }
 
-fn apply_writes(
+pub(crate) fn apply_writes(
   tx: &rusqlite::Transaction<'_>,
   plan: &Plan,
   writes: &[crate::db::Write],
   admin: bool,
-  (state, steps): (&AppState, &[StepPlan]),
+  waiting: Option<(&AppState, &[StepPlan])>,
 ) -> Result<crate::rules::lifecycle::Changes, ApiError> {
   let current =
     crate::world::World::from_rows(db::all_resources(tx)?)?;
   crate::secret_policy::require_apply(plan, &current, admin)?;
+  let reserved = crate::pending::load(tx)?.clones;
+  crate::crash_guard::check_writes(tx, writes)?;
   for write in writes {
+    if let Write::Upsert { kind, name, .. } = write
+      && kind == crate::world::KIND_SERVICE
+      && reserved.contains(name)
+    {
+      return Err(ApiError::new(
+        ErrorCode::Conflict,
+        "克隆目标仍由原执行保留",
+      ));
+    }
     db::apply_write(tx, write)?;
     match write {
       Write::Delete { kind, name }
@@ -1025,22 +1112,23 @@ fn apply_writes(
     &desired,
     &crate::app_accounts::account_links(tx)?,
   )?;
-  for step in steps {
-    let (service, destination) = match &step.step {
-      Step::VolumeSync { service, to, .. } => (service, Some(to)),
-      Step::ServiceUp { service, .. } | Step::Rebuild { service } => {
-        (service, None)
+  if let Some((state, steps)) = waiting {
+    for step in steps {
+      let (service, destination) = match &step.step {
+        Step::VolumeSync { service, to, .. } => (service, Some(to)),
+        Step::ServiceUp { service, .. }
+        | Step::Rebuild { service } => (service, None),
+        _ => continue,
+      };
+      if let Some(row) = desired.services.get(service)
+        && !row.spec.stopped
+      {
+        crate::wait_for::require_agent(
+          state,
+          destination.unwrap_or(&row.spec.server),
+          &row.spec,
+        )?;
       }
-      _ => continue,
-    };
-    if let Some(row) = desired.services.get(service)
-      && !row.spec.stopped
-    {
-      crate::wait_for::require_agent(
-        state,
-        destination.unwrap_or(&row.spec.server),
-        &row.spec,
-      )?;
     }
   }
   Ok(crate::rules::lifecycle::Changes::between(
@@ -1093,6 +1181,14 @@ pub(crate) async fn lock_task(
     _ => LockSpec::apply(run_scope::step_services(step)),
   };
   let guard = state.locks.acquire(spec, title)?;
+  if !matches!(
+    step,
+    Step::CrashStop { .. } | Step::ResumeProtected { .. }
+  ) {
+    for service in run_scope::step_services(step) {
+      crate::crash_guard::require_task_idle(state, &service).await?;
+    }
+  }
   match step {
     Step::BackupMove { from, to, .. } => {
       guard.reserve_backup_target(from.clone())?;
@@ -1813,7 +1909,39 @@ async fn run_step_with_dns(
   }
   let world = &snap.world;
   let net = snap.net(world);
+  if !matches!(
+    step,
+    Step::CrashStop { .. } | Step::ResumeProtected { .. }
+  ) {
+    for service in run_scope::step_services(step) {
+      crate::crash_guard::require_idle(&snap, &service)?;
+    }
+  }
   match step {
+    Step::CrashStop { service, evidence } => {
+      crate::crash_guard::stop(
+        state, &snap, run_id, service, evidence, progress, cancel,
+      )
+      .await?;
+    }
+    Step::ResumeProtected { service, instance } => {
+      crate::crash_guard::resume(
+        state, &snap, run_id, service, instance, progress, cancel,
+      )
+      .await?;
+    }
+    Step::RenameService { job } => {
+      crate::planner::service_rename::execute(
+        state, &snap, run_id, job, progress, cancel,
+      )
+      .await?;
+    }
+    Step::CloneData { job } => {
+      crate::planner::service_clone::execute(
+        state, &snap, run_id, job, progress, cancel,
+      )
+      .await?;
+    }
     Step::EnsureDirs { server, dirs, .. } => {
       state
         .hub
@@ -3786,6 +3914,25 @@ async fn project_stop_start(
   progress: &ProgressFn,
   cancel: &CancellationToken,
 ) -> Result<(), ApiError> {
+  project_stop_start_on(
+    state,
+    (server, None),
+    service,
+    start,
+    progress,
+    cancel,
+  )
+  .await
+}
+
+pub(crate) async fn project_stop_start_on(
+  state: &AppState,
+  (server, conn): (&str, Option<u64>),
+  service: &str,
+  start: bool,
+  progress: &ProgressFn,
+  cancel: &CancellationToken,
+) -> Result<(), ApiError> {
   let op = if start {
     AgentOp::ProjectStart {
       project: service.to_string(),
@@ -3796,7 +3943,28 @@ async fn project_stop_start(
       project: service.to_string(),
     }
   };
-  let done: bool = if start {
+  let done: bool = if let Some(conn) = conn {
+    let grace = if start {
+      None
+    } else {
+      project_grace(state, server, service).await?
+    };
+    if grace.is_some_and(|g| g > 150)
+      && state.hub.deploy_v2_conn_id(server, "优雅停机超时")? != conn
+    {
+      return Err(crate::hub::offline(server));
+    }
+    state
+      .hub
+      .call_bound(
+        (server, conn),
+        op,
+        stop_rpc_timeout(STOP_START_TIMEOUT, grace),
+        Some(progress.clone()),
+        cancel,
+      )
+      .await?
+  } else if start {
     state
       .hub
       .call(
@@ -5568,6 +5736,7 @@ mod tests {
       created_at: now,
       expires_at: now,
       base_versions: Default::default(),
+      service_action: None,
       inputs: None,
       items: vec![wharf_api_types::plan::PlanItem {
         id: 1,

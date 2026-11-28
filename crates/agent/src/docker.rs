@@ -229,16 +229,23 @@ impl Docker {
         .collect();
       projects.extend(discovered);
     }
-    let stopped: Vec<_> = projects
-      .iter()
-      .filter_map(|p| by_project.get(p))
-      .flatten()
-      .filter(|c| c.state != "running")
-      .map(|c| c.name.as_str())
-      .collect();
-    let finished =
-      crate::docker_observation::inspect_stopped(self, &stopped, ctx)
-        .await;
+    let observed: Vec<_> = {
+      let containers =
+        projects.iter().filter_map(|p| by_project.get(p)).flatten();
+      containers
+        .clone()
+        .filter(|c| c.state != "running")
+        .chain(containers.filter(|c| c.state == "running").take(512))
+        .map(|c| c.name.as_str())
+        .collect()
+    };
+    let mut finished = std::collections::BTreeMap::new();
+    for batch in observed.chunks(128) {
+      finished.extend(
+        crate::docker_observation::inspect_stopped(self, batch, ctx)
+          .await,
+      );
+    }
     Ok(
       projects
         .iter()
@@ -292,6 +299,16 @@ impl Docker {
                 restart_policy: finished
                   .get(&c.name)
                   .and_then(|o| o.restart_policy.clone()),
+                container_id: finished
+                  .get(&c.name)
+                  .and_then(|o| o.container_id.clone()),
+                restart_count: finished
+                  .get(&c.name)
+                  .and_then(|o| o.restart_count),
+                restart_observed_at: finished
+                  .get(&c.name)
+                  .filter(|o| o.container_id.is_some())
+                  .map(|o| o.observed_at),
                 ..c
               })
               .collect(),
@@ -2000,6 +2017,9 @@ pub fn parse_ps(
         finished_at: None,
         exit_code: None,
         restart_policy: None,
+        container_id: None,
+        restart_count: None,
+        restart_observed_at: None,
         working_dir: labels
           .get("com.docker.compose.project.working_dir")
           .map(|w| w.to_string()),
@@ -2656,6 +2676,38 @@ fn parse_running_images_maps_multiple_containers() {
       ("db:latest".into(), "id3".into())
     ])
   );
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn status_observes_completed_init_after_running_container_budget()
+ {
+  let (_dir, docker) = fake_docker(
+    r#"
+case "$1" in
+  ps)
+    i=0
+    while [ "$i" -lt 513 ]; do
+      printf '{"Names":"app-%d","State":"running","Labels":"com.docker.compose.project=app,com.docker.compose.service=app"}\n' "$i"
+      i=$((i + 1))
+    done
+    printf '{"Names":"app-init","State":"exited","Labels":"com.docker.compose.project=app,com.docker.compose.service=init"}\n'
+    ;;
+  inspect)
+    for name in "$@"; do
+      if [ "$name" = app-init ]; then
+        printf '/app-init\t2026-01-01T00:00:00Z\t0\tno\t0\n'
+      fi
+    done
+    ;;
+  *) exit 1;;
+esac
+"#,
+  );
+  let status =
+    docker.one_status("app", &Ctx::detached()).await.unwrap();
+  assert!(status.containers.last().unwrap().is_completed_init());
+  assert!(status.all_running());
 }
 
 #[tokio::test]

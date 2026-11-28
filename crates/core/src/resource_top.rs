@@ -22,6 +22,9 @@ use crate::{
   snapshot, state::AppState,
 };
 
+mod limits;
+pub(crate) use limits::get as suggest_limits;
+
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Deserialize)]

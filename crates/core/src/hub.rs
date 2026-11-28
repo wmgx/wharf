@@ -100,6 +100,9 @@ struct Conn {
   safe_adopt: bool,
   safe_migrate: bool,
   migrate_v2: bool,
+  service_copy: bool,
+  crash_guard: bool,
+  service_repair: bool,
   data_ops: bool,
   safe_backup: bool,
   backup_move: bool,
@@ -432,6 +435,72 @@ impl Hub {
       .ok_or_else(|| offline(server))?;
     if conn.upgrade_only || !conn.data_ops {
       return Err(data_ops_required(server));
+    }
+    Ok(conn.conn_id)
+  }
+
+  pub(crate) fn service_repair_conn_id(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.service_repair {
+      return Err(
+        ApiError::new(ErrorCode::AgentFailed, "agent 不支持服务修复")
+          .with_hint(format!(
+            "运行 wharf server upgrade {server} 后重试"
+          )),
+      );
+    }
+    Ok(conn.conn_id)
+  }
+
+  pub(crate) fn crash_guard_conn_id(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.crash_guard {
+      return Err(
+        ApiError::new(
+          ErrorCode::AgentFailed,
+          "agent 不支持重启循环保护",
+        )
+        .with_hint(format!(
+          "运行 wharf server upgrade {server} 后重试"
+        )),
+      );
+    }
+    Ok(conn.conn_id)
+  }
+
+  pub(crate) fn service_copy_conn_id(
+    &self,
+    server: &str,
+  ) -> Result<u64, ApiError> {
+    let conns = lock(&self.conns);
+    let conn = conns
+      .get(server)
+      .filter(|conn| !conn.closed.is_cancelled())
+      .ok_or_else(|| offline(server))?;
+    if conn.upgrade_only || !conn.service_copy {
+      return Err(
+        ApiError::new(
+          ErrorCode::AgentFailed,
+          format!("服务器 {server} 的 agent 不支持服务复制"),
+        )
+        .with_hint(format!(
+          "运行 wharf server upgrade {server} 后重试"
+        )),
+      );
     }
     Ok(conn.conn_id)
   }
@@ -1188,6 +1257,41 @@ impl Hub {
     {
       return Err(data_ops_required(server));
     }
+    if matches!(&op, AgentOp::ServiceRepair(_))
+      && (conn.upgrade_only || !conn.service_repair)
+    {
+      return Err(
+        ApiError::new(ErrorCode::AgentFailed, "agent 不支持服务修复")
+          .with_hint(format!(
+            "运行 wharf server upgrade {server} 后重试"
+          )),
+      );
+    }
+    if matches!(&op, AgentOp::CrashGuard(_))
+      && (conn.upgrade_only || !conn.crash_guard)
+    {
+      return Err(
+        ApiError::new(
+          ErrorCode::AgentFailed,
+          "agent 不支持重启循环保护",
+        )
+        .with_hint(format!(
+          "运行 wharf server upgrade {server} 后重试"
+        )),
+      );
+    }
+    if (matches!(&op, AgentOp::ServiceCopy(_))
+      || matches!(&op, AgentOp::SyncServe(job) if job.kind == wharf_api_types::agent::SyncKind::CloneData)
+      || matches!(&op, AgentOp::SyncPush(job) if job.kind == wharf_api_types::agent::SyncKind::CloneSource))
+      && (conn.upgrade_only || !conn.service_copy)
+    {
+      return Err(
+        ApiError::new(ErrorCode::AgentFailed, "agent 不支持服务复制")
+          .with_hint(format!(
+            "运行 wharf server upgrade {server} 后重试"
+          )),
+      );
+    }
     if (matches!(&op, AgentOp::DirSpace { .. })
       || matches!(&op, AgentOp::SyncPush(p) if p.bwlimit_kbps.is_some())
       || matches!(&op, AgentOp::Restic(j) if j.bwlimit_kbps.is_some()))
@@ -1719,6 +1823,9 @@ async fn handle_socket(
     safe_adopt,
     safe_migrate,
     migrate_v2,
+    service_copy,
+    crash_guard,
+    service_repair,
     data_ops,
     safe_backup,
     backup_move,
@@ -1911,6 +2018,9 @@ async fn handle_socket(
     safe_adopt,
     safe_migrate,
     migrate_v2,
+    service_copy,
+    crash_guard,
+    service_repair,
     data_ops,
     safe_backup,
     backup_move,

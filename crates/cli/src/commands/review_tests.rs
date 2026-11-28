@@ -726,3 +726,25 @@ async fn quiet_import_and_link_rotation_print_only_ids() {
   assert_eq!(code, 0, "{stderr}");
   assert_eq!(stdout, "r_fixture\n");
 }
+
+#[tokio::test]
+async fn repair_json_preserves_business_exit_without_signaling_confirmation()
+ {
+  let (code, stdout, stderr, _) = fixture_output(
+    &["--json", "service", "repair", "app", "--", "sh", "-c", "exit 2"],
+    vec![(
+      "POST /api/services/app/repair ",
+      json!({
+        "service":"app",
+        "execution":{
+          "service":"app","server":"s1","container":"repair",
+          "exit_code":2,"stdout":"","stderr":"","truncated":false,"duration_ms":1
+        }
+      }),
+    )],
+  ).await;
+  assert_eq!(code, 1);
+  assert!(stderr.is_empty());
+  let view: Value = serde_json::from_str(&stdout).unwrap();
+  assert_eq!(view["execution"]["exit_code"], 2);
+}

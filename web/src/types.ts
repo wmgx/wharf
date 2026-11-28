@@ -676,6 +676,7 @@ export interface DataView {
 
 /** 分层状态：期望、已应用、实际、健康、执行，summary 是按优先级挑出的一句话。 */
 export interface ServiceStatus {
+  recovery?: Gen.ServiceStatus["recovery"];
   want_running: boolean;
   desired_hash?: string;
   applied?: { hash: string; at: string };

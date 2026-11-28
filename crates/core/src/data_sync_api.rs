@@ -403,6 +403,7 @@ pub(crate) async fn push(
     crate::locks::LockSpec::apply([name.clone()]),
     "推送服务数据",
   )?;
+  crate::crash_guard::require_data_writable(&state, &name).await?;
   crate::pending::source_changed(&state, &name).await?;
   let tx = Transfer::open(state, name).await?;
   let _guard = tx.cancel.clone().drop_guard();

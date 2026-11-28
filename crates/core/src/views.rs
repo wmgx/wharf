@@ -369,23 +369,36 @@ pub fn service_view(
     )
     .ok()
   });
-  let status = live.map(|live| {
-    let project = live
-      .get(&row.spec.server)
-      .map(|r| r.as_ref().map(|states| states.get(name)));
-    let missing = empty_project(name);
-    let project = project.map(|r| r.map(|p| p.unwrap_or(&missing)));
-    crate::status::service_status(crate::status::Inputs {
-      want_running: !row.spec.stopped,
-      expected_components:
-        &crate::render::service_expected_components(name, &row.spec),
-      desired_hash: hash.clone(),
-      applied: snap.applied.get(name),
-      live: project.as_ref(),
-      last_op: snap.ops.get(name),
-      observed_at: observed_at(&row.spec.server),
-    })
-  });
+  let status =
+    live.map(|live| {
+      let project = live
+        .get(&row.spec.server)
+        .map(|r| r.as_ref().map(|states| states.get(name)));
+      let missing = empty_project(name);
+      let project = project.map(|r| r.map(|p| p.unwrap_or(&missing)));
+      let mut status =
+        crate::status::service_status(crate::status::Inputs {
+          want_running: !row.spec.stopped,
+          expected_components:
+            &crate::render::service_expected_components(
+              name, &row.spec,
+            ),
+          desired_hash: hash.clone(),
+          applied: snap.applied.get(name),
+          live: project.as_ref(),
+          last_op: snap.ops.get(name),
+          observed_at: observed_at(&row.spec.server),
+        });
+      if let Some(recovery) = snap.recovery.get(name) {
+        status.recovery = Some(recovery.phase.clone());
+        if let Some(summary) =
+          crate::crash_guard::summary(&recovery.phase)
+        {
+          status.summary = summary.into();
+        }
+      }
+      status
+    });
   let containers = live
     .and_then(|l| l.get(&row.spec.server))
     .and_then(|r| r.as_ref().ok())
@@ -846,6 +859,7 @@ pub async fn status(
   issues.extend(crate::mem_forecast::issues(&snap.world));
   issues.extend(crate::clock::issues(&snap.world));
   issues.extend(crate::oom::issues(&snap.world));
+  issues.extend(crate::crash_guard::issues(&snap));
   issues.extend(crate::traffic::issues(&snap.world));
   issues.extend(crate::baseline::issues());
   issues.extend(crate::host_units::issues(&snap.world));

@@ -88,6 +88,7 @@ fn plan(
     created_at: Utc::now(),
     expires_at: Utc::now(),
     base_versions: Default::default(),
+    service_action: None,
     inputs: None,
     items,
     warnings: vec![],

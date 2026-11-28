@@ -98,6 +98,28 @@ fn walk(
       };
     }
     match command.as_str() {
+      "service repair" => {
+        entry["flag_variants"] = json!({
+          "--status": {"effect": "read", "perms": ["read"], "returns": "service-repair"},
+          "command": {"perms": ["admin", "apply", "confirm", "exec"]}
+        });
+      }
+      "service crash-guard" => {
+        entry["flag_variants"] = json!({
+          "--on": {"effect": "plan", "perms": ["plan"], "returns": "plan"},
+          "--off": {"effect": "plan", "perms": ["plan"], "returns": "plan"}
+        });
+      }
+      "top" => {
+        entry["flag_variants"] = json!({
+          "--suggest-limits": {"effect": "read", "perms": ["read"], "returns": "limits-suggest"}
+        });
+      }
+      "service restart" | "service stop" | "service update" => {
+        entry["flag_variants"] = json!({
+          "--tag": {"effect": "plan", "perms": ["plan"], "returns": "plan"}
+        });
+      }
       "var set" => {
         entry["returns_without_value"] = json!("var");
       }
@@ -279,6 +301,14 @@ fn effect(
       return ("plan", &["plan", "host", "admin"]);
     }
     "service import" => return ("plan", &["plan", "host"]),
+    "service export-compose" | "service crash-guard" => {
+      return ("read", &["read"]);
+    }
+    "service clone" => return ("plan", &["plan"]),
+    "service rename" => return ("plan", &["plan", "admin"]),
+    "service repair" => {
+      return ("direct", &["admin", "apply", "confirm"]);
+    }
     "import" => return ("plan", &["admin", "plan"]),
     _ => {}
   }
@@ -400,7 +430,7 @@ fn returns(command: &str) -> Option<&'static str> {
     "data push" => "data-push-plan",
     "import" => "bundle-import-preview",
     "service adopt-data" | "service move" | "server set"
-    | "service import" => "plan",
+    | "service import" | "service clone" | "service rename" => "plan",
     "service files" | "service files ls" => "file_entry",
     "service files tail" => "file_tail",
     "service files grep" => "file_grep",
@@ -430,6 +460,9 @@ fn returns(command: &str) -> Option<&'static str> {
     "service exec" => "service_exec",
     "service render" => "service_render",
     "service restart-schedule" => "restart_schedule",
+    "service crash-guard" => "crash-guard",
+    "service repair" => "service-repair",
+    "service export-compose" => "service_compose_export",
     "var get" | "var list" => "var",
     "var set" | "var rm" => "plan",
     "service limits" => "service_limits",

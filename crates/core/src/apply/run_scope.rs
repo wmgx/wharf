@@ -42,10 +42,16 @@ pub(super) fn step_services(step: &Step) -> Vec<String> {
     | Step::ServiceRestart { service, .. }
     | Step::ServiceStart { service, .. }
     | Step::ServiceStop { service }
+    | Step::CrashStop { service, .. }
+    | Step::ResumeProtected { service, .. }
     | Step::ServiceUp { service, .. }
     | Step::ServiceDown { service, .. }
     | Step::CleanupData { service, .. }
     | Step::VolumeSync { service, .. } => vec![service.clone()],
+    Step::RenameService { job } => job.services.clone(),
+    Step::CloneData { job } => {
+      vec![job.source.clone(), job.target.clone()]
+    }
     Step::AdoptData { job, .. } => vec![job.service.clone()],
     Step::CleanupArchive { entry, .. } => {
       entry.service.iter().cloned().collect()
@@ -94,6 +100,7 @@ pub async fn load_plan_for(
       &routes,
     );
   }
+  token_scope::redact_plan_baseline(auth, &mut plan);
   Ok(plan)
 }
 

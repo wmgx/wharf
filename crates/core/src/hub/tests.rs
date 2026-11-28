@@ -45,6 +45,9 @@ fn old_hello_has_no_host_shell_capability() {
     safe_gateway,
     safe_adopt,
     safe_migrate,
+    service_copy,
+    crash_guard,
+    service_repair,
     safe_backup,
     backup_move,
     backup_v2,
@@ -81,6 +84,7 @@ fn old_hello_has_no_host_shell_capability() {
   assert!(!safe_gateway);
   assert!(!safe_adopt);
   assert!(!safe_migrate);
+  assert!(!service_copy && !crash_guard && !service_repair);
   assert!(!safe_backup);
   assert!(!backup_move);
   assert!(!backup_v2);
@@ -149,6 +153,9 @@ fn old_core_ignores_new_hello_capability() {
     safe_adopt: false,
     safe_migrate: true,
     migrate_v2: false,
+    service_copy: false,
+    crash_guard: false,
+    service_repair: false,
     data_ops: false,
     safe_backup: true,
     backup_move: false,
@@ -181,6 +188,18 @@ impl Hub {
       false,
       handle,
     );
+  }
+
+  pub(crate) fn enable_mock_crash_guard(&self, server: &str) {
+    lock(&self.conns).get_mut(server).unwrap().crash_guard = true;
+  }
+
+  pub(crate) fn enable_mock_service_copy(&self, server: &str) {
+    let mut conns = lock(&self.conns);
+    let conn = conns.get_mut(server).unwrap();
+    conn.service_copy = true;
+    conn.migrate_v2 = true;
+    conn.shared_volumes = true;
   }
 
   pub(crate) fn disable_mock_runtime_options(&self, server: &str) {
@@ -430,6 +449,9 @@ impl Hub {
         safe_adopt: false,
         safe_migrate: false,
         migrate_v2: false,
+        service_copy: false,
+        crash_guard: false,
+        service_repair: false,
         data_ops: false,
         safe_backup: false,
         backup_move: false,
@@ -592,6 +614,9 @@ async fn agent_upgrade_needs_no_bound_core_server_or_probe_support() {
     safe_adopt: false,
     safe_migrate: false,
     migrate_v2: false,
+    service_copy: false,
+    crash_guard: false,
+    service_repair: false,
     data_ops: false,
     safe_backup: false,
     backup_move: false,
@@ -680,6 +705,9 @@ fn probe_connection(
     safe_adopt: false,
     safe_migrate: false,
     migrate_v2: false,
+    service_copy: false,
+    crash_guard: false,
+    service_repair: false,
     data_ops: false,
     safe_backup: false,
     backup_move: false,

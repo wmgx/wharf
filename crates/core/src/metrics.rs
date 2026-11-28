@@ -163,6 +163,24 @@ pub async fn record_report_at(
       }
       for (p, v) in &m.projects {
         let p = p.as_str();
+        if let Some(cores) = m.cpu_cores {
+          insert(
+            &tx,
+            at,
+            &[(
+              "svc.cpu.cores",
+              p,
+              f64::from(v.cpu) * f64::from(cores) / 100.0,
+            )],
+          )?;
+        }
+        if let Some(count) = v.containers {
+          insert(
+            &tx,
+            at,
+            &[("svc.containers.max", p, f64::from(count))],
+          )?;
+        }
         record_components(&tx, p, s, at, &v.components)?;
         insert(
           &tx,

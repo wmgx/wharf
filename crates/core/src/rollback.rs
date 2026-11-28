@@ -142,10 +142,10 @@ fn select(
 ) -> Result<Row, ApiError> {
   let history = format!("wharf service history {name}");
   if let Some(id) = to {
-    let (row, started, owner) = c.query_row(
-      "SELECT id, hash, spec, images, created_at, commit_sha, started, instance_id FROM deployments
+    let (row, started, owner, original_name) = c.query_row(
+      "SELECT id, hash, spec, images, created_at, commit_sha, started, instance_id, original_service FROM deployments
        WHERE id = ?1 AND service = ?2",
-      params![id, name], |r| Ok((deployment(r)?, r.get::<_, bool>(6)?, r.get::<_, Option<String>>(7)?)),
+      params![id, name], |r| Ok((deployment(r)?, r.get::<_, bool>(6)?, r.get::<_, Option<String>>(7)?, r.get::<_, Option<String>>(8)?)),
     ).optional().map_err(sql_err)?.ok_or_else(|| ApiError::not_found(format!(
       "服务 {name} 没有 id 为 {id} 的部署记录")).suggest(&history))?;
     if owner.as_deref() != Some(instance) {
@@ -154,6 +154,14 @@ fn select(
           "部署 #{id} 属于已删除的旧服务实例，不能回滚到它"
         ))
         .with_hint(format!("运行 {history} 查看当前服务的可回滚版本"))
+        .suggest(history),
+      );
+    }
+    if original_name.is_some() {
+      return Err(
+        ApiError::invalid(format!(
+          "部署 #{id} 使用改名前的项目，不能回滚"
+        ))
         .suggest(history),
       );
     }
@@ -170,7 +178,7 @@ fn select(
   }
   let mut stmt = c.prepare(
     "SELECT id, hash, spec, images, created_at, commit_sha FROM deployments
-     WHERE service = ?1 AND instance_id = ?2 AND started = 1 ORDER BY id DESC LIMIT 200",
+     WHERE service = ?1 AND instance_id = ?2 AND started = 1 AND original_service IS NULL ORDER BY id DESC LIMIT 200",
   ).map_err(sql_err)?;
   let mut rows = stmt
     .query_map(params![name, instance], deployment)
@@ -199,6 +207,8 @@ fn merge_settings(
   spec.server.clone_from(&current.server);
   spec.backup.clone_from(&current.backup);
   spec.stopped = current.stopped;
+  spec.crash_guard = current.crash_guard;
+  spec.tags.clone_from(&current.tags);
   spec.start_timeout_secs = current.start_timeout_secs;
   spec.lan = current.lan;
   spec.extra_hosts.clone_from(&current.extra_hosts);
@@ -429,6 +439,8 @@ mod tests {
       let select = |to| super::select(c, "reader", "svc_new", to);
       assert_eq!(select(None)?.0, 203);
       assert_eq!(select(Some(1))?.0, 1);
+      c.execute("UPDATE deployments SET original_service='before' WHERE id=1",[]).map_err(sql_err)?;
+      assert!(select(Some(1)).unwrap_err().message.contains("改名前"));
       assert!(select(Some(2)).unwrap_err().message.contains("旧服务实例"));
       assert!(select(Some(205)).unwrap_err().message.contains("从未启动"));
       assert_eq!(select(Some(206)).unwrap_err().code, wharf_api_types::ErrorCode::NotFound);

@@ -183,7 +183,53 @@ async fn monitoring_only_plan_skips_deploy_but_heartbeat_changes_compose()
     assert_eq!(result.plan.items[0].layer, Layer::Config);
     assert!(result.steps.is_empty());
   }
+  let tags = |add: Vec<String>| {
+    crate::planner::make_plan(
+      &state,
+      PlanRequest {
+        changes: vec![Change::EditServiceTags {
+          name: "app".into(),
+          add,
+          remove: vec!["unused".into()],
+        }],
+        ..Default::default()
+      },
+    )
+  };
+  let before = crate::snapshot::load(&state.db).await.unwrap();
+  let tagged = tags(vec![" 试验 ".into()]).await.unwrap();
+  assert_eq!(tagged.plan.items.len(), 1);
+  assert_eq!(tagged.plan.items[0].layer, Layer::Config);
+  assert!(tagged.steps.is_empty());
+  let writes = tagged.writes;
+  assert_eq!(writes.len(), 1);
+  state
+    .db
+    .call(move |c| crate::db::apply_write(c, &writes[0]))
+    .await
+    .unwrap();
+  let after = crate::snapshot::load(&state.db).await.unwrap();
+  let hash = |snap: &crate::snapshot::Snapshot| {
+    crate::snapshot::service_hash(
+      &snap.world,
+      &snap.net(&snap.world),
+      "app",
+      &snap.render_values(&snap.world, "app"),
+      None,
+    )
+    .unwrap()
+  };
+  assert_eq!(hash(&before), hash(&after));
+  assert_eq!(
+    after.world.services["app"].spec.tags.iter().next().unwrap(),
+    "试验"
+  );
+  let unchanged = tags(vec!["试验".into()]).await.unwrap();
+  assert!(unchanged.plan.items.is_empty());
+  assert!(unchanged.steps.is_empty());
+  assert!(unchanged.writes.is_empty());
   let result = plan(ServiceSpec {
+    tags: after.world.services["app"].spec.tags.clone(),
     heartbeat: Some(
       serde_json::from_value(json!({"every_mins": 10})).unwrap(),
     ),

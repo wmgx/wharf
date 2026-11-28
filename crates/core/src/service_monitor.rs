@@ -140,6 +140,8 @@ pub fn config_only(old: &ServiceRow, new: &ServiceRow) -> bool {
     .restart_schedule
     .clone_from(&old.spec.restart_schedule);
   stripped.spec.extra_logs.clone_from(&old.spec.extra_logs);
+  stripped.spec.tags.clone_from(&old.spec.tags);
+  stripped.spec.crash_guard = old.spec.crash_guard;
   stripped.spec.log_alerts.clone_from(&old.spec.log_alerts);
   stripped.spec.port_checks.clone_from(&old.spec.port_checks);
   stripped
