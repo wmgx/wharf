@@ -14,12 +14,12 @@ description: 用 wharf CLI 管理服务器、服务、域名、网关、备份�
 3. 删除、覆盖、开放公网等需要确认时，把 `needs_confirm` 或错误 `details` 给用户看。获准后逐项加 `--confirm <地址>`。
 4. 出错看 `code`、`message`、`hint`、`suggest`。按原因处理，避免重复提交同一变更。
 5. 保护令牌和密钥。应用密码存入 `secret`，用 `[[NAME]]` 引用，文件挂载用 `[[FILE:NAME]]`。避免在对话、仓库和日志里留下明文。
-6. `direct` 写操作会直接执行，即使省略 `--apply`。先用同组的 `show`、`list`、`get` 或明确说明为只读的预览核对对象与影响，再取得授权。遇到带标志才写入的命令，先用 `wharf schema <命令路径>` 核对参数说明。改动可加 `--reason '<原因>'`，计划可加 `--note '<备注>'`。
+6. `direct` 写操作会直接执行，即使省略 `--apply`。先用同组的 `show`、`list`、`get` 或明确说明为只读的 `--dry-run` 核对对象与影响，再取得授权。遇到带标志才写入的命令，先用 `wharf schema <命令路径>` 核对参数说明。改动可加 `--reason '<原因>'`，计划可加 `--note '<备注>'`。
 7. 宿主机执行、清理、基线调整、升级等操作先说明影响并取得授权。宿主机操作还需要令牌有 `host` 权限且服务器打开相应能力。
 8. `--port`、`--path` 替换整个列表。单独增删用 `--add-port` / `--rm-port` 或 `--add-path` / `--rm-path`。
 
 退出码：`0` 成功，`1` 出错，`2` 需确认，`3` 计划过期（重新 plan），`4` 部分失败。
-`server exec` 和 `service exec` 发起成功后透传远端退出码，包括 JSON 模式。
+`server exec` 和 `service exec` 会立即运行远端命令，并透传远端退出码，包括 JSON 模式。排障先用 `wharf server host-units s1 --json` 或 `wharf service show app --json` 确认目标和状态。
 
 ## 登录和状态
 
