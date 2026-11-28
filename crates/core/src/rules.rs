@@ -555,9 +555,8 @@ pub(crate) async fn observe_at(
         (true, (rule.ok)(&ctx))
       }
     };
-    if !state.is_safe_mode()
-      && (notify::transition(state, &(rule.key)(subject), ok).await
-        || (!ok && suppress::confirm_sample(state, &fkey).await))
+    if notify::transition(state, &(rule.key)(subject), ok).await
+      || (!ok && suppress::confirm_sample(state, &fkey).await)
     {
       let event = if ok && rule.id == "server_offline" {
         // 开始触发前已经连续离线了 for_n 分钟。
@@ -618,9 +617,6 @@ async fn notice_at(
   ok: bool,
   event: Event,
 ) {
-  if state.is_safe_mode() {
-    return;
-  }
   if let Some(k) = key
     && !notify::transition(state, k, ok).await
   {

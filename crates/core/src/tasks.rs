@@ -645,7 +645,9 @@ pub(crate) async fn notify_result(
   output: &str,
   target: Option<&str>,
 ) {
-  if matches!(status, TaskStatus::Skipped | TaskStatus::Cancelled) {
+  if state.is_safe_mode()
+    || matches!(status, TaskStatus::Skipped | TaskStatus::Cancelled)
+  {
     return;
   }
   let ok = status == TaskStatus::Succeeded;

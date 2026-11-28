@@ -284,6 +284,9 @@ pub async fn transition(
   key: &str,
   ok: bool,
 ) -> bool {
+  if state.is_safe_mode() {
+    return false;
+  }
   let key = key.to_string();
   state
     .db
