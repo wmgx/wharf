@@ -374,7 +374,8 @@ async fn execute(
   }
   let plan: Plan = c
     .post(
-      "/api/plan",
+      crate::plan_cmd::brief_path("/api/plan", args.flags.brief)
+        .as_ref(),
       &PlanRequest {
         changes: vec![Change::UpsertService {
           name: service.name,
@@ -397,9 +398,22 @@ async fn execute(
     .filter(|a| !args.flags.confirm.contains(a))
     .collect::<Vec<_>>();
   if !missing.is_empty() {
-    return Err(ApiError::new(ErrorCode::ConfirmRequired, "计划需要确认")
-      .with_details(json!({ "plan_id": plan.plan_id, "expires_at": plan.expires_at, "items": missing, "warnings": plan.warnings, "secrets": secrets }))
-      .suggest(format!("wharf apply {}{}", plan.plan_id, missing.iter().map(|a| format!(" --confirm {a}")).collect::<String>())).into());
+    let mut details =
+      wharf_api_types::plan::confirm_details(&plan, &missing);
+    details["secrets"] = json!(secrets);
+    return Err(
+      ApiError::new(ErrorCode::ConfirmRequired, "计划需要确认")
+        .with_details(details)
+        .suggest(format!(
+          "wharf apply {}{}",
+          plan.plan_id,
+          missing
+            .iter()
+            .map(|a| format!(" --confirm {a}"))
+            .collect::<String>()
+        ))
+        .into(),
+    );
   }
   let applying: ApplyResponse = c
     .post(
